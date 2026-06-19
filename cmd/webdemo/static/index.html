@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>go-pack-bins · Packing Demo</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e2e4ec;
+    --muted: #7b7f92;
+    --accent: #6c8fff;
+    --accent2: #a78bfa;
+    --good: #34d399;
+    --warn: #f59e0b;
+    --bad: #f87171;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+    --radius: 6px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  /* ── top bar ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+  }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  /* ── layout ── */
+  .workspace {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  /* ── sidebar ── */
+  .sidebar {
+    width: 320px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .sidebar-body::-webkit-scrollbar { width: 6px; }
+  .sidebar-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .sidebar-footer {
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+  }
+  /* ── sections ── */
+  .section-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  /* ── form controls ── */
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  input, select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 6px 9px;
+    outline: none;
+    transition: border-color 0.15s;
+    width: 100%;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  select option { background: var(--surface); }
+  .row { display: flex; gap: 8px; }
+  .row .field { flex: 1; }
+  /* ── item list ── */
+  .item-list { display: flex; flex-direction: column; gap: 6px; }
+  .item-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 7px 10px;
+    font-size: 12px;
+    font-family: var(--mono);
+  }
+  .item-row .item-id {
+    flex: 0 0 40px;
+    color: var(--accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .item-row .item-dims { color: var(--muted); flex: 1; }
+  .item-row .remove-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+    line-height: 1;
+    transition: color 0.1s;
+  }
+  .item-row .remove-btn:hover { color: var(--bad); }
+  /* ── buttons ── */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: var(--radius);
+    border: none;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .btn-ghost:hover { background: var(--border); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { opacity: 0.88; }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  /* ── main canvas area ── */
+  .canvas-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .viz-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .viz-toolbar .stat {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .viz-toolbar .stat strong { color: var(--text); }
+  .bin-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .bin-tab {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+  .bin-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .viz-panels {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+  /* ── visualisers ── */
+  #canvas-2d {
+    display: block;
+    position: absolute;
+    inset: 0;
+  }
+  #canvas-3d {
+    display: block;
+    position: absolute;
+    inset: 0;
+  }
+  .empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--muted);
+  }
+  .empty-state .icon { font-size: 40px; }
+  .empty-state p { font-size: 13px; }
+  /* ── error toast ── */
+  #error-toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #3d1a1a;
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    max-width: 340px;
+    display: none;
+    z-index: 100;
+  }
+  /* ── checkbox ── */
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-row input[type=checkbox] {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  /* ── legend ── */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+    max-height: 80px;
+    overflow-y: auto;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+  }
+  .legend-swatch {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>go-pack-bins <span>· packing demo</span></h1>
+</header>
+
+<div class="workspace">
+
+  <!-- ── sidebar ── -->
+  <aside class="sidebar">
+    <div class="sidebar-body">
+
+      <!-- mode & algorithm -->
+      <div>
+        <div class="section-label">Mode</div>
+        <div class="row">
+          <div class="field">
+            <label>Dimensions</label>
+            <select id="mode" onchange="onModeChange()">
+              <option value="1d">1D</option>
+              <option value="2d" selected>2D</option>
+              <option value="3d">3D</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Algorithm</label>
+            <select id="algorithm" onchange="scheduleAutoPack()"></select>
+          </div>
+        </div>
+      </div>
+
+      <!-- bin spec -->
+      <div>
+        <div class="section-label">Bin capacity</div>
+        <div id="bin-fields" class="row"></div>
+      </div>
+
+      <!-- add item form -->
+      <div>
+        <div class="section-label">Add item</div>
+        <div id="item-form" class="row" style="flex-wrap:wrap; gap:8px;"></div>
+        <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
+          <label class="checkbox-row" id="rotate-row" style="display:none;">
+            <input type="checkbox" id="allow-rotate"> Allow rotation
+          </label>
+          <button class="btn btn-ghost btn-sm" onclick="addItem()">+ Add item</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadPreset()">Load preset</button>
+        </div>
+      </div>
+
+      <!-- item list -->
+      <div>
+        <div class="section-label">Items <span id="item-count" style="color:var(--text)">0</span></div>
+        <div class="item-list" id="item-list"></div>
+      </div>
+
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="btn btn-primary" style="width:100%" id="pack-btn" onclick="runPack()">
+        Pack
+      </button>
+    </div>
+  </aside>
+
+  <!-- ── main area ── -->
+  <div class="canvas-area">
+    <div class="viz-toolbar">
+      <div class="stat">Bins: <strong id="stat-bins">—</strong></div>
+      <div class="stat">Placed: <strong id="stat-placed">—</strong></div>
+      <div class="stat">Unplaced: <strong id="stat-unplaced">—</strong></div>
+      <div style="flex:1"></div>
+      <div class="bin-tabs" id="bin-tabs"></div>
+    </div>
+
+    <div class="viz-panels">
+      <canvas id="canvas-2d"></canvas>
+      <canvas id="canvas-3d"></canvas>
+      <div class="empty-state" id="empty-state">
+        <div class="icon">📦</div>
+        <p>Add items and click Pack to visualise</p>
+      </div>
+    </div>
+
+    <div class="legend" id="legend"></div>
+  </div>
+
+</div>
+
+<div id="error-toast"></div>
+
+<script>
+// ── palette ──────────────────────────────────────────────────────────────────
+const COLORS = [
+  '#6c8fff','#a78bfa','#34d399','#f59e0b','#f87171','#38bdf8',
+  '#fb923c','#e879f9','#4ade80','#fbbf24','#60a5fa','#f472b6',
+  '#a3e635','#facc15','#818cf8','#2dd4bf','#f97316','#c084fc',
+];
+function itemColor(idx) { return COLORS[idx % COLORS.length]; }
+
+// ── state ────────────────────────────────────────────────────────────────────
+let items = [];
+let lastResult = null;
+let activeBin = 0;
+let itemCounter = 0;
+
+// ── algorithm lists ──────────────────────────────────────────────────────────
+const ALGOS = {
+  '1d': [
+    {v:'ff',  l:'First Fit (FF)'},
+    {v:'nf',  l:'Next Fit (NF)'},
+    {v:'nkf', l:'Next K-Fit (NkF, k=3)'},
+    {v:'bf',  l:'Best Fit (BF)'},
+    {v:'wf',  l:'Worst Fit (WF)'},
+    {v:'awf', l:'Almost Worst Fit (AWF)'},
+    {v:'rff', l:'Refined First Fit (RFF)'},
+    {v:'hk',  l:'Harmonic-k (H11)'},
+    {v:'ffd', l:'First Fit Decreasing (FFD)'},
+    {v:'bfd', l:'Best Fit Decreasing (BFD)'},
+    {v:'nfd', l:'Next Fit Decreasing (NFD)'},
+    {v:'wfd', l:'Worst Fit Decreasing (WFD)'},
+    {v:'mffd',l:'Modified FFD (MFFD)'},
+    {v:'kk',  l:'Karmarkar-Karp (KK)'},
+    {v:'bc',  l:'Bin Completion (exact)'},
+  ],
+  '2d': [
+    {v:'ff',         l:'First Fit / MaxRects'},
+    {v:'guillotine', l:'First Fit / Guillotine'},
+    {v:'nf',         l:'Next Fit'},
+    {v:'bf',         l:'Best Fit'},
+    {v:'wf',         l:'Worst Fit'},
+    {v:'ffd',        l:'First Fit Decreasing (FFD)'},
+    {v:'bfd',        l:'Best Fit Decreasing (BFD)'},
+    {v:'nfd',        l:'Next Fit Decreasing (NFD)'},
+  ],
+  '3d': [
+    {v:'ff',  l:'First Fit / Extreme-point'},
+    {v:'nf',  l:'Next Fit'},
+    {v:'bf',  l:'Best Fit'},
+    {v:'wf',  l:'Worst Fit'},
+    {v:'ffd', l:'First Fit Decreasing (FFD)'},
+    {v:'bfd', l:'Best Fit Decreasing (BFD)'},
+    {v:'nfd', l:'Next Fit Decreasing (NFD)'},
+  ],
+};
+
+// ── init ─────────────────────────────────────────────────────────────────────
+function onModeChange() {
+  const mode = document.getElementById('mode').value;
+  buildAlgorithmSelect(mode);
+  buildBinFields(mode);
+  buildItemForm(mode);
+  items = [];
+  renderItemList();
+  clearViz();
+}
+
+function buildAlgorithmSelect(mode) {
+  const sel = document.getElementById('algorithm');
+  sel.innerHTML = '';
+  for (const a of ALGOS[mode]) {
+    const o = document.createElement('option');
+    o.value = a.v; o.textContent = a.l;
+    sel.appendChild(o);
+  }
+}
+
+function buildBinFields(mode) {
+  const el = document.getElementById('bin-fields');
+  const oninput = 'oninput="scheduleAutoPack()"';
+  if (mode === '1d') {
+    el.innerHTML = `<div class="field"><label>Width (capacity)</label><input type="number" id="bin-w" value="10" min="1" step="any" ${oninput}></div>`;
+  } else if (mode === '2d') {
+    el.innerHTML = `
+      <div class="field"><label>Width</label><input type="number" id="bin-w" value="100" min="1" step="any" ${oninput}></div>
+      <div class="field"><label>Height</label><input type="number" id="bin-h" value="100" min="1" step="any" ${oninput}></div>`;
+  } else {
+    el.innerHTML = `
+      <div class="field"><label>Width</label><input type="number" id="bin-w" value="10" min="1" step="any" ${oninput}></div>
+      <div class="field"><label>Depth</label><input type="number" id="bin-d" value="10" min="1" step="any" ${oninput}></div>
+      <div class="field"><label>Height</label><input type="number" id="bin-h" value="10" min="1" step="any" ${oninput}></div>`;
+  }
+}
+
+function buildItemForm(mode) {
+  const el = document.getElementById('item-form');
+  const rotRow = document.getElementById('rotate-row');
+  if (mode === '1d') {
+    el.innerHTML = `<div class="field"><label>Size</label><input type="number" id="new-w" value="3" min="0.01" step="any" style="width:90px"></div>`;
+    rotRow.style.display = 'none';
+  } else if (mode === '2d') {
+    el.innerHTML = `
+      <div class="field"><label>Width</label><input type="number" id="new-w" value="30" min="0.01" step="any" style="width:80px"></div>
+      <div class="field"><label>Height</label><input type="number" id="new-h" value="30" min="0.01" step="any" style="width:80px"></div>`;
+    rotRow.style.display = 'flex';
+  } else {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="new-w" value="3" min="0.01" step="any" style="width:60px"></div>
+      <div class="field"><label>D</label><input type="number" id="new-d" value="3" min="0.01" step="any" style="width:60px"></div>
+      <div class="field"><label>H</label><input type="number" id="new-h" value="3" min="0.01" step="any" style="width:60px"></div>`;
+    rotRow.style.display = 'flex';
+  }
+}
+
+function addItem() {
+  const mode = document.getElementById('mode').value;
+  const w = parseFloat(document.getElementById('new-w').value) || 1;
+  const h = parseFloat(document.getElementById('new-h')?.value) || w;
+  const d = parseFloat(document.getElementById('new-d')?.value) || w;
+  const rot = document.getElementById('allow-rotate')?.checked || false;
+  itemCounter++;
+  const id = 'i' + itemCounter;
+  items.push({ id, width: w, height: h, depth: d, allow_rotate: rot, _mode: mode });
+  renderItemList();
+  scheduleAutoPack();
+}
+
+function removeItem(id) {
+  items = items.filter(it => it.id !== id);
+  renderItemList();
+  scheduleAutoPack();
+}
+
+function loadPreset() {
+  const mode = document.getElementById('mode').value;
+  items = [];
+  itemCounter = 0;
+  if (mode === '1d') {
+    for (const s of [6,6,5,5,4,4,3,3,2,2,1]) {
+      itemCounter++;
+      items.push({id:'i'+itemCounter, width:s, height:s, depth:s, allow_rotate:false, _mode:'1d'});
+    }
+    document.getElementById('bin-w').value = 10;
+  } else if (mode === '2d') {
+    const rects = [[30,40],[50,20],[20,20],[40,60],[10,80],[35,35],[60,30],[25,45]];
+    for (const [w,h] of rects) {
+      itemCounter++;
+      items.push({id:'i'+itemCounter, width:w, height:h, depth:1, allow_rotate:true, _mode:'2d'});
+    }
+    document.getElementById('bin-w').value = 100;
+    document.getElementById('bin-h').value = 100;
+  } else {
+    const boxes = [[3,3,3],[5,2,4],[2,2,2],[4,4,2],[3,5,1],[6,3,2],[2,4,3],[1,1,5]];
+    for (const [w,d,h] of boxes) {
+      itemCounter++;
+      items.push({id:'i'+itemCounter, width:w, height:h, depth:d, allow_rotate:false, _mode:'3d'});
+    }
+    document.getElementById('bin-w').value = 10;
+    document.getElementById('bin-d').value = 10;
+    document.getElementById('bin-h').value = 10;
+  }
+  renderItemList();
+  scheduleAutoPack();
+}
+
+function renderItemList() {
+  const mode = document.getElementById('mode').value;
+  const el = document.getElementById('item-list');
+  document.getElementById('item-count').textContent = items.length;
+  el.innerHTML = '';
+  items.forEach((it, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    let dims;
+    if (mode === '1d') dims = it.width;
+    else if (mode === '2d') dims = `${it.width}×${it.height}`;
+    else dims = `${it.width}×${it.depth}×${it.height}`;
+    const swatch = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>`;
+    row.innerHTML = `
+      ${swatch}
+      <span class="item-id">${it.id}</span>
+      <span class="item-dims">${dims}</span>
+      <button class="remove-btn" onclick="removeItem('${it.id}')">✕</button>`;
+    el.appendChild(row);
+  });
+}
+
+// ── pack call ─────────────────────────────────────────────────────────────────
+let autoPackTimer = null;
+
+function scheduleAutoPack() {
+  clearTimeout(autoPackTimer);
+  autoPackTimer = setTimeout(() => runPack(true), 120);
+}
+
+async function runPack(auto = false) {
+  if (items.length === 0) {
+    if (!auto) showError('Add at least one item first.');
+    return;
+  }
+  const btn = document.getElementById('pack-btn');
+  if (!auto) { btn.disabled = true; btn.textContent = 'Packing…'; }
+  hideError();
+
+  const mode = document.getElementById('mode').value;
+  const algo = document.getElementById('algorithm').value;
+  const bw = parseFloat(document.getElementById('bin-w').value) || 10;
+  const bh = parseFloat(document.getElementById('bin-h')?.value) || bw;
+  const bd = parseFloat(document.getElementById('bin-d')?.value) || bw;
+
+  const body = {
+    mode,
+    algorithm: algo,
+    bin: { width: bw, height: bh, depth: bd },
+    items: items.map(it => ({
+      id: it.id,
+      width: it.width,
+      height: it.height,
+      depth: it.depth,
+      allow_rotate: it.allow_rotate,
+    })),
+  };
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  if (auto) timeoutId = setTimeout(() => controller.abort(), 1000);
+
+  try {
+    const resp = await fetch('/api/pack', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = await resp.json();
+    if (data.error) { if (!auto) showError(data.error); return; }
+    lastResult = { data, mode, bin: body.bin };
+    renderResult(lastResult);
+  } catch(e) {
+    if (!auto) showError(e.message);
+    // auto timeout: silently ignore
+  } finally {
+    clearTimeout(timeoutId);
+    if (!auto) { btn.disabled = false; btn.textContent = 'Pack'; }
+  }
+}
+
+// ── result rendering ──────────────────────────────────────────────────────────
+function renderResult({ data, mode, bin }) {
+  document.getElementById('stat-bins').textContent = data.bins_used;
+  document.getElementById('stat-placed').textContent = (data.placements || []).length;
+  document.getElementById('stat-unplaced').textContent = (data.unplaced || []).length;
+
+  // bin tabs only for 3D (2D/1D show all bins at once)
+  const tabsEl = document.getElementById('bin-tabs');
+  tabsEl.innerHTML = '';
+  if (mode === '3d') {
+    for (let i = 0; i < data.bins_used; i++) {
+      const t = document.createElement('button');
+      t.className = 'bin-tab' + (i === activeBin ? ' active' : '');
+      t.textContent = 'Bin ' + (i + 1);
+      t.onclick = () => { activeBin = i; renderResult(lastResult); };
+      tabsEl.appendChild(t);
+    }
+  }
+
+  // legend
+  const legEl = document.getElementById('legend');
+  legEl.innerHTML = '';
+  items.forEach((it, idx) => {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.innerHTML = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>${it.id}`;
+    legEl.appendChild(div);
+  });
+
+  document.getElementById('empty-state').style.display = 'none';
+
+  if (mode === '1d' || mode === '2d') {
+    draw2D(data, mode, bin);
+  } else {
+    draw3D(data, bin);
+  }
+}
+
+// ── 2-D / 1-D canvas renderer ────────────────────────────────────────────────
+function draw2D(data, mode, bin) {
+  const c3d = document.getElementById('canvas-3d');
+  c3d.style.display = 'none';
+  if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
+
+  const canvas = document.getElementById('canvas-2d');
+  canvas.style.display = 'block';
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const allPlacements = data.placements || [];
+  const pad = 20;
+  const labelH = 18; // space above each bin for its label
+
+  if (mode === '1d') {
+    // All bins stacked vertically, each as a horizontal strip
+    const nBins = data.bins_used || 1;
+    const stripH = Math.min(60, (canvas.height - pad*2 - labelH*nBins) / nBins);
+    const gapY = labelH + stripH + 12;
+    const scale = (canvas.width - 2*pad) / bin.width;
+
+    for (let b = 0; b < nBins; b++) {
+      const y0 = pad + b * gapY + labelH;
+      const bPlacements = allPlacements.filter(p => p.bin_index === b);
+
+      // bin outline
+      ctx.strokeStyle = '#3a3d4a';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(pad, y0, bin.width * scale, stripH);
+
+      // label
+      ctx.fillStyle = '#7b7f92';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`Bin ${b+1}`, pad, y0 - labelH/2);
+
+      for (const p of bPlacements) {
+        const idx = items.findIndex(it => it.id === p.item_id);
+        ctx.fillStyle = hexToRgba(itemColor(idx < 0 ? 0 : idx), 0.85);
+        ctx.fillRect(pad + p.x * scale + 1, y0 + 1, p.w * scale - 2, stripH - 2);
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(pad + p.x * scale + 1, y0 + 1, p.w * scale - 2, stripH - 2);
+        if (p.w * scale > 18) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '10px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(p.item_id, pad + (p.x + p.w/2) * scale, y0 + stripH/2);
+        }
+      }
+    }
+  } else {
+    // 2D: all bins side by side
+    const nBins = data.bins_used || 1;
+    const gap = 20;
+    const totalGap = gap * (nBins - 1) + pad * 2;
+    const availW = (canvas.width - totalGap) / nBins;
+    const availH = canvas.height - pad * 2 - labelH;
+    const scale = Math.min(availW / bin.width, availH / bin.height);
+    const binPxW = bin.width * scale;
+    const binPxH = bin.height * scale;
+
+    for (let b = 0; b < nBins; b++) {
+      const offX = pad + b * (binPxW + gap);
+      const offY = pad + labelH + (availH - binPxH) / 2;
+      const bPlacements = allPlacements.filter(p => p.bin_index === b);
+
+      // label
+      ctx.fillStyle = '#7b7f92';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`Bin ${b+1}`, offX, pad + labelH/2);
+
+      // bin outline
+      ctx.strokeStyle = '#3a3d4a';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(offX, offY, binPxW, binPxH);
+
+      // guillotine free rects
+      const freeRects = (data.free_rects || [])[b] || [];
+      for (const [fx, fy, fw, fh] of freeRects) {
+        const rx = offX + fx * scale;
+        const ry = offY + fy * scale;
+        const rw = fw * scale;
+        const rh = fh * scale;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(108,143,255,0.35)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.restore();
+      }
+
+      for (const p of bPlacements) {
+        const idx = items.findIndex(it => it.id === p.item_id);
+        const color = itemColor(idx < 0 ? 0 : idx);
+        const x = offX + p.x * scale;
+        const y = offY + p.y * scale;
+        const w = p.w * scale;
+        const h = p.h * scale;
+        ctx.fillStyle = hexToRgba(color, 0.75);
+        ctx.fillRect(x+1, y+1, w-2, h-2);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x+1, y+1, w-2, h-2);
+        if (w > 22 && h > 14) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(p.item_id, x + w/2, y + h/2);
+        }
+      }
+    }
+  }
+}
+
+// ── 3-D Three.js renderer ─────────────────────────────────────────────────────
+let renderer3d = null;
+let scene3d = null;
+let camera3d = null;
+let orbitState = { active: false, lastX: 0, lastY: 0, phi: 0.7, theta: 0.7, dist: 22 };
+
+function draw3D(data, bin) {
+  const c2d = document.getElementById('canvas-2d');
+  c2d.style.display = 'none';
+  const canvas = document.getElementById('canvas-3d');
+  canvas.style.display = 'block';
+
+  const parent = canvas.parentElement;
+  const W = parent.clientWidth, H = parent.clientHeight;
+
+  if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
+
+  renderer3d = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer3d.setSize(W, H);
+  renderer3d.setClearColor(0x0f1117);
+  renderer3d.setPixelRatio(window.devicePixelRatio);
+
+  scene3d = new THREE.Scene();
+  camera3d = new THREE.PerspectiveCamera(45, W/H, 0.01, 1000);
+
+  const cx = bin.width/2, cy = bin.depth/2, cz = bin.height/2;
+  const maxDim = Math.max(bin.width, bin.depth, bin.height);
+  orbitState.dist = maxDim * 2.2;
+
+  function updateCamera() {
+    const { phi, theta, dist } = orbitState;
+    camera3d.position.set(
+      cx + dist * Math.sin(phi) * Math.cos(theta),
+      cy + dist * Math.cos(phi),
+      cz + dist * Math.sin(phi) * Math.sin(theta),
+    );
+    camera3d.lookAt(cx, cy, cz);
+  }
+  updateCamera();
+
+  // Bin wireframe
+  const binGeo = new THREE.BoxGeometry(bin.width, bin.depth, bin.height);
+  const binEdges = new THREE.EdgesGeometry(binGeo);
+  const binLine = new THREE.LineSegments(binEdges, new THREE.LineBasicMaterial({color: 0x2a2d3a}));
+  binLine.position.set(cx, cy, cz);
+  scene3d.add(binLine);
+
+  // Lights
+  scene3d.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(1, 2, 1.5);
+  scene3d.add(dir);
+
+  // Items
+  const placements = (data.placements || []).filter(p => p.bin_index === activeBin);
+  for (const p of placements) {
+    const idx = items.findIndex(it => it.id === p.item_id);
+    const hex = parseInt(itemColor(idx < 0 ? 0 : idx).replace('#',''), 16);
+    const geo = new THREE.BoxGeometry(p.w - 0.08, p.d - 0.08, p.h - 0.08);
+    const mat = new THREE.MeshLambertMaterial({ color: hex, transparent: true, opacity: 0.82 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(p.x + p.w/2, p.y + p.d/2, p.z + p.h/2);
+    scene3d.add(mesh);
+    const edges = new THREE.EdgesGeometry(geo);
+    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }));
+    line.position.copy(mesh.position);
+    scene3d.add(line);
+  }
+
+  function render() { renderer3d && renderer3d.render(scene3d, camera3d); }
+  render();
+
+  // Orbit controls
+  canvas.onmousedown = e => { orbitState.active = true; orbitState.lastX = e.clientX; orbitState.lastY = e.clientY; };
+  canvas.onmousemove = e => {
+    if (!orbitState.active) return;
+    const dx = e.clientX - orbitState.lastX;
+    const dy = e.clientY - orbitState.lastY;
+    orbitState.lastX = e.clientX;
+    orbitState.lastY = e.clientY;
+    orbitState.theta -= dx * 0.01;
+    orbitState.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbitState.phi - dy * 0.01));
+    updateCamera();
+    render();
+  };
+  canvas.onmouseup = canvas.onmouseleave = () => { orbitState.active = false; };
+  canvas.onwheel = e => {
+    e.preventDefault();
+    orbitState.dist = Math.max(maxDim * 0.5, orbitState.dist + e.deltaY * 0.05);
+    updateCamera();
+    render();
+  };
+}
+
+// ── misc ──────────────────────────────────────────────────────────────────────
+function clearViz() {
+  lastResult = null;
+  activeBin = 0;
+  document.getElementById('stat-bins').textContent = '—';
+  document.getElementById('stat-placed').textContent = '—';
+  document.getElementById('stat-unplaced').textContent = '—';
+  document.getElementById('bin-tabs').innerHTML = '';
+  document.getElementById('legend').innerHTML = '';
+  document.getElementById('canvas-2d').style.display = 'none';
+  document.getElementById('canvas-3d').style.display = 'none';
+  document.getElementById('empty-state').style.display = 'flex';
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+function hideError() { document.getElementById('error-toast').style.display = 'none'; }
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1,3),16);
+  const g = parseInt(hex.slice(3,5),16);
+  const b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+window.addEventListener('resize', () => {
+  if (lastResult) renderResult(lastResult);
+});
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+onModeChange();
+clearViz();
+</script>
+</body>
+</html>
