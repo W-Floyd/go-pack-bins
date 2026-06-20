@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // bfSelector implements the Best Fit bin selection policy.

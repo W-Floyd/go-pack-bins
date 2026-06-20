@@ -1,6 +1,6 @@
 package d2
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // Placement2D records the spatial result of placing a 2-D item in a bin.
 type Placement2D struct {

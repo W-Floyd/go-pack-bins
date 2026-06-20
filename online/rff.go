@@ -3,7 +3,7 @@ package online
 import (
 	"errors"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // RefinedFirstFit implements the Refined First Fit (RFF) algorithm by Yao (1980).

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/wfloyd/go-pack-bins/geometry"
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/geometry"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // SolidPlacement3D records where and in which orientation a solid item was placed.

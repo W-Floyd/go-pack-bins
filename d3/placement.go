@@ -1,6 +1,6 @@
 package d3
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // Placement3D records the spatial result of a 3-D box placement.
 type Placement3D struct {

@@ -1,7 +1,7 @@
 // Package d3 provides 3-D box items, bins, and manifold solid support.
 package d3
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // Item3D is a 3-D box-shaped item.
 // AllowRotate permits trying all 6 axis-aligned face orientations during placement.

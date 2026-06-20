@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math"
 
-	"github.com/wfloyd/go-pack-bins/geometry"
+	"github.com/W-Floyd/go-pack-bins/geometry"
 )
 
 // Solid represents a closed, orientable 3-D manifold solid.

@@ -1,7 +1,7 @@
 // Package d1 provides 1-D items and bins for classical bin packing.
 package d1
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // Item1D is a one-dimensional item characterised solely by its size.
 type Item1D struct {

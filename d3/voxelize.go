@@ -3,7 +3,7 @@ package d3
 import (
 	"math"
 
-	"github.com/wfloyd/go-pack-bins/geometry"
+	"github.com/W-Floyd/go-pack-bins/geometry"
 )
 
 // VoxelGrid is a 3-D boolean occupancy grid stored in a bit-packed array.

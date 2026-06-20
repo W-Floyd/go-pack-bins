@@ -6,7 +6,7 @@ package offline
 import (
 	"sort"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // SortPolicy sorts a slice of items in-place before packing.

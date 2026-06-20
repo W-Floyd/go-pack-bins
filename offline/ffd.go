@@ -1,8 +1,8 @@
 package offline
 
 import (
-	"github.com/wfloyd/go-pack-bins/online"
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/online"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // FirstFitDecreasing returns an FFD offline packer.

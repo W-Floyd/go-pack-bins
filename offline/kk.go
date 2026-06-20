@@ -4,7 +4,7 @@ import (
 	"container/heap"
 	"errors"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // KarmarkarKarp implements the Karmarkar-Karp differencing heuristic for the

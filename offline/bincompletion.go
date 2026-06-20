@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // BinCompletion implements the Bin Completion exact algorithm for the 1-D
