@@ -919,6 +919,29 @@ function toggleItemRotate(id) {
 }
 
 // ── presets ───────────────────────────────────────────────────────────────────
+
+// bigMix deterministically generates n mixed-size boxes for a mode using a small
+// LCG, so large presets are reproducible across loads. Sizes are drawn from a
+// weighted palette (small sizes repeated) to give a realistic spread.
+function bigMix(mode, n, seed) {
+  let s = (seed >>> 0) || 1;
+  const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const pick = arr => arr[Math.floor(rnd() * arr.length)];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    if (mode === '1d') {
+      out.push({ w: pick([1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8]) });
+    } else if (mode === '2d') {
+      const sizes = [10, 12, 15, 18, 20, 25, 30, 35, 40, 50];
+      out.push({ w: pick(sizes), h: pick(sizes), rot: true });
+    } else {
+      const sizes = [1, 2, 2, 3, 3, 4, 4, 5, 6];
+      out.push({ w: pick(sizes), d: pick(sizes), h: pick(sizes) });
+    }
+  }
+  return out;
+}
+
 const PRESETS = {
   '1d': [
     {
@@ -993,6 +1016,11 @@ const PRESETS = {
         {w:3, s:{weight:2,  fragility:4}},
       ],
     },
+    {
+      label: 'Large mixed (80 boxes)',
+      bin: {w:20}, algo: 'ffd',
+      items: bigMix('1d', 80, 11),
+    },
   ],
   '2d': [
     {
@@ -1047,6 +1075,11 @@ const PRESETS = {
         {w:20, h:60, s:{weight:5,  fragility:4}},
         {w:20, h:60, s:{weight:5,  fragility:4}},
       ],
+    },
+    {
+      label: 'Large mixed (60 boxes)',
+      bin: {w:200, h:200}, algo: 'ffd',
+      items: bigMix('2d', 60, 22),
     },
   ],
   '3d': [
@@ -1122,6 +1155,11 @@ const PRESETS = {
         {w:2, d:2, h:6, s:{weight:3,  temp_zone:2}},
         {w:2, d:2, h:6, s:{weight:3,  temp_zone:0}},
       ],
+    },
+    {
+      label: 'Large mixed (60 boxes)',
+      bin: {w:12, d:12, h:12}, algo: 'ffd',
+      items: bigMix('3d', 60, 33),
     },
   ],
 };
