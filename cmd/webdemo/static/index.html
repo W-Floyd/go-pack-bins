@@ -933,8 +933,9 @@ function toggleItemRotate(id) {
 // bigMix deterministically generates n mixed-size boxes for a mode using a small
 // LCG, so large presets are reproducible across loads. Sizes are drawn from a
 // weighted palette (small sizes repeated) to give a realistic spread. Each box
-// also gets a weight scalar derived from its volume × a per-item density factor,
-// so weight is correlated with size but not perfectly (a small box can be dense).
+// gets a weight scalar derived from its volume × a per-item density factor (so
+// weight tracks size but not perfectly), plus a cost scalar from an independent
+// value factor (so cost is uncorrelated with weight — a small box can be costly).
 function bigMix(mode, n, seed) {
   let s = (seed >>> 0) || 1;
   const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
@@ -942,6 +943,7 @@ function bigMix(mode, n, seed) {
   const out = [];
   for (let i = 0; i < n; i++) {
     const density = pick([0.5, 1, 1, 1.5, 2]);
+    const value = pick([1, 2, 5, 10, 20, 50]);
     let box, vol;
     if (mode === '1d') {
       const w = pick([1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8]);
@@ -955,7 +957,7 @@ function bigMix(mode, n, seed) {
       const w = pick(sizes), d = pick(sizes), h = pick(sizes);
       box = { w, d, h }; vol = (w * d * h) / 6;
     }
-    box.s = { weight: Math.max(1, Math.round(vol * density)) };
+    box.s = { weight: Math.max(1, Math.round(vol * density)), cost: value };
     out.push(box);
   }
   return out;
