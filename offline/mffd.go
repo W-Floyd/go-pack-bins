@@ -3,8 +3,8 @@ package offline
 import (
 	"sort"
 
-	"github.com/wfloyd/go-pack-bins/online"
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/online"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // ModifiedFirstFitDecreasing returns an MFFD offline packer.

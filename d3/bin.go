@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // Bin3D is a box-shaped 3-D bin that delegates placement to a strategy.

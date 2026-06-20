@@ -1,6 +1,6 @@
 package d3
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // SolidItem3D is a 3-D item with an arbitrary manifold solid shape.
 // Placement is performed via voxel-grid collision detection.

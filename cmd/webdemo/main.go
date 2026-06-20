@@ -7,13 +7,13 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/wfloyd/go-pack-bins/d1"
-	"github.com/wfloyd/go-pack-bins/d2"
-	"github.com/wfloyd/go-pack-bins/d3"
-	"github.com/wfloyd/go-pack-bins/meta"
-	"github.com/wfloyd/go-pack-bins/offline"
-	"github.com/wfloyd/go-pack-bins/online"
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/d1"
+	"github.com/W-Floyd/go-pack-bins/d2"
+	"github.com/W-Floyd/go-pack-bins/d3"
+	"github.com/W-Floyd/go-pack-bins/meta"
+	"github.com/W-Floyd/go-pack-bins/offline"
+	"github.com/W-Floyd/go-pack-bins/online"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 func main() {

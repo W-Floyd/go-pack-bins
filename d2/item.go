@@ -1,7 +1,7 @@
 // Package d2 provides 2-D rectangular items and bins with configurable placement strategies.
 package d2
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import "github.com/W-Floyd/go-pack-bins/pack"
 
 // Item2D is a 2-D rectangular item with optional rotation support.
 type Item2D struct {
