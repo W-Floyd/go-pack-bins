@@ -57,6 +57,10 @@ type BinMetricer interface {
 // current peak stack height of a bin (the highest top face of any placed item).
 const MetricPeakHeight = "\x00m:peak_height"
 
+// MetricItemCount is the reserved key under which ConstrainedBin reports the
+// number of items currently placed in a bin. Used by BalanceCount/ConcentrateCount.
+const MetricItemCount = "\x00m:count"
+
 // CGHeightNumeratorKey returns the reserved metric key under which a BinMetricer
 // reports the mass-weighted vertical moment for a scalar — i.e. the running sum
 // of (scalar value × vertical centre) over placed items. Dividing this by the
@@ -162,6 +166,19 @@ func ColocateHigh(name string) Preference {
 // toward roughly equal totals (e.g. even weight distribution across containers).
 func ColocateLow(name string) Preference {
 	return func(binAgg, _ map[string]float64) float64 { return -binAgg[name] }
+}
+
+// BalanceCount returns a Preference that prefers bins holding the fewest items,
+// spreading items evenly across the open bins (e.g. equal pieces per carton).
+// Requires bins that report MetricItemCount (ConstrainedBin does).
+func BalanceCount() Preference {
+	return func(binAgg, _ map[string]float64) float64 { return -binAgg[MetricItemCount] }
+}
+
+// ConcentrateCount returns a Preference that prefers bins holding the most items,
+// packing them tightly into the fullest bins first.
+func ConcentrateCount() Preference {
+	return func(binAgg, _ map[string]float64) float64 { return binAgg[MetricItemCount] }
 }
 
 // MinimizeHeight returns a Preference that prefers bins with the lowest current

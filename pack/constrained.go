@@ -12,6 +12,7 @@ type ConstrainedBin struct {
 	Bin
 	agg         map[string]float64
 	constraints []Constraint
+	count       int // number of items placed, exposed as MetricItemCount
 }
 
 // NewConstrainedBin wraps bin so that TryPlace enforces all constraints.
@@ -49,6 +50,7 @@ func (c *ConstrainedBin) TryPlace(item Item) (Placement, error) {
 		for k, v := range itemScalars {
 			c.agg[k] += v
 		}
+		c.count++
 		ApplyConstraints(c.constraints, c.agg, itemScalars)
 	}
 	if err != nil && !errors.Is(err, ErrNoRoom) {
@@ -64,10 +66,11 @@ func (c *ConstrainedBin) Aggregate(name string) float64 { return c.agg[name] }
 // any geometric metrics reported by the wrapped bin (see BinMetricer). This lets
 // preferences score on both scalar accumulations and metrics like stack height.
 func (c *ConstrainedBin) Aggregates() map[string]float64 {
-	out := make(map[string]float64, len(c.agg))
+	out := make(map[string]float64, len(c.agg)+1)
 	for k, v := range c.agg {
 		out[k] = v
 	}
+	out[MetricItemCount] = float64(c.count)
 	if m, ok := c.Bin.(BinMetricer); ok {
 		for k, v := range m.Metrics() {
 			out[k] = v
