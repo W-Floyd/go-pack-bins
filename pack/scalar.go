@@ -61,6 +61,10 @@ const MetricPeakHeight = "\x00m:peak_height"
 // number of items currently placed in a bin. Used by BalanceCount/ConcentrateCount.
 const MetricItemCount = "\x00m:count"
 
+// MetricUtilization is the reserved key under which ConstrainedBin reports the
+// wrapped bin's current utilization (occupied fraction, 0..1). Used by FillHigh/FillLow.
+const MetricUtilization = "\x00m:util"
+
 // CGHeightNumeratorKey returns the reserved metric key under which a BinMetricer
 // reports the mass-weighted vertical moment for a scalar — i.e. the running sum
 // of (scalar value × vertical centre) over placed items. Dividing this by the
@@ -179,6 +183,20 @@ func BalanceCount() Preference {
 // packing them tightly into the fullest bins first.
 func ConcentrateCount() Preference {
 	return func(binAgg, _ map[string]float64) float64 { return binAgg[MetricItemCount] }
+}
+
+// FillHigh returns a Preference that prefers the fullest bin (highest
+// utilization) — the Best-Fit policy expressed as a preference. Combine with a
+// balancing preference via Weighted to e.g. "pack tightly but lean toward even
+// loads".
+func FillHigh() Preference {
+	return func(binAgg, _ map[string]float64) float64 { return binAgg[MetricUtilization] }
+}
+
+// FillLow returns a Preference that prefers the emptiest bin (lowest
+// utilization) — the Worst-Fit policy expressed as a preference.
+func FillLow() Preference {
+	return func(binAgg, _ map[string]float64) float64 { return -binAgg[MetricUtilization] }
 }
 
 // MinimizeHeight returns a Preference that prefers bins with the lowest current

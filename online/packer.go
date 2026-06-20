@@ -64,6 +64,21 @@ func (p *Packer) Pack(item pack.Item) (pack.Placement, error) {
 func (p *Packer) Result() pack.Result { return p.result }
 func (p *Packer) Name() string        { return p.name }
 
+// Prefill opens n empty bins up front so a selector can distribute the first
+// items across all of them, rather than filling bin 0 before bin 1 exists.
+// Used by offline balancing packers; any bins left empty should be pruned by
+// the caller (see offline.BalancedFit). No-op if the packer has no factory.
+func (p *Packer) Prefill(n int) {
+	if p.factory == nil {
+		return
+	}
+	for i := 0; i < n; i++ {
+		b := p.factory.Open()
+		p.bins = append(p.bins, b)
+		p.result.Bins = append(p.result.Bins, b)
+	}
+}
+
 func (p *Packer) Reset() {
 	p.bins = nil
 	p.result = pack.Result{}
