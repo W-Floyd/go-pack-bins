@@ -242,20 +242,28 @@
   }
   .empty-state .icon { font-size: 40px; }
   .empty-state p { font-size: 13px; }
-  /* ── error toast ── */
-  #error-toast {
+  /* ── error / warn toasts ── */
+  #error-toast, #warn-toast {
     position: fixed;
     bottom: 20px;
     right: 20px;
-    background: #3d1a1a;
-    border: 1px solid var(--bad);
-    color: var(--bad);
     padding: 10px 14px;
     border-radius: var(--radius);
     font-size: 13px;
     max-width: 340px;
     display: none;
     z-index: 100;
+  }
+  #error-toast {
+    background: #3d1a1a;
+    border: 1px solid var(--bad);
+    color: var(--bad);
+  }
+  #warn-toast {
+    background: #2d2010;
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    bottom: 70px;
   }
   /* ── checkbox ── */
   .checkbox-row {
@@ -401,6 +409,7 @@
               <option value="max">max ≤</option>
               <option value="min">min ≥</option>
               <option value="allsame">all same</option>
+              <option value="minsupport" id="op-minsupport" style="display:none">min support %</option>
             </select>
           </div>
           <div class="field" id="con-value-field" style="flex:1; min-width:54px">
@@ -445,6 +454,7 @@
 </div>
 
 <div id="error-toast"></div>
+<div id="warn-toast"></div>
 
 <script>
 // ── palette ──────────────────────────────────────────────────────────────────
@@ -519,6 +529,12 @@ function onModeChange() {
     buildInnerBinFields(mode);
     buildInnerAlgorithmSelect(mode);
   }
+  document.getElementById('op-minsupport').style.display = mode === '3d' ? '' : 'none';
+  // If current op is minsupport but mode changed away from 3d, reset to max
+  if (mode !== '3d' && document.getElementById('con-op').value === 'minsupport') {
+    document.getElementById('con-op').value = 'max';
+  }
+  onConOpChange();
 }
 
 function buildAlgorithmSelect(mode) {
@@ -634,15 +650,35 @@ function addItem() {
 
 function onConOpChange() {
   const op = document.getElementById('con-op').value;
-  document.getElementById('con-value-field').style.display = op === 'allsame' ? 'none' : '';
+  const scalarField = document.getElementById('con-scalar').parentElement;
+  const valueField = document.getElementById('con-value-field');
+  if (op === 'allsame') {
+    scalarField.style.display = '';
+    valueField.style.display = 'none';
+  } else if (op === 'minsupport') {
+    scalarField.style.display = 'none';
+    valueField.style.display = '';
+    document.getElementById('con-value').placeholder = '75';
+  } else {
+    scalarField.style.display = '';
+    valueField.style.display = '';
+    document.getElementById('con-value').placeholder = '100';
+  }
 }
 
 function addConstraint() {
-  const scalar = document.getElementById('con-scalar').value.trim();
   const op = document.getElementById('con-op').value;
-  const value = op === 'allsame' ? 0 : parseFloat(document.getElementById('con-value').value);
-  if (!scalar || (op !== 'allsame' && isNaN(value))) return;
-  constraints.push({ scalar, op, value });
+  if (op === 'minsupport') {
+    const value = parseFloat(document.getElementById('con-value').value);
+    if (isNaN(value) || value <= 0 || value > 100) return;
+    constraints = constraints.filter(c => c.op !== 'minsupport'); // only one at a time
+    constraints.push({ scalar: '', op: 'minsupport', value });
+  } else {
+    const scalar = document.getElementById('con-scalar').value.trim();
+    const value = op === 'allsame' ? 0 : parseFloat(document.getElementById('con-value').value);
+    if (!scalar || (op !== 'allsame' && isNaN(value))) return;
+    constraints.push({ scalar, op, value });
+  }
   renderConstraintList();
   scheduleAutoPack();
 }
@@ -659,9 +695,10 @@ function renderConstraintList() {
   constraints.forEach((c, idx) => {
     const row = document.createElement('div');
     row.className = 'item-row';
-    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : 'all same';
+    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : c.op === 'minsupport' ? `support ≥ ${c.value}%` : 'all same';
+    const scalarPart = c.op === 'minsupport' ? 'bottom area' : c.scalar;
     row.innerHTML = `
-      <span class="item-dims" style="flex:1;font-family:var(--mono)">${c.scalar} ${opLabel}</span>
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${scalarPart} ${opLabel}</span>
       <button class="remove-btn" onclick="removeConstraint(${idx})">✕</button>`;
     el.appendChild(row);
   });
@@ -961,7 +998,7 @@ async function runSinglePack(auto = false) {
   }
   const btn = document.getElementById('pack-btn');
   if (!auto) { btn.disabled = true; btn.textContent = 'Packing…'; }
-  hideError();
+  hideError(); hideWarn();
 
   const mode = document.getElementById('mode').value;
   const algo = document.getElementById('algorithm').value;
@@ -999,6 +1036,13 @@ async function runSinglePack(auto = false) {
     if (data.error) { if (!auto) showError(data.error); return; }
     lastResult = { data, mode, bin: body.bin };
     renderResult(lastResult);
+    if (!auto) {
+      const errs = data.item_errors || {};
+      const msgs = Object.values(errs);
+      if (msgs.length > 0) showWarn(msgs[0]);
+      else if ((data.unplaced || []).length > 0)
+        showWarn(`${data.unplaced.length} item(s) could not be placed`);
+    }
   } catch(e) {
     if (!auto) showError(e.message);
   } finally {
@@ -1054,6 +1098,13 @@ async function runNestedPack(auto = false) {
     if (data.error) { if (!auto) showError(data.error); return; }
     lastResult = { data, mode, nested: true, innerBin: body.levels[0].bin, outerBin: body.levels[1].bin };
     renderNestedResult(lastResult);
+    if (!auto) {
+      const errs = data.item_errors || {};
+      const msgs = Object.values(errs);
+      if (msgs.length > 0) showWarn(msgs[0]);
+      else if ((data.unplaced || []).length > 0)
+        showWarn(`${data.unplaced.length} item(s) could not be placed`);
+    }
   } catch(e) {
     if (!auto) showError(e.message);
   } finally {
@@ -1637,6 +1688,14 @@ function showError(msg) {
   setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
 function hideError() { document.getElementById('error-toast').style.display = 'none'; }
+
+function showWarn(msg) {
+  const el = document.getElementById('warn-toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+function hideWarn() { document.getElementById('warn-toast').style.display = 'none'; }
 
 function hexToRgba(hex, alpha) {
   const r = parseInt(hex.slice(1,3),16);

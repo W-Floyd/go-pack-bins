@@ -34,13 +34,16 @@ func NewBin(id string, capacity float64) *Bin1D {
 func (b *Bin1D) ID() string      { return b.id }
 func (b *Bin1D) Dimensions() int { return 1 }
 
-func (b *Bin1D) TryPlace(item pack.Item) (pack.Placement, bool) {
+func (b *Bin1D) TryPlace(item pack.Item) (pack.Placement, error) {
+	if item.Volume() > b.capacity {
+		return nil, pack.ErrItemTooLarge
+	}
 	if item.Volume() > b.capacity-b.used {
-		return nil, false
+		return nil, pack.ErrNoRoom
 	}
 	b.used += item.Volume()
 	b.items = append(b.items, item)
-	return &Placement1D{binID: b.id, itemID: item.ID()}, true
+	return &Placement1D{binID: b.id, itemID: item.ID()}, nil
 }
 
 func (b *Bin1D) Utilization() float64 {

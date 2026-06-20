@@ -1,20 +1,28 @@
 package online
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import (
+	"errors"
+
+	"github.com/wfloyd/go-pack-bins/pack"
+)
 
 // nfSelector implements the Next Fit bin selection policy.
 // It only ever considers the most recently opened bin.
 type nfSelector struct{}
 
-func (nfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (nfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	if len(bins) == 0 {
-		return nil, -1
+		return nil, -1, nil
 	}
 	i := len(bins) - 1
-	if p, ok := bins[i].TryPlace(item); ok {
-		return p, i
+	p, err := bins[i].TryPlace(item)
+	if err == nil {
+		return p, i, nil
 	}
-	return nil, -1
+	if !errors.Is(err, pack.ErrNoRoom) {
+		return nil, -1, err // propagate permanent error
+	}
+	return nil, -1, nil
 }
 
 // NextFit returns a Next Fit online packer.

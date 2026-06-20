@@ -57,10 +57,10 @@ func NewSolidBin(id string, container Solid, voxRes float64) *SolidBin3D {
 func (b *SolidBin3D) ID() string      { return b.id }
 func (b *SolidBin3D) Dimensions() int { return 3 }
 
-func (b *SolidBin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
+func (b *SolidBin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	si, ok := item.(*SolidItem3D)
 	if !ok {
-		return nil, false
+		return nil, pack.ErrNoRoom
 	}
 	if b.orientations == nil {
 		b.orientations = geometry.AxisAlignedOrientations()
@@ -69,6 +69,9 @@ func (b *SolidBin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
 	itemBBox := si.solid.AABB()
 	conBBox := b.container.AABB()
 	itemVox := si.solid.Voxelize(si.VoxelResolution)
+
+	// Track whether any rotation's bounding box fit in the container bbox.
+	anyBBoxFit := false
 
 	for _, rotIdx := range si.AllowRotations {
 		rot := b.orientations[int(rotIdx)]
@@ -82,6 +85,7 @@ func (b *SolidBin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
 		if rw > conBBox.W() || rd > conBBox.D() || rh > conBBox.H() {
 			continue
 		}
+		anyBBoxFit = true
 
 		// Sample placement positions on a grid.
 		xMax := conBBox.W() - rw
@@ -106,13 +110,16 @@ func (b *SolidBin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
 							itemID:        item.ID(),
 							Position:      pos,
 							RotationIndex: int(rotIdx),
-						}, true
+						}, nil
 					}
 				}
 			}
 		}
 	}
-	return nil, false
+	if !anyBBoxFit {
+		return nil, pack.ErrItemTooLarge
+	}
+	return nil, pack.ErrNoRoom
 }
 
 // canPlace checks whether the item (after rotation+translation) fits inside the

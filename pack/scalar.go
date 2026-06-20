@@ -1,5 +1,7 @@
 package pack
 
+import "fmt"
+
 // Scalar is implemented by items that carry named numeric properties
 // (weight, value, fragility, etc.). Returning a nil or empty map is valid.
 type Scalar interface {
@@ -15,6 +17,12 @@ type Scalar interface {
 // extension so ConstrainedBin and BinCompletion can apply and revert per-bin state.
 type Constraint interface {
 	Check(binAgg, itemScalars map[string]float64) bool
+}
+
+// ConstraintDescriber is an optional extension for Constraints that can
+// produce a human-readable description of why a constraint failed.
+type ConstraintDescriber interface {
+	Describe(binAgg, itemScalars map[string]float64) string
 }
 
 // statefulConstraint is an optional extension for Constraints that maintain
@@ -39,20 +47,46 @@ type Preference func(binAgg, itemScalars map[string]float64) float64
 
 // ── constraint constructors ───────────────────────────────────────────────────
 
+// maxAggConstraint enforces an upper bound on the accumulated total of a named scalar.
+type maxAggConstraint struct {
+	name  string
+	limit float64
+}
+
+func (c maxAggConstraint) Check(binAgg, itemScalars map[string]float64) bool {
+	return binAgg[c.name]+itemScalars[c.name] <= c.limit
+}
+
+func (c maxAggConstraint) Describe(binAgg, itemScalars map[string]float64) string {
+	return fmt.Sprintf("item %s=%.6g would exceed max aggregate %.6g (bin already at %.6g)",
+		c.name, itemScalars[c.name], c.limit, binAgg[c.name])
+}
+
 // MaxAggregate returns a Constraint that rejects placement when the bin's
 // accumulated total of name, plus the item's contribution, would exceed limit.
 func MaxAggregate(name string, limit float64) Constraint {
-	return ConstraintFunc(func(binAgg, itemScalars map[string]float64) bool {
-		return binAgg[name]+itemScalars[name] <= limit
-	})
+	return maxAggConstraint{name: name, limit: limit}
+}
+
+// minAggConstraint enforces a lower bound on the accumulated total of a named scalar.
+type minAggConstraint struct {
+	name  string
+	floor float64
+}
+
+func (c minAggConstraint) Check(binAgg, itemScalars map[string]float64) bool {
+	return binAgg[c.name]+itemScalars[c.name] >= c.floor
+}
+
+func (c minAggConstraint) Describe(binAgg, itemScalars map[string]float64) string {
+	return fmt.Sprintf("item %s=%.6g would fall below min aggregate %.6g (bin already at %.6g)",
+		c.name, itemScalars[c.name], c.floor, binAgg[c.name])
 }
 
 // MinAggregate returns a Constraint that rejects placement when the bin's
 // accumulated total of name plus the item's contribution would fall below floor.
 func MinAggregate(name string, floor float64) Constraint {
-	return ConstraintFunc(func(binAgg, itemScalars map[string]float64) bool {
-		return binAgg[name]+itemScalars[name] >= floor
-	})
+	return minAggConstraint{name: name, floor: floor}
 }
 
 // AllSame returns a Constraint that requires every item placed in a bin to
@@ -72,6 +106,11 @@ func (c allSameConstraint) Check(binAgg, itemScalars map[string]float64) bool {
 		return true // bin is empty for this scalar — anything is allowed
 	}
 	return itemScalars[c.name] == binAgg[c.refVal()]
+}
+
+func (c allSameConstraint) Describe(binAgg, itemScalars map[string]float64) string {
+	return fmt.Sprintf("item %s=%.6g does not match bin's established value %.6g (AllSame constraint)",
+		c.name, itemScalars[c.name], binAgg[c.refVal()])
 }
 
 func (c allSameConstraint) Apply(binAgg, itemScalars map[string]float64) {

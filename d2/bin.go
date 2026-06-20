@@ -24,14 +24,20 @@ func NewBin(id string, w, h float64, strategy PlacementStrategy2D) *Bin2D {
 func (b *Bin2D) ID() string      { return b.id }
 func (b *Bin2D) Dimensions() int { return 2 }
 
-func (b *Bin2D) TryPlace(item pack.Item) (pack.Placement, bool) {
+func (b *Bin2D) TryPlace(item pack.Item) (pack.Placement, error) {
 	i2, ok := item.(*Item2D)
 	if !ok {
-		return nil, false
+		return nil, pack.ErrNoRoom
+	}
+	// Pre-check: if item dims don't fit in bin dims in any orientation, it's permanent.
+	fitsNatural := i2.W <= b.W && i2.H <= b.H
+	fitsRotated := i2.AllowRotate && i2.H <= b.W && i2.W <= b.H
+	if !fitsNatural && !fitsRotated {
+		return nil, pack.ErrItemTooLarge
 	}
 	x, y, rotated, placed := b.strategy.TryInsert(i2.W, i2.H, i2.AllowRotate)
 	if !placed {
-		return nil, false
+		return nil, pack.ErrNoRoom
 	}
 	w, h := i2.W, i2.H
 	if rotated {
@@ -47,7 +53,7 @@ func (b *Bin2D) TryPlace(item pack.Item) (pack.Placement, bool) {
 		Rotated: rotated,
 	}
 	b.items = append(b.items, item)
-	return p, true
+	return p, nil
 }
 
 func (b *Bin2D) Utilization() float64     { return b.strategy.Utilization() }

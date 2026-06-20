@@ -24,14 +24,18 @@ func NewBin(id string, w, d, h float64, strategy PlacementStrategy3D) *Bin3D {
 func (b *Bin3D) ID() string      { return b.id }
 func (b *Bin3D) Dimensions() int { return 3 }
 
-func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
+func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	i3, ok := item.(*Item3D)
 	if !ok {
-		return nil, false
+		return nil, pack.ErrNoRoom
+	}
+	// Pre-check: if item doesn't fit in bin dimensions in any orientation, it's permanent.
+	if !anyOrientationFits(i3.Orientations(), b.W, b.D, b.H) {
+		return nil, pack.ErrItemTooLarge
 	}
 	x, y, z, w, d, h, placed := b.strategy.TryInsert(i3.Orientations())
 	if !placed {
-		return nil, false
+		return nil, pack.ErrNoRoom
 	}
 	p := &Placement3D{
 		binID: b.id, itemID: item.ID(),
@@ -39,7 +43,18 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, bool) {
 		W: w, D: d, H: h,
 	}
 	b.items = append(b.items, item)
-	return p, true
+	return p, nil
+}
+
+// anyOrientationFits returns true if any of the given (w,d,h) orientations fits
+// within the box defined by w, d, h.
+func anyOrientationFits(orientations [][3]float64, w, d, h float64) bool {
+	for _, o := range orientations {
+		if o[0] <= w && o[1] <= d && o[2] <= h {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Bin3D) Utilization() float64 { return b.strategy.Utilization() }

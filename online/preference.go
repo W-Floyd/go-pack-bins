@@ -1,6 +1,7 @@
 package online
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -29,7 +30,7 @@ func aggregatesOf(bin pack.Bin) map[string]float64 {
 	return nil
 }
 
-func (s pfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (s pfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	type cand struct {
 		idx   int
 		score float64
@@ -58,11 +59,16 @@ func (s pfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int
 	})
 
 	for _, c := range candidates {
-		if p, ok := bins[c.idx].TryPlace(item); ok {
-			return p, c.idx
+		p, err := bins[c.idx].TryPlace(item)
+		if err == nil {
+			return p, c.idx, nil
 		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err // propagate permanent error
+		}
+		// ErrNoRoom: continue to next bin
 	}
-	return nil, -1
+	return nil, -1, nil
 }
 
 // PreferenceFit returns a packer that selects bins by summing all supplied

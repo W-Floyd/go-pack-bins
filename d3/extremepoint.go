@@ -9,6 +9,7 @@ type ExtremePoint struct {
 	binW, binD, binH float64
 	placed           []box
 	usedVol          float64
+	minSupport       float64 // 0 = disabled; 0<v≤1 = minimum fraction of bottom face that must be supported
 }
 
 type box struct{ x, y, z, w, d, h float64 }
@@ -21,6 +22,17 @@ func NewExtremePoint(binW, binD, binH float64) *ExtremePoint {
 // NewExtremePointStrategy is a convenience constructor matching Factory3D's signature.
 func NewExtremePointStrategy(w, d, h float64) PlacementStrategy3D {
 	return NewExtremePoint(w, d, h)
+}
+
+// NewExtremePointStrategyWithSupport returns a Factory3D-compatible constructor
+// that enforces a minimum supported-area fraction on every placement.
+// frac must be in [0, 1]; 0 disables the check (equivalent to NewExtremePointStrategy).
+func NewExtremePointStrategyWithSupport(frac float64) func(w, d, h float64) PlacementStrategy3D {
+	return func(w, d, h float64) PlacementStrategy3D {
+		ep := NewExtremePoint(w, d, h)
+		ep.minSupport = frac
+		return ep
+	}
 }
 
 func (ep *ExtremePoint) Utilization() float64 {
@@ -57,6 +69,9 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
+			if ep.minSupport > 0 && ep.supportFrac(x, y, z, w, d) < ep.minSupport {
+				continue
+			}
 			c := candidate{x, y, z, w, d, h}
 			if !bestSet || better(c, best) {
 				best = c
@@ -86,6 +101,33 @@ func (ep *ExtremePoint) extremePoints() [][3]float64 {
 		)
 	}
 	return pts
+}
+
+// supportFrac returns the fraction of the bottom face (x,y,z) w×d that is
+// supported by the bin floor or the top faces of already-placed boxes.
+// Because placed boxes never overlap, their top faces at the same z are also
+// non-overlapping, so summing individual intersection areas is exact.
+func (ep *ExtremePoint) supportFrac(x, y, z, w, d float64) float64 {
+	if z == 0 {
+		return 1.0
+	}
+	const eps = 1e-9
+	footprint := w * d
+	if footprint == 0 {
+		return 1.0
+	}
+	supported := 0.0
+	for _, b := range ep.placed {
+		if b.z+b.h < z-eps || b.z+b.h > z+eps {
+			continue
+		}
+		iw := min(x+w, b.x+b.w) - max(x, b.x)
+		id := min(y+d, b.y+b.d) - max(y, b.y)
+		if iw > 0 && id > 0 {
+			supported += iw * id
+		}
+	}
+	return supported / footprint
 }
 
 // conflicts reports whether placing a box at (x,y,z) with dimensions (w,d,h)

@@ -5,6 +5,8 @@
 package online
 
 import (
+	"errors"
+
 	"github.com/wfloyd/go-pack-bins/pack"
 )
 
@@ -25,7 +27,13 @@ func NewPacker(name string, selector pack.BinSelector, factory pack.BinFactory) 
 
 // Pack places item using the selector's policy.
 func (p *Packer) Pack(item pack.Item) (pack.Placement, error) {
-	if placement, idx := p.selector.Select(p.bins, item); idx >= 0 {
+	placement, idx, selErr := p.selector.Select(p.bins, item)
+	if selErr != nil {
+		p.result.Unplaced = append(p.result.Unplaced, item.ID())
+		p.result.SetPlacementError(item.ID(), selErr)
+		return nil, pack.ErrItemTooLarge
+	}
+	if idx >= 0 {
 		p.result.Placements = append(p.result.Placements, placement)
 		return placement, nil
 	}
@@ -36,8 +44,14 @@ func (p *Packer) Pack(item pack.Item) (pack.Placement, error) {
 		return nil, pack.ErrNoOpenBin
 	}
 	newBin := p.factory.Open()
-	placement, ok := newBin.TryPlace(item)
-	if !ok {
+	placement, err := newBin.TryPlace(item)
+	if err != nil && !errors.Is(err, pack.ErrNoRoom) {
+		// Permanent error — item can never fit in any bin of this config.
+		p.result.Unplaced = append(p.result.Unplaced, item.ID())
+		p.result.SetPlacementError(item.ID(), err)
+		return nil, pack.ErrItemTooLarge
+	}
+	if errors.Is(err, pack.ErrNoRoom) {
 		p.result.Unplaced = append(p.result.Unplaced, item.ID())
 		return nil, pack.ErrItemTooLarge
 	}

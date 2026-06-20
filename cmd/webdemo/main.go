@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -74,6 +75,7 @@ type PackResponse struct {
 	Placements []PlacementResult  `json:"placements"`
 	Unplaced   []string           `json:"unplaced"`
 	FreeRects  [][]FreeRect       `json:"free_rects,omitempty"` // per-bin, guillotine only
+	ItemErrors map[string]string  `json:"item_errors,omitempty"`
 	Error      string             `json:"error,omitempty"`
 }
 
@@ -141,7 +143,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "nf":
 		p := online.NextFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -149,7 +151,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "nkf":
 		p := online.NextKFit(3, factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -157,7 +159,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "bf":
 		p := online.BestFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -165,7 +167,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "wf":
 		p := online.WorstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -173,7 +175,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "awf":
 		p := online.AlmostWorstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -181,7 +183,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "rff":
 		p := online.NewRFF(cap, factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -189,7 +191,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "hk":
 		p := online.NewHarmonicK(11, cap, factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -216,14 +218,14 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	default:
 		p := online.FirstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
 		result = p.Result()
 	}
 
-	if err != nil {
+	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
@@ -237,8 +239,9 @@ func pack1D(req PackRequest) (PackResponse, error) {
 
 func buildResponse1D(result pack.Result, binWidth float64, sizeByID map[string]float64) PackResponse {
 	resp := PackResponse{
-		BinsUsed: result.BinsUsed(),
-		Unplaced: result.Unplaced,
+		BinsUsed:   result.BinsUsed(),
+		Unplaced:   result.Unplaced,
+		ItemErrors: placementErrors(result.PlacementErrors),
 	}
 	// Track how far along each bin we are so we can return x-offsets.
 	offsets := make(map[string]float64)
@@ -299,7 +302,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	case "nf":
 		p := online.NextFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -307,7 +310,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	case "bf":
 		p := online.BestFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -315,7 +318,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	case "wf":
 		p := online.WorstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -323,14 +326,14 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	default: // ff, maxrects, guillotine
 		p := online.FirstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
 		result = p.Result()
 	}
 
-	if err != nil {
+	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
@@ -339,8 +342,9 @@ func pack2D(req PackRequest) (PackResponse, error) {
 
 func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackResponse {
 	resp := PackResponse{
-		BinsUsed: result.BinsUsed(),
-		Unplaced: result.Unplaced,
+		BinsUsed:   result.BinsUsed(),
+		Unplaced:   result.Unplaced,
+		ItemErrors: placementErrors(result.PlacementErrors),
 	}
 	for _, p := range result.Placements {
 		if p == nil {
@@ -383,7 +387,12 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 func pack3D(req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewExtremePointStrategy), req.Constraints)
+	minSup, scalarSpecs := extractMinSupport(req.Constraints)
+	stratFn := d3.NewExtremePointStrategy
+	if minSup > 0 {
+		stratFn = d3.NewExtremePointStrategyWithSupport(minSup)
+	}
+	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), scalarSpecs)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
@@ -410,7 +419,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	case "nf":
 		p := online.NextFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -418,7 +427,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	case "bf":
 		p := online.BestFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -426,7 +435,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	case "wf":
 		p := online.WorstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
@@ -434,14 +443,14 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	default: // ff
 		p := online.FirstFit(factory)
 		for _, it := range items {
-			if _, e := p.Pack(it); e != nil {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 				return PackResponse{Error: e.Error()}, nil
 			}
 		}
 		result = p.Result()
 	}
 
-	if err != nil {
+	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
@@ -450,8 +459,9 @@ func pack3D(req PackRequest) (PackResponse, error) {
 
 func buildResponse3D(result pack.Result) PackResponse {
 	resp := PackResponse{
-		BinsUsed: result.BinsUsed(),
-		Unplaced: result.Unplaced,
+		BinsUsed:   result.BinsUsed(),
+		Unplaced:   result.Unplaced,
+		ItemErrors: placementErrors(result.PlacementErrors),
 	}
 	for _, p := range result.Placements {
 		if p == nil {
@@ -476,6 +486,31 @@ func buildResponse3D(result pack.Result) PackResponse {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// placementErrors converts a map[string]error to map[string]string for JSON serialisation.
+func placementErrors(errs map[string]error) map[string]string {
+	if len(errs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(errs))
+	for k, v := range errs {
+		out[k] = v.Error()
+	}
+	return out
+}
+
+// extractMinSupport pulls out any "minsupport" spec (value 0-100) and returns
+// the fraction (0-1) plus the remaining scalar-only specs.
+func extractMinSupport(specs []ConstraintSpec) (frac float64, rest []ConstraintSpec) {
+	for _, s := range specs {
+		if s.Op == "minsupport" {
+			frac = s.Value / 100.0
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	return
+}
 
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.
 func buildConstraints(specs []ConstraintSpec) []pack.Constraint {

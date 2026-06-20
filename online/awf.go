@@ -1,6 +1,7 @@
 package online
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -12,7 +13,7 @@ import (
 // R∞_AWF ≤ 17/10.
 type awfSelector struct{}
 
-func (awfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (awfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	type cand struct {
 		idx  int
 		util float64
@@ -25,7 +26,7 @@ func (awfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int)
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, -1
+		return nil, -1, nil
 	}
 	// Sort ascending by utilisation (lowest utilisation = most empty).
 	sort.Slice(candidates, func(i, j int) bool {
@@ -41,11 +42,16 @@ func (awfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int)
 		order = candidates
 	}
 	for _, c := range order {
-		if p, ok := bins[c.idx].TryPlace(item); ok {
-			return p, c.idx
+		p, err := bins[c.idx].TryPlace(item)
+		if err == nil {
+			return p, c.idx, nil
 		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err // propagate permanent error
+		}
+		// ErrNoRoom: continue to next bin
 	}
-	return nil, -1
+	return nil, -1, nil
 }
 
 // AlmostWorstFit returns an Almost Worst Fit online packer.

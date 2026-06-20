@@ -1,6 +1,7 @@
 package online
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -10,7 +11,7 @@ import (
 // Places the item in the bin with the lowest current utilisation (most space).
 type wfSelector struct{}
 
-func (wfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (wfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	type cand struct {
 		idx  int
 		util float64
@@ -27,11 +28,16 @@ func (wfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) 
 		return candidates[i].util < candidates[j].util
 	})
 	for _, c := range candidates {
-		if p, ok := bins[c.idx].TryPlace(item); ok {
-			return p, c.idx
+		p, err := bins[c.idx].TryPlace(item)
+		if err == nil {
+			return p, c.idx, nil
 		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err // propagate permanent error
+		}
+		// ErrNoRoom: continue to next bin
 	}
-	return nil, -1
+	return nil, -1, nil
 }
 
 // WorstFit returns a Worst Fit online packer.

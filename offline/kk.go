@@ -2,6 +2,7 @@ package offline
 
 import (
 	"container/heap"
+	"errors"
 
 	"github.com/wfloyd/go-pack-bins/pack"
 )
@@ -55,9 +56,12 @@ func KarmarkarKarp(items []pack.Item, binCapacity float64, factory pack.BinFacto
 		b := factory.Open()
 		result.Bins = append(result.Bins, b)
 		for _, idx := range g {
-			p, ok := b.TryPlace(items[idx])
-			if !ok {
+			p, err := b.TryPlace(items[idx])
+			if err != nil {
 				result.Unplaced = append(result.Unplaced, items[idx].ID())
+				if !errors.Is(err, pack.ErrNoRoom) {
+					result.SetPlacementError(items[idx].ID(), err)
+				}
 				continue
 			}
 			result.Placements = append(result.Placements, p)
