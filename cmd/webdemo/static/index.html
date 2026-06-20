@@ -336,6 +336,45 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
+  /* ── stats panel ── */
+  .stats-panel {
+    width: 270px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    padding: 14px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .stats-panel::-webkit-scrollbar { width: 6px; }
+  .stats-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .stats-empty { font-size: 12px; color: var(--muted); }
+  .stats-group-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 6px 0 4px;
+  }
+  .stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .stats-table th, .stats-table td {
+    text-align: right;
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .stats-table th { color: var(--muted); font-weight: 500; }
+  .stats-table td:first-child, .stats-table th:first-child {
+    text-align: left;
+    color: var(--accent);
+  }
+  .stats-table tbody tr:last-child td { border-bottom: none; }
   /* ── legend ── */
   .legend {
     display: flex;
@@ -568,6 +607,14 @@
 
     <div class="legend" id="legend"></div>
   </div>
+
+  <!-- ── stats panel ── -->
+  <aside class="stats-panel" id="stats-panel">
+    <div class="section-label">Distribution</div>
+    <div id="stats-body">
+      <p class="stats-empty">Pack to see per-container metric stats.</p>
+    </div>
+  </aside>
 
 </div>
 
@@ -1472,6 +1519,81 @@ async function runNestedPack(auto = false) {
 }
 
 // ── result rendering ──────────────────────────────────────────────────────────
+// ── distribution stats ────────────────────────────────────────────────────
+// Sum / mean / population-std-dev of each metric across containers. Deviation is
+// the balance signal: low σ ⇒ evenly distributed across bins.
+function itemMap() {
+  const m = {};
+  for (const it of items) m[it.id] = it;
+  return m;
+}
+function volumeOf(it, mode) {
+  if (mode === '1d') return it.width;
+  if (mode === '2d') return it.width * it.height;
+  return it.width * it.depth * it.height;
+}
+function scalarKeys() {
+  const keys = new Set();
+  for (const it of items) for (const k in (it.scalars || {})) keys.add(k);
+  return [...keys].sort();
+}
+function fmtStat(x) {
+  if (!isFinite(x)) return '–';
+  const r = Math.round(x * 100) / 100;
+  return Number.isInteger(r) ? String(r) : r.toFixed(2);
+}
+// containers: array of arrays of item objects (one per bin/carton/pallet).
+function statsTableHTML(label, containers, mode) {
+  const n = containers.length;
+  const row = (name, valueFn) => {
+    const vals = containers.map(c => c.reduce((s, it) => s + valueFn(it), 0));
+    const sum = vals.reduce((a, b) => a + b, 0);
+    const avg = n ? sum / n : 0;
+    const variance = n ? vals.reduce((a, v) => a + (v - avg) ** 2, 0) / n : 0;
+    return `<tr><td>${name}</td><td>${fmtStat(sum)}</td><td>${fmtStat(avg)}</td><td>${fmtStat(Math.sqrt(variance))}</td></tr>`;
+  };
+  let body = row('items', () => 1) + row('volume', it => volumeOf(it, mode));
+  for (const k of scalarKeys()) body += row(k, it => (it.scalars || {})[k] || 0);
+  return `<div class="stats-group-label">${label}</div>
+    <table class="stats-table">
+      <thead><tr><th>metric</th><th>sum</th><th>avg</th><th>σ</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+function renderStats(data, mode) {
+  const im = itemMap();
+  const n = data.bins_used || 0;
+  const bins = Array.from({ length: n }, () => []);
+  for (const p of (data.placements || [])) {
+    const it = im[p.item_id];
+    if (it && p.bin_index < n) bins[p.bin_index].push(it);
+  }
+  const el = document.getElementById('stats-body');
+  el.innerHTML = n ? statsTableHTML(`Bins (${n})`, bins, mode)
+                   : '<p class="stats-empty">No bins.</p>';
+}
+function renderStatsNested(data, mode) {
+  const im = itemMap();
+  const l0 = data.levels[0], l1 = data.levels[1];
+  const nC = l0.bins_used || 0, nP = l1.bins_used || 0;
+  const cartons = Array.from({ length: nC }, () => []);
+  for (const p of (l0.placements || [])) {
+    const it = im[p.item_id];
+    if (it && p.bin_index < nC) cartons[p.bin_index].push(it);
+  }
+  const pallets = Array.from({ length: nP }, () => []);
+  for (const cp of (l1.placements || [])) {
+    const m = cp.item_id.match(/carton_(\d+)/);
+    if (!m || cp.bin_index >= nP) continue;
+    const cIdx = parseInt(m[1]);
+    if (cIdx < cartons.length) pallets[cp.bin_index].push(...cartons[cIdx]);
+  }
+  let html = '';
+  if (nC) html += statsTableHTML(`Cartons (${nC})`, cartons, mode);
+  if (nP) html += statsTableHTML(`Pallets (${nP})`, pallets, mode);
+  document.getElementById('stats-body').innerHTML = html || '<p class="stats-empty">No containers.</p>';
+}
+
 function renderResult({ data, mode, bin }) {
   document.getElementById('stat-bins').textContent = data.bins_used;
   document.getElementById('stat-placed').textContent = (data.placements || []).length;
@@ -1500,6 +1622,7 @@ function renderResult({ data, mode, bin }) {
   });
 
   document.getElementById('empty-state').style.display = 'none';
+  renderStats(data, mode);
 
   if (mode === '1d' || mode === '2d') {
     draw2D(data, mode, bin);
@@ -1542,6 +1665,7 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
   }
 
   document.getElementById('empty-state').style.display = 'none';
+  renderStatsNested(data, mode);
 
   if (mode === '3d') {
     document.getElementById('canvas-2d').style.display = 'none';
@@ -2222,6 +2346,8 @@ function clearViz() {
   document.getElementById('canvas-3d').style.display = 'none';
   document.getElementById('labels-3d').innerHTML = '';
   document.getElementById('empty-state').style.display = 'flex';
+  document.getElementById('stats-body').innerHTML =
+    '<p class="stats-empty">Pack to see per-container metric stats.</p>';
 }
 
 function showError(msg) {
