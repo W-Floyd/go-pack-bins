@@ -1707,6 +1707,9 @@ function drawNested3D(data, innerBin, outerBin) {
   const labelEls = [];
   const occludeMeshes = []; // item meshes only — carton shells are NOT occluders
   const raycaster = new THREE.Raycaster();
+  // Per-item / per-carton labels each do a per-frame occlusion raycast — far too
+  // expensive at scale. Above this count we keep only pallet labels.
+  const showItemLabels = (l0.placements || []).length <= 150;
 
   for (let palletIdx = 0; palletIdx < nPallets; palletIdx++) {
     const offX = palletIdx * stride;
@@ -1753,19 +1756,21 @@ function drawNested3D(data, innerBin, outerBin) {
         iline.position.copy(imesh.position);
         scene3d.add(iline);
 
-        const lbl = document.createElement('div');
-        lbl.className = 'item-label-3d';
-        lbl.textContent = ip.item_id;
-        labelsEl.appendChild(lbl);
-        const ihw = ip.w/2, ihh = ip.h/2, ihd = ip.d/2;
-        labelEls.push({ el: lbl, self: imesh, center: { wx: itx, wy: ity, wz: itz }, faces: [
-          { wx: itx+ihw, wy: ity,     wz: itz,     nx:1,  ny:0,  nz:0,  area: ip.h*ip.d },
-          { wx: itx-ihw, wy: ity,     wz: itz,     nx:-1, ny:0,  nz:0,  area: ip.h*ip.d },
-          { wx: itx,     wy: ity+ihh, wz: itz,     nx:0,  ny:1,  nz:0,  area: ip.w*ip.d },
-          { wx: itx,     wy: ity-ihh, wz: itz,     nx:0,  ny:-1, nz:0,  area: ip.w*ip.d },
-          { wx: itx,     wy: ity,     wz: itz+ihd, nx:0,  ny:0,  nz:1,  area: ip.w*ip.h },
-          { wx: itx,     wy: ity,     wz: itz-ihd, nx:0,  ny:0,  nz:-1, area: ip.w*ip.h },
-        ]});
+        if (showItemLabels) {
+          const lbl = document.createElement('div');
+          lbl.className = 'item-label-3d';
+          lbl.textContent = ip.item_id;
+          labelsEl.appendChild(lbl);
+          const ihw = ip.w/2, ihh = ip.h/2, ihd = ip.d/2;
+          labelEls.push({ el: lbl, self: imesh, center: { wx: itx, wy: ity, wz: itz }, faces: [
+            { wx: itx+ihw, wy: ity,     wz: itz,     nx:1,  ny:0,  nz:0,  area: ip.h*ip.d },
+            { wx: itx-ihw, wy: ity,     wz: itz,     nx:-1, ny:0,  nz:0,  area: ip.h*ip.d },
+            { wx: itx,     wy: ity+ihh, wz: itz,     nx:0,  ny:1,  nz:0,  area: ip.w*ip.d },
+            { wx: itx,     wy: ity-ihh, wz: itz,     nx:0,  ny:-1, nz:0,  area: ip.w*ip.d },
+            { wx: itx,     wy: ity,     wz: itz+ihd, nx:0,  ny:0,  nz:1,  area: ip.w*ip.h },
+            { wx: itx,     wy: ity,     wz: itz-ihd, nx:0,  ny:0,  nz:-1, area: ip.w*ip.h },
+          ]});
+        }
       }
 
       // Carton shell — semi-transparent. Deliberately NOT in occludeMeshes.
@@ -1782,7 +1787,7 @@ function drawNested3D(data, innerBin, outerBin) {
       scene3d.add(cline);
 
       // Carton label — top-centre of shell
-      {
+      if (showItemLabels) {
         const lbl = document.createElement('div');
         lbl.className = 'bin-label-3d';
         lbl.textContent = `Carton ${cartonIdx + 1}`;
