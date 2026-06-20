@@ -372,7 +372,7 @@
           </div>
           <div class="field">
             <label>Algorithm</label>
-            <select id="algorithm" onchange="scheduleAutoPack()"></select>
+            <select id="algorithm" onchange="onAlgorithmChange()"></select>
           </div>
         </div>
       </div>
@@ -397,7 +397,7 @@
           <div style="margin-top:6px">
             <div class="field">
               <label>Inner algorithm</label>
-              <select id="inner-algorithm" onchange="scheduleAutoPack()"></select>
+              <select id="inner-algorithm" onchange="onAlgorithmChange()"></select>
             </div>
           </div>
         </div>
@@ -456,21 +456,21 @@
         </div>
       </div>
 
-      <!-- balance objectives -->
-      <div>
-        <div class="section-label">Balance objectives</div>
-        <div id="pref-hint" style="display:none;font-size:11px;color:var(--warn);margin-bottom:6px">
-          Active — overrides the algorithm above (uses preference-fit selection).
+      <!-- balance objectives — one panel per Preference-Fit level -->
+      <div id="balance-section" style="display:none">
+        <div class="section-label" id="balance-label">Balance objectives</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          Scores Preference-Fit bin selection. Constraints still apply.
         </div>
-        <div class="item-list" id="preference-list"></div>
+        <div class="item-list" id="pref-list"></div>
         <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
           <div class="field" id="pref-scalar-field" style="flex:2; min-width:64px">
             <label>Scalar</label>
-            <input type="text" id="pref-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px" onkeydown="if(event.key==='Enter')addPreference()">
+            <input type="text" id="pref-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px" onkeydown="if(event.key==='Enter')addPreference('outer')">
           </div>
           <div class="field" style="flex:1; min-width:84px">
             <label>Mode</label>
-            <select id="pref-mode" onchange="onPrefModeChange()">
+            <select id="pref-mode" onchange="onPrefModeChange('outer')">
               <option value="balance">balance</option>
               <option value="concentrate">concentrate</option>
               <option value="minheight" id="pref-minheight" style="display:none">min height</option>
@@ -479,9 +479,38 @@
           </div>
           <div class="field" style="flex:1; min-width:48px">
             <label>Weight</label>
-            <input type="number" id="pref-weight" value="1" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addPreference()">
+            <input type="number" id="pref-weight" value="1" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addPreference('outer')">
           </div>
-          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addPreference()">+ Add</button>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addPreference('outer')">+ Add</button>
+        </div>
+      </div>
+
+      <!-- inner-level balance objectives (nested mode, inner algorithm = Preference-Fit) -->
+      <div id="inner-balance-section" style="display:none">
+        <div class="section-label">Inner balance objectives</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          Scores Preference-Fit selection inside cartons. Constraints still apply.
+        </div>
+        <div class="item-list" id="ipref-list"></div>
+        <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field" id="ipref-scalar-field" style="flex:2; min-width:64px">
+            <label>Scalar</label>
+            <input type="text" id="ipref-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px" onkeydown="if(event.key==='Enter')addPreference('inner')">
+          </div>
+          <div class="field" style="flex:1; min-width:84px">
+            <label>Mode</label>
+            <select id="ipref-mode" onchange="onPrefModeChange('inner')">
+              <option value="balance">balance</option>
+              <option value="concentrate">concentrate</option>
+              <option value="minheight" id="ipref-minheight" style="display:none">min height</option>
+              <option value="mincg" id="ipref-mincg" style="display:none">min CG</option>
+            </select>
+          </div>
+          <div class="field" style="flex:1; min-width:48px">
+            <label>Weight</label>
+            <input type="number" id="ipref-weight" value="1" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addPreference('inner')">
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addPreference('inner')">+ Add</button>
         </div>
       </div>
 
@@ -534,7 +563,8 @@ function itemColor(idx) { return COLORS[idx % COLORS.length]; }
 // ── state ────────────────────────────────────────────────────────────────────
 let items = [];
 let constraints = []; // [{scalar, op, value}]
-let preferences = []; // [{scalar, mode, weight}]
+let preferences = []; // outer-level objectives [{scalar, mode, weight}]
+let innerPreferences = []; // inner-level objectives (nested mode)
 let lastResult = null;
 let activeBin = 0;
 let itemCounter = 0;
@@ -559,6 +589,7 @@ const ALGOS = {
     {v:'mffd',l:'Modified FFD (MFFD)'},
     {v:'kk',  l:'Karmarkar-Karp (KK)'},
     {v:'bc',  l:'Bin Completion (exact)'},
+    {v:'pref',l:'Preference-Fit (balancing)'},
   ],
   '2d': [
     {v:'auto',       l:'Auto (best-of)'},
@@ -570,6 +601,7 @@ const ALGOS = {
     {v:'ffd',        l:'First Fit Decreasing (FFD)'},
     {v:'bfd',        l:'Best Fit Decreasing (BFD)'},
     {v:'nfd',        l:'Next Fit Decreasing (NFD)'},
+    {v:'pref',       l:'Preference-Fit (balancing)'},
   ],
   '3d': [
     {v:'auto',l:'Auto (best-of)'},
@@ -580,6 +612,7 @@ const ALGOS = {
     {v:'ffd', l:'First Fit Decreasing (FFD)'},
     {v:'bfd', l:'Best Fit Decreasing (BFD)'},
     {v:'nfd', l:'Next Fit Decreasing (NFD)'},
+    {v:'pref',l:'Preference-Fit (balancing)'},
   ],
 };
 
@@ -592,9 +625,10 @@ function onModeChange() {
   items = [];
   constraints = [];
   preferences = [];
+  innerPreferences = [];
   renderItemList();
   renderConstraintList();
-  renderPreferenceList();
+  renderPreferenceLists();
   buildPresetSelect();
   clearViz();
   if (nestedEnabled) {
@@ -607,14 +641,17 @@ function onModeChange() {
     document.getElementById('con-op').value = 'max';
   }
   onConOpChange();
-  // min-height / min-CG preferences rely on 3D bin metrics
+  // min-height / min-CG preferences rely on 3D bin metrics — gate both panels
   const threeD = mode === '3d';
-  document.getElementById('pref-minheight').style.display = threeD ? '' : 'none';
-  document.getElementById('pref-mincg').style.display = threeD ? '' : 'none';
-  if (!threeD && ['minheight', 'mincg'].includes(document.getElementById('pref-mode').value)) {
-    document.getElementById('pref-mode').value = 'balance';
-  }
-  onPrefModeChange();
+  ['pref', 'ipref'].forEach(pre => {
+    document.getElementById(pre + '-minheight').style.display = threeD ? '' : 'none';
+    document.getElementById(pre + '-mincg').style.display = threeD ? '' : 'none';
+    const modeEl = document.getElementById(pre + '-mode');
+    if (!threeD && ['minheight', 'mincg'].includes(modeEl.value)) modeEl.value = 'balance';
+  });
+  onPrefModeChange('outer');
+  onPrefModeChange('inner');
+  updateBalanceVisibility();
 }
 
 function buildAlgorithmSelect(mode) {
@@ -673,6 +710,7 @@ function onNestedToggle() {
     buildInnerBinFields(mode);
     buildInnerAlgorithmSelect(mode);
   }
+  updateBalanceVisibility();
   scheduleAutoPack();
 }
 
@@ -769,37 +807,63 @@ function removeConstraint(idx) {
   scheduleAutoPack();
 }
 
-function onPrefModeChange() {
+// Preference panels are identical bar their element-id prefix and backing array.
+// 'outer' drives pref-* / preferences; 'inner' drives ipref-* / innerPreferences.
+function prefCtx(lvl) {
+  return lvl === 'inner'
+    ? { pre: 'ipref', arr: innerPreferences }
+    : { pre: 'pref', arr: preferences };
+}
+
+function onPrefModeChange(lvl) {
   // min-height is purely geometric — no scalar. min-CG needs the mass scalar.
-  const mode = document.getElementById('pref-mode').value;
-  const scalarEl = document.getElementById('pref-scalar');
-  document.getElementById('pref-scalar-field').style.display = mode === 'minheight' ? 'none' : '';
-  scalarEl.placeholder = mode === 'mincg' ? 'weight (mass)' : 'weight';
+  const { pre } = prefCtx(lvl);
+  const mode = document.getElementById(pre + '-mode').value;
+  document.getElementById(pre + '-scalar-field').style.display = mode === 'minheight' ? 'none' : '';
+  document.getElementById(pre + '-scalar').placeholder = mode === 'mincg' ? 'weight (mass)' : 'weight';
 }
 
-function addPreference() {
-  const mode = document.getElementById('pref-mode').value;
-  const scalar = mode === 'minheight' ? '' : document.getElementById('pref-scalar').value.trim();
+function addPreference(lvl) {
+  const { pre, arr } = prefCtx(lvl);
+  const mode = document.getElementById(pre + '-mode').value;
+  const scalar = mode === 'minheight' ? '' : document.getElementById(pre + '-scalar').value.trim();
   if (mode !== 'minheight' && !scalar) return;
-  let weight = parseFloat(document.getElementById('pref-weight').value);
+  let weight = parseFloat(document.getElementById(pre + '-weight').value);
   if (isNaN(weight) || weight === 0) weight = 1;
-  preferences.push({ scalar, mode, weight });
-  document.getElementById('pref-scalar').value = '';
-  renderPreferenceList();
+  arr.push({ scalar, mode, weight });
+  document.getElementById(pre + '-scalar').value = '';
+  renderPreferenceList(lvl);
   scheduleAutoPack();
 }
 
-function removePreference(idx) {
-  preferences.splice(idx, 1);
-  renderPreferenceList();
+function removePreference(lvl, idx) {
+  prefCtx(lvl).arr.splice(idx, 1);
+  renderPreferenceList(lvl);
   scheduleAutoPack();
 }
 
-function renderPreferenceList() {
-  const el = document.getElementById('preference-list');
-  document.getElementById('pref-hint').style.display = preferences.length ? '' : 'none';
+function onAlgorithmChange() {
+  updateBalanceVisibility();
+  scheduleAutoPack();
+}
+
+// Each balance panel shows only when its level's algorithm is Preference-Fit.
+// The outer label switches to "Outer …" in nested mode to disambiguate.
+function updateBalanceVisibility() {
+  const outerPref = document.getElementById('algorithm').value === 'pref';
+  document.getElementById('balance-section').style.display = outerPref ? '' : 'none';
+  document.getElementById('balance-label').textContent =
+    nestedEnabled ? 'Outer balance objectives' : 'Balance objectives';
+  const innerSel = document.getElementById('inner-algorithm');
+  const innerPref = nestedEnabled && innerSel && innerSel.value === 'pref';
+  document.getElementById('inner-balance-section').style.display = innerPref ? '' : 'none';
+}
+
+function renderPreferenceList(lvl) {
+  const { pre, arr } = prefCtx(lvl);
+  const el = document.getElementById(pre + '-list');
   el.innerHTML = '';
-  preferences.forEach((p, idx) => {
+  arr.forEach((p, idx) => {
     const row = document.createElement('div');
     row.className = 'item-row';
     const label = p.mode === 'minheight' ? 'minimize stack height'
@@ -809,9 +873,15 @@ function renderPreferenceList() {
     const wPart = p.weight !== 1 ? ` ×${p.weight}` : '';
     row.innerHTML = `
       <span class="item-dims" style="flex:1;font-family:var(--mono)">${label}${wPart}</span>
-      <button class="remove-btn" onclick="removePreference(${idx})">✕</button>`;
+      <button class="remove-btn" onclick="removePreference('${lvl}', ${idx})">✕</button>`;
     el.appendChild(row);
   });
+}
+
+// Render both preference panels.
+function renderPreferenceLists() {
+  renderPreferenceList('outer');
+  renderPreferenceList('inner');
 }
 
 function renderConstraintList() {
@@ -889,7 +959,7 @@ const PRESETS = {
     },
     {
       label: 'Balance weight across bins',
-      bin: {w:10}, algo: 'ff',
+      bin: {w:10}, algo: 'pref',
       preferences: [{scalar:'weight', mode:'balance', weight:1}],
       items: [
         {w:3, s:{weight:9}}, {w:3, s:{weight:1}},
@@ -1009,7 +1079,7 @@ const PRESETS = {
     },
     {
       label: 'Keep stacks low (minimize height)',
-      bin: {w:10, d:10, h:10}, algo: 'ff',
+      bin: {w:10, d:10, h:10}, algo: 'pref',
       preferences: [{scalar:'', mode:'minheight', weight:1}],
       items: [
         {w:8, d:10, h:8}, {w:10, d:10, h:5},
@@ -1019,7 +1089,7 @@ const PRESETS = {
     },
     {
       label: 'Stable load (minimize CG)',
-      bin: {w:10, d:10, h:10}, algo: 'ff',
+      bin: {w:10, d:10, h:10}, algo: 'pref',
       preferences: [{scalar:'weight', mode:'mincg', weight:1}],
       items: [
         {w:8, d:10, h:8, s:{weight:1}}, {w:10, d:10, h:5, s:{weight:100}},
@@ -1069,6 +1139,7 @@ function loadPreset(idx) {
   items = [];
   constraints = preset.constraints ? preset.constraints.map(c => ({...c})) : [];
   preferences = preset.preferences ? preset.preferences.map(p => ({...p})) : [];
+  innerPreferences = preset.innerPreferences ? preset.innerPreferences.map(p => ({...p})) : [];
   itemCounter = 0;
 
   // Nested mode toggle
@@ -1116,7 +1187,8 @@ function loadPreset(idx) {
 
   renderItemList();
   renderConstraintList();
-  renderPreferenceList();
+  renderPreferenceLists();
+  updateBalanceVisibility();
   scheduleAutoPack();
 }
 
@@ -1252,7 +1324,8 @@ async function runNestedPack(auto = false) {
   const body = {
     mode,
     levels: [
-      { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [] },
+      { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [],
+        preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
       { bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
         constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
         preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },

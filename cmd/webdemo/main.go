@@ -147,9 +147,9 @@ func pack1D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Soft balancing objectives override the algorithm and use PreferenceFit.
-	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
-		result, perr := runPreferenceFit(factory, prefs, items)
+	// Preference-fit is its own selection algorithm, scored by the balance objectives.
+	if req.Algorithm == "pref" {
+		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
 		if perr != nil {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -321,9 +321,9 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Soft balancing objectives override the algorithm and use PreferenceFit.
-	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
-		result, perr := runPreferenceFit(factory, prefs, items)
+	// Preference-fit is its own selection algorithm, scored by the balance objectives.
+	if req.Algorithm == "pref" {
+		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
 		if perr != nil {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -458,9 +458,9 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Soft balancing objectives override the algorithm and use PreferenceFit.
-	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
-		result, perr := runPreferenceFit(factory, prefs, items)
+	// Preference-fit is its own selection algorithm, scored by the balance objectives.
+	if req.Algorithm == "pref" {
+		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
 		if perr != nil {
 			return PackResponse{Error: perr.Error()}, nil
 		}
