@@ -604,14 +604,16 @@ func buildPreferences(specs []PreferenceSpec) []pack.Preference {
 			base = pack.MinimizeCG(s.Scalar) // s.Scalar names the mass scalar
 		case "balance":
 			if s.Scalar == "" {
-				continue
+				base = pack.BalanceCount() // no scalar → balance by item count
+			} else {
+				base = pack.ColocateLow(s.Scalar)
 			}
-			base = pack.ColocateLow(s.Scalar)
 		default: // "concentrate"
 			if s.Scalar == "" {
-				continue
+				base = pack.ConcentrateCount() // no scalar → concentrate by item count
+			} else {
+				base = pack.ColocateHigh(s.Scalar)
 			}
-			base = pack.ColocateHigh(s.Scalar)
 		}
 		prefs = append(prefs, pack.Weighted(base, w))
 	}

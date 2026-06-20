@@ -802,6 +802,55 @@ func TestPeakHeight_Metric(t *testing.T) {
 	}
 }
 
+// ─── BalanceCount preference (no scalar) ──────────────────────────────────────
+
+func TestItemCount_Metric(t *testing.T) {
+	cb := pack.NewConstrainedBin(d1.NewFactory(10).Open(), nil)
+	if got := cb.Aggregates()[pack.MetricItemCount]; got != 0 {
+		t.Errorf("empty bin count = %v, want 0", got)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := cb.TryPlace(d1.NewItem("x", 2)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := cb.Aggregates()[pack.MetricItemCount]; got != 3 {
+		t.Errorf("count after 3 placements = %v, want 3", got)
+	}
+}
+
+func TestBalanceCount_1D(t *testing.T) {
+	// a(6) opens bin0, b(6) opens bin1 (each rem 4). The four unit items could all
+	// pile into bin0 under first-fit (5/1 split); BalanceCount must spread them so
+	// the bins hold an equal number of items (3/3).
+	factory := pack.NewConstrainedFactory(d1.NewFactory(10))
+	packer := online.PreferenceFit(factory, pack.BalanceCount())
+
+	items := []pack.Item{
+		d1.NewItem("a", 6), d1.NewItem("b", 6),
+		d1.NewItem("c", 1), d1.NewItem("d", 1), d1.NewItem("e", 1), d1.NewItem("f", 1),
+	}
+	for i, it := range items {
+		if _, err := packer.Pack(it); err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+	}
+	countByBin := map[string]int{}
+	for _, p := range packer.Result().Placements {
+		if p != nil {
+			countByBin[p.BinID()]++
+		}
+	}
+	if len(countByBin) != 2 {
+		t.Fatalf("expected 2 bins, got %d", len(countByBin))
+	}
+	for bin, n := range countByBin {
+		if n != 3 {
+			t.Errorf("bin %s holds %d items, want 3 (balanced)", bin, n)
+		}
+	}
+}
+
 // ─── MinimizeCG preference (3D) ───────────────────────────────────────────────
 
 func TestCGHeight_Metric(t *testing.T) {
