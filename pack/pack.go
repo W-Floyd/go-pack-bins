@@ -136,6 +136,21 @@ type OnlinePacker interface {
 	Name() string
 }
 
+// PlaceObserver is notified of each placement at the moment the packer commits
+// it, in commit order. It enables streaming a solve as it progresses.
+type PlaceObserver func(Placement)
+
+// Observable is implemented by packers that can report each placement as it is
+// committed mid-solve. The sequential packers support this: every online
+// algorithm, and the sort-then-online offline wrappers that delegate to one.
+// Global or multi-phase packers (exact solvers, BestOf, balancing) do not —
+// they have no meaningful partial state to observe.
+type Observable interface {
+	// Observe registers fn to be called once per placement as it is committed.
+	// A nil fn detaches any current observer. Survives Reset.
+	Observe(fn PlaceObserver)
+}
+
 // OfflinePacker inspects all items before packing any of them.
 type OfflinePacker interface {
 	// PackAll sorts or otherwise preprocesses items, then packs them all.

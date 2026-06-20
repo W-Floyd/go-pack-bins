@@ -18,6 +18,7 @@ type Packer struct {
 	name     string
 	bins     []pack.Bin
 	result   pack.Result
+	observer pack.PlaceObserver
 }
 
 // NewPacker constructs a Packer with the given selector, factory, and name.
@@ -35,6 +36,9 @@ func (p *Packer) Pack(item pack.Item) (pack.Placement, error) {
 	}
 	if idx >= 0 {
 		p.result.Placements = append(p.result.Placements, placement)
+		if p.observer != nil {
+			p.observer(placement)
+		}
 		return placement, nil
 	}
 
@@ -58,11 +62,19 @@ func (p *Packer) Pack(item pack.Item) (pack.Placement, error) {
 	p.bins = append(p.bins, newBin)
 	p.result.Bins = append(p.result.Bins, newBin)
 	p.result.Placements = append(p.result.Placements, placement)
+	if p.observer != nil {
+		p.observer(placement)
+	}
 	return placement, nil
 }
 
 func (p *Packer) Result() pack.Result { return p.result }
 func (p *Packer) Name() string        { return p.name }
+
+// Observe registers an observer called once per placement as it is committed.
+// Pass nil to detach. The observer survives Reset so an offline wrapper can set
+// it once and reuse the packer across PackAll calls.
+func (p *Packer) Observe(fn pack.PlaceObserver) { p.observer = fn }
 
 // Prefill opens n empty bins up front so a selector can distribute the first
 // items across all of them, rather than filling bin 0 before bin 1 exists.
@@ -85,3 +97,4 @@ func (p *Packer) Reset() {
 }
 
 var _ pack.OnlinePacker = (*Packer)(nil)
+var _ pack.Observable = (*Packer)(nil)
