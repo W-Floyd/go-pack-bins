@@ -4,7 +4,7 @@ package meta
 import (
 	"errors"
 
-	"github.com/wfloyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 // Func adapts a bare function into a pack.OfflinePacker. Useful for wrapping
