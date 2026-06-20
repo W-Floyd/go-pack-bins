@@ -15,10 +15,14 @@ package d3
 //     usually arrive later, so these can't be gated. Instead a positive target
 //     makes the strategy prefer positions maximising that axis's contact
 //     (wall-hugging clusters); a compaction pass then closes the remaining gaps.
+//   - NoFloating is a HARD boolean gate: every item must have some support
+//     beneath it (rest on the floor or a box). It's the weaker form of Bottom
+//     (Bottom>0 already implies it) for when you only want "nothing hangs in air".
 type ContactSpec struct {
-	Bottom float64
-	SideX  float64
-	SideY  float64
+	Bottom     float64
+	SideX      float64
+	SideY      float64
+	NoFloating bool
 }
 
 func (c ContactSpec) maximizesLateral() bool { return c.SideX > 0 || c.SideY > 0 }
@@ -104,8 +108,14 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
-			if ep.contact.Bottom > 0 && ep.supportFrac(x, y, z, w, d) < ep.contact.Bottom {
-				continue
+			if ep.contact.Bottom > 0 || ep.contact.NoFloating {
+				sf := ep.supportFrac(x, y, z, w, d)
+				if sf < ep.contact.Bottom {
+					continue
+				}
+				if ep.contact.NoFloating && sf <= compactEps {
+					continue // hanging in air
+				}
 			}
 			c := box{x, y, z, w, d, h}
 			if !bestSet || ep.preferred(c, best) {
