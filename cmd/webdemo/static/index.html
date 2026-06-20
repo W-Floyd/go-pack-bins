@@ -111,9 +111,11 @@
   .row .field { flex: 1; }
   /* ── item list ── */
   .item-list { display: flex; flex-direction: column; gap: 6px; }
-  /* The items list scrolls on its own so a large item count doesn't blow out
-     the sidebar (constraint/preference lists stay short and aren't capped). */
-  #item-list { max-height: 260px; overflow-y: auto; padding-right: 2px; }
+  /* The items section grows to fill leftover sidebar height, and the list
+     scrolls within it — so a large item count doesn't blow out the sidebar
+     (constraint/preference lists stay short and aren't capped). */
+  #items-section { flex: 1 1 auto; min-height: 120px; display: flex; flex-direction: column; }
+  #item-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
   #item-list::-webkit-scrollbar { width: 6px; }
   #item-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   .item-row {
@@ -430,7 +432,7 @@
       </div>
 
       <!-- item list -->
-      <div>
+      <div id="items-section">
         <div class="section-label">Items <span id="item-count" style="color:var(--text)">0</span></div>
         <div class="item-list" id="item-list"></div>
       </div>
