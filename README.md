@@ -43,8 +43,19 @@ factory := pack.NewConstrainedFactory(d1.NewFactory(10),
     pack.AllSame("zone"))             // one zone per bin
 ```
 
-Also available: `MinAggregate`. The 3-D extreme-point strategy additionally
-supports a minimum supported-base fraction for physically stackable packing.
+Also available: `MinAggregate`.
+
+**Per-face contact** (`d3.ContactSpec`) unifies physical stacking and
+anti-slosh as one primitive — the contacted fraction of a box's faces:
+
+- `Bottom` is a hard **support gate**: ≥ this fraction of the −z face must rest
+  on the floor or boxes below (enforced at placement, since support comes from
+  already-placed items).
+- `SideX` / `SideY` are soft **anti-slosh targets** on the lateral faces: a
+  positive value makes placement prefer wall/neighbour contact, and a compaction
+  pass (`d3.Compact` / `d2.Compact`) then slides items together to close the
+  lateral gaps that let a load shift in transit. They're targets, not gates,
+  because lateral neighbours usually arrive after a box is placed.
 
 **Preferences** score *which* bin a candidate goes in. They are consumed by
 `PreferenceFit` (and the two-pass `BalancedFit`):

@@ -5,11 +5,29 @@ package d3
 // intersection of a box surface with the bin boundary or another placed item.
 // Items are placed at the extreme point that minimises z (height), then y,
 // then x (deepest-bottom-left-fill ordering).
+// ContactSpec unifies vertical support and lateral anti-slosh as per-axis
+// contact requirements on a box's faces. All fields are fractions in [0,1].
+//
+//   - Bottom is a HARD gate: at least this fraction of the −z (bottom) face must
+//     rest on the floor or the tops of placed boxes. Enforced at placement time
+//     because support always comes from below (already-placed) items.
+//   - SideX / SideY are soft TARGETS on the ±x / ±y faces: lateral neighbours
+//     usually arrive later, so these can't be gated. Instead a positive target
+//     makes the strategy prefer positions maximising that axis's contact
+//     (wall-hugging clusters); a compaction pass then closes the remaining gaps.
+type ContactSpec struct {
+	Bottom float64
+	SideX  float64
+	SideY  float64
+}
+
+func (c ContactSpec) maximizesLateral() bool { return c.SideX > 0 || c.SideY > 0 }
+
 type ExtremePoint struct {
 	binW, binD, binH float64
 	placed           []box
 	usedVol          float64
-	minSupport       float64 // 0 = disabled; 0<v≤1 = minimum fraction of bottom face that must be supported
+	contact          ContactSpec
 }
 
 type box struct{ x, y, z, w, d, h float64 }
@@ -24,13 +42,21 @@ func NewExtremePointStrategy(w, d, h float64) PlacementStrategy3D {
 	return NewExtremePoint(w, d, h)
 }
 
-// NewExtremePointStrategyWithSupport returns a Factory3D-compatible constructor
-// that enforces a minimum supported-area fraction on every placement.
-// frac must be in [0, 1]; 0 disables the check (equivalent to NewExtremePointStrategy).
+// NewExtremePointStrategyWithSupport returns a constructor enforcing a minimum
+// bottom-support fraction. Shorthand for NewExtremePointStrategyContact with
+// only ContactSpec.Bottom set.
 func NewExtremePointStrategyWithSupport(frac float64) func(w, d, h float64) PlacementStrategy3D {
+	return NewExtremePointStrategyContact(ContactSpec{Bottom: frac})
+}
+
+// NewExtremePointStrategyContact returns a Factory3D-compatible constructor that
+// applies the given per-axis contact spec: a hard bottom-support gate plus,
+// where SideX/SideY are set, a contact-maximizing placement preference
+// (ties broken by lowest z, then y, then x).
+func NewExtremePointStrategyContact(spec ContactSpec) func(w, d, h float64) PlacementStrategy3D {
 	return func(w, d, h float64) PlacementStrategy3D {
 		ep := NewExtremePoint(w, d, h)
-		ep.minSupport = frac
+		ep.contact = spec
 		return ep
 	}
 }
@@ -62,11 +88,8 @@ func (ep *ExtremePoint) PeakHeight() float64 {
 func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
 	pts := ep.extremePoints()
 
-	type candidate struct {
-		x, y, z, w, d, h float64
-	}
 	bestSet := false
-	var best candidate
+	var best box
 
 	for _, o := range orientations {
 		w, d, h := o[0], o[1], o[2]
@@ -81,11 +104,11 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
-			if ep.minSupport > 0 && ep.supportFrac(x, y, z, w, d) < ep.minSupport {
+			if ep.contact.Bottom > 0 && ep.supportFrac(x, y, z, w, d) < ep.contact.Bottom {
 				continue
 			}
-			c := candidate{x, y, z, w, d, h}
-			if !bestSet || better(c, best) {
+			c := box{x, y, z, w, d, h}
+			if !bestSet || ep.preferred(c, best) {
 				best = c
 				bestSet = true
 			}
@@ -155,9 +178,17 @@ func (ep *ExtremePoint) conflicts(x, y, z, w, d, h float64) bool {
 	return false
 }
 
-// better returns true if candidate c is preferred over current best.
-// Priority: lower z (height), then lower y (depth), then lower x (width).
-func better(c, best struct{ x, y, z, w, d, h float64 }) bool {
+// preferred reports whether candidate c is preferred over the current best.
+// With lateral contact targets, the higher weighted lateral-contact fraction
+// wins (ties fall through); otherwise, and as the tie-break, lower z (height),
+// then lower y (depth), then lower x (width).
+func (ep *ExtremePoint) preferred(c, best box) bool {
+	if ep.contact.maximizesLateral() {
+		cc, bc := ep.lateralScore(c), ep.lateralScore(best)
+		if d := cc - bc; d > compactEps || d < -compactEps {
+			return cc > bc
+		}
+	}
 	if c.z != best.z {
 		return c.z < best.z
 	}
@@ -165,6 +196,105 @@ func better(c, best struct{ x, y, z, w, d, h float64 }) bool {
 		return c.y < best.y
 	}
 	return c.x < best.x
+}
+
+// lateralScore weights each lateral axis's contact fraction by its target.
+func (ep *ExtremePoint) lateralScore(b box) float64 {
+	return ep.contact.SideX*ep.lateralFrac(b, 0) + ep.contact.SideY*ep.lateralFrac(b, 1)
+}
+
+// lateralFrac returns the fraction of b's two faces on the given axis (0=x, 1=y)
+// that touch a wall or a placed neighbour, in [0,1].
+func (ep *ExtremePoint) lateralFrac(b box, axis int) float64 {
+	var faceArea float64
+	if axis == 0 {
+		faceArea = b.d * b.h
+	} else {
+		faceArea = b.w * b.h
+	}
+	if faceArea == 0 {
+		return 0
+	}
+	return (ep.faceContact(b, axis, false) + ep.faceContact(b, axis, true)) / (2 * faceArea)
+}
+
+// faceContact returns the contacted area of one face of b: axis 0=x, 1=y, 2=z;
+// high=false is the low (−) face, high=true the high (+) face.
+func (ep *ExtremePoint) faceContact(b box, axis int, high bool) float64 {
+	near := func(a, c float64) bool { return a-c < compactEps && a-c > -compactEps }
+	var coord, binDim float64
+	switch axis {
+	case 0:
+		coord, binDim = b.x, ep.binW
+		if high {
+			coord = b.x + b.w
+		}
+	case 1:
+		coord, binDim = b.y, ep.binD
+		if high {
+			coord = b.y + b.d
+		}
+	default:
+		coord, binDim = b.z, ep.binH
+		if high {
+			coord = b.z + b.h
+		}
+	}
+	// Wall contact.
+	if (!high && coord <= compactEps) || (high && near(coord, binDim)) {
+		switch axis {
+		case 0:
+			return b.d * b.h
+		case 1:
+			return b.w * b.h
+		default:
+			return b.w * b.d
+		}
+	}
+	// Neighbour contact: boxes flush against this face, overlapping in the other two axes.
+	area := 0.0
+	for _, q := range ep.placed {
+		var qFace float64
+		if high {
+			qFace = faceLow(q, axis)
+		} else {
+			qFace = faceHigh(q, axis)
+		}
+		if !near(coord, qFace) {
+			continue
+		}
+		switch axis {
+		case 0:
+			area += overlap1D(b.y, b.y+b.d, q.y, q.y+q.d) * overlap1D(b.z, b.z+b.h, q.z, q.z+q.h)
+		case 1:
+			area += overlap1D(b.x, b.x+b.w, q.x, q.x+q.w) * overlap1D(b.z, b.z+b.h, q.z, q.z+q.h)
+		default:
+			area += overlap1D(b.x, b.x+b.w, q.x, q.x+q.w) * overlap1D(b.y, b.y+b.d, q.y, q.y+q.d)
+		}
+	}
+	return area
+}
+
+func faceLow(b box, axis int) float64 {
+	switch axis {
+	case 0:
+		return b.x
+	case 1:
+		return b.y
+	default:
+		return b.z
+	}
+}
+
+func faceHigh(b box, axis int) float64 {
+	switch axis {
+	case 0:
+		return b.x + b.w
+	case 1:
+		return b.y + b.d
+	default:
+		return b.z + b.h
+	}
 }
 
 var _ PlacementStrategy3D = (*ExtremePoint)(nil)

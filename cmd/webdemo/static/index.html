@@ -502,7 +502,6 @@
               <option value="max">max ≤</option>
               <option value="min">min ≥</option>
               <option value="allsame">all same</option>
-              <option value="minsupport" id="op-minsupport" style="display:none">min support %</option>
             </select>
           </div>
           <div class="field" id="con-value-field" style="flex:1; min-width:54px">
@@ -510,6 +509,29 @@
             <input type="number" id="con-value" placeholder="100" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addConstraint()">
           </div>
           <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addConstraint()">+ Add</button>
+        </div>
+      </div>
+
+      <!-- support / anti-slosh: per-face contact requirements (2D/3D) -->
+      <div id="contact-section" style="display:none">
+        <div class="section-label">Support / anti-slosh</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          Min face contact % — bottom is a hard support gate; sides drive
+          contact placement + lateral compaction.
+        </div>
+        <div class="row">
+          <div class="field" id="contact-bottom-field">
+            <label>Bottom %</label>
+            <input type="number" id="contact-bottom" value="0" min="0" max="100" step="any" oninput="scheduleAutoPack()">
+          </div>
+          <div class="field">
+            <label>Side X %</label>
+            <input type="number" id="contact-x" value="0" min="0" max="100" step="any" oninput="scheduleAutoPack()">
+          </div>
+          <div class="field">
+            <label>Side Y %</label>
+            <input type="number" id="contact-y" value="0" min="0" max="100" step="any" oninput="scheduleAutoPack()">
+          </div>
         </div>
       </div>
 
@@ -705,14 +727,13 @@ function onModeChange() {
     buildInnerBinFields(mode);
     buildInnerAlgorithmSelect(mode);
   }
-  document.getElementById('op-minsupport').style.display = mode === '3d' ? '' : 'none';
-  // If current op is minsupport but mode changed away from 3d, reset to max
-  if (mode !== '3d' && document.getElementById('con-op').value === 'minsupport') {
-    document.getElementById('con-op').value = 'max';
-  }
   onConOpChange();
-  // min-height / min-CG preferences rely on 3D bin metrics — gate both panels
+  // Support / anti-slosh applies to 2D/3D; the bottom-support gate is 3D only.
   const threeD = mode === '3d';
+  document.getElementById('contact-section').style.display = (mode === '1d') ? 'none' : '';
+  document.getElementById('contact-bottom-field').style.display = threeD ? '' : 'none';
+  setContact({});
+  // min-height / min-CG preferences rely on 3D bin metrics — gate both panels
   ['pref', 'ipref'].forEach(pre => {
     document.getElementById(pre + '-minheight').style.display = threeD ? '' : 'none';
     document.getElementById(pre + '-mincg').style.display = threeD ? '' : 'none';
@@ -827,6 +848,25 @@ function parseScalars(str) {
   return out;
 }
 
+// readContact returns the per-face contact spec (fractions 0-1) for the request.
+// 1D has no faces; 2D omits the bottom (no gravity).
+function readContact() {
+  const mode = document.getElementById('mode').value;
+  if (mode === '1d') return {};
+  const pct = id => Math.max(0, Math.min(100, parseFloat(document.getElementById(id).value) || 0)) / 100;
+  const c = { side_x: pct('contact-x'), side_y: pct('contact-y') };
+  if (mode === '3d') c.bottom = pct('contact-bottom');
+  return c;
+}
+
+// setContact sets the contact inputs from a preset spec (values in percent).
+function setContact(spec) {
+  spec = spec || {};
+  document.getElementById('contact-bottom').value = spec.bottom || 0;
+  document.getElementById('contact-x').value = spec.side_x || 0;
+  document.getElementById('contact-y').value = spec.side_y || 0;
+}
+
 function addItem() {
   const mode = document.getElementById('mode').value;
   const w = parseFloat(document.getElementById('new-w').value) || 1;
@@ -848,10 +888,6 @@ function onConOpChange() {
   if (op === 'allsame') {
     scalarField.style.display = '';
     valueField.style.display = 'none';
-  } else if (op === 'minsupport') {
-    scalarField.style.display = 'none';
-    valueField.style.display = '';
-    document.getElementById('con-value').placeholder = '75';
   } else {
     scalarField.style.display = '';
     valueField.style.display = '';
@@ -861,12 +897,7 @@ function onConOpChange() {
 
 function addConstraint() {
   const op = document.getElementById('con-op').value;
-  if (op === 'minsupport') {
-    const value = parseFloat(document.getElementById('con-value').value);
-    if (isNaN(value) || value <= 0 || value > 100) return;
-    constraints = constraints.filter(c => c.op !== 'minsupport'); // only one at a time
-    constraints.push({ scalar: '', op: 'minsupport', value });
-  } else {
+  {
     const scalar = document.getElementById('con-scalar').value.trim();
     const value = op === 'allsame' ? 0 : parseFloat(document.getElementById('con-value').value);
     if (!scalar || (op !== 'allsame' && isNaN(value))) return;
@@ -972,8 +1003,8 @@ function renderConstraintList() {
   constraints.forEach((c, idx) => {
     const row = document.createElement('div');
     row.className = 'item-row';
-    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : c.op === 'minsupport' ? `support ≥ ${c.value}%` : 'all same';
-    const scalarPart = c.op === 'minsupport' ? 'bottom area' : c.scalar;
+    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : 'all same';
+    const scalarPart = c.scalar;
     row.innerHTML = `
       <span class="item-dims" style="flex:1;font-family:var(--mono)">${scalarPart} ${opLabel}</span>
       <button class="remove-btn" onclick="removeConstraint(${idx})">✕</button>`;
@@ -1262,6 +1293,15 @@ const PRESETS = {
       bin: {w:20, d:20, h:20}, algo: 'ffd',
       items: bigMix('3d', 1200, 55),
     },
+    {
+      label: 'Stable + anti-slosh (support 80%, sides 50%)',
+      bin: {w:10, d:10, h:10}, algo: 'ff',
+      contact: {bottom: 80, side_x: 50, side_y: 50},
+      items: [
+        {w:5, d:5, h:3}, {w:5, d:5, h:3}, {w:5, d:5, h:3}, {w:5, d:5, h:3},
+        {w:4, d:6, h:2}, {w:6, d:4, h:2}, {w:3, d:3, h:4}, {w:3, d:3, h:4},
+      ],
+    },
   ],
 };
 
@@ -1287,6 +1327,7 @@ function loadPreset(idx) {
   constraints = preset.constraints ? preset.constraints.map(c => ({...c})) : [];
   preferences = preset.preferences ? preset.preferences.map(p => ({...p})) : [];
   innerPreferences = preset.innerPreferences ? preset.innerPreferences.map(p => ({...p})) : [];
+  setContact(preset.contact);
   itemCounter = 0;
 
   // Nested mode toggle
@@ -1436,6 +1477,7 @@ async function runSinglePack(auto = false) {
     })),
     constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
+    contact: readContact(),
   };
 
   try {
@@ -1489,7 +1531,8 @@ async function runNestedPack(auto = false) {
         preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
       { bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
         constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
-        preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
+        preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
+        contact: readContact() },
     ],
     items: items.map(it => ({
       id: it.id, width: it.width, height: it.height, depth: it.depth,
@@ -1548,24 +1591,58 @@ function fmtStat(x) {
   return Number.isInteger(r) ? String(r) : r.toFixed(2);
 }
 // containers: array of arrays of item objects (one per bin/carton/pallet).
-function statsTableHTML(label, containers, mode) {
+function statsTableHTML(label, containers, mode, extraRows) {
   const n = containers.length;
-  const row = (name, valueFn) => {
-    const vals = containers.map(c => c.reduce((s, it) => s + valueFn(it), 0));
+  const fromVals = (name, vals) => {
     const sum = vals.reduce((a, b) => a + b, 0);
     const avg = n ? sum / n : 0;
     const variance = n ? vals.reduce((a, v) => a + (v - avg) ** 2, 0) / n : 0;
     return `<tr><td>${name}</td><td>${fmtStat(sum)}</td><td>${fmtStat(avg)}</td><td>${fmtStat(Math.sqrt(variance))}</td></tr>`;
   };
+  const row = (name, valueFn) => fromVals(name, containers.map(c => c.reduce((s, it) => s + valueFn(it), 0)));
   let body = row('items', () => 1) + row('volume', it => volumeOf(it, mode));
   for (const k of scalarKeys()) body += row(k, it => (it.scalars || {})[k] || 0);
+  for (const e of (extraRows || [])) body += fromVals(e.name, e.vals);
   return `<div class="stats-group-label">${label}</div>
     <table class="stats-table">
       <thead><tr><th>metric</th><th>sum</th><th>avg</th><th>σ</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
 }
-function renderStats(data, mode) {
+
+// ── slosh: total lateral free play (room to slide in x/y) of a container's
+// placements; lower means tighter. Geometry-only, so it reads placement coords.
+function ovlap(a0, a1, b0, b1) { return Math.min(a1, b1) - Math.max(a0, b0); }
+function placementSlosh(ps, mode, bin) {
+  const is3d = mode === '3d';
+  const Wx = bin.width, Wy = is3d ? bin.depth : bin.height;
+  const dy = p => (is3d ? p.d : p.h);
+  let total = 0;
+  for (const p of ps) {
+    let xl = p.x, xr = Wx - (p.x + p.w), yl = p.y, yr = Wy - (p.y + dy(p));
+    for (const q of ps) {
+      if (q === p) continue;
+      if (is3d && ovlap(p.z, p.z + p.h, q.z, q.z + q.h) <= 1e-9) continue;
+      if (ovlap(p.y, p.y + dy(p), q.y, q.y + dy(q)) > 1e-9) {
+        if (q.x + q.w <= p.x) xl = Math.min(xl, p.x - (q.x + q.w));
+        else if (q.x >= p.x + p.w) xr = Math.min(xr, q.x - (p.x + p.w));
+      }
+      if (ovlap(p.x, p.x + p.w, q.x, q.x + q.w) > 1e-9) {
+        if (q.y + dy(q) <= p.y) yl = Math.min(yl, p.y - (q.y + dy(q)));
+        else if (q.y >= p.y + dy(p)) yr = Math.min(yr, q.y - (p.y + dy(p)));
+      }
+    }
+    total += Math.max(0, xl) + Math.max(0, xr) + Math.max(0, yl) + Math.max(0, yr);
+  }
+  return total;
+}
+function sloshByBin(placements, nBins, mode, bin) {
+  const byBin = Array.from({ length: nBins }, () => []);
+  for (const p of (placements || [])) if (p.bin_index < nBins) byBin[p.bin_index].push(p);
+  return byBin.map(ps => placementSlosh(ps, mode, bin));
+}
+
+function renderStats(data, mode, bin) {
   const im = itemMap();
   const n = data.bins_used || 0;
   const bins = Array.from({ length: n }, () => []);
@@ -1573,11 +1650,12 @@ function renderStats(data, mode) {
     const it = im[p.item_id];
     if (it && p.bin_index < n) bins[p.bin_index].push(it);
   }
+  const extra = mode === '1d' ? null : [{ name: 'slosh', vals: sloshByBin(data.placements, n, mode, bin) }];
   const el = document.getElementById('stats-body');
-  el.innerHTML = n ? statsTableHTML(`Bins (${n})`, bins, mode)
+  el.innerHTML = n ? statsTableHTML(`Bins (${n})`, bins, mode, extra)
                    : '<p class="stats-empty">No bins.</p>';
 }
-function renderStatsNested(data, mode) {
+function renderStatsNested(data, mode, innerBin, outerBin) {
   const im = itemMap();
   const l0 = data.levels[0], l1 = data.levels[1];
   const nC = l0.bins_used || 0, nP = l1.bins_used || 0;
@@ -1593,9 +1671,12 @@ function renderStatsNested(data, mode) {
     const cIdx = parseInt(m[1]);
     if (cIdx < cartons.length) pallets[cp.bin_index].push(...cartons[cIdx]);
   }
+  const lat = mode !== '1d';
   let html = '';
-  if (nC) html += statsTableHTML(`Cartons (${nC})`, cartons, mode);
-  if (nP) html += statsTableHTML(`Pallets (${nP})`, pallets, mode);
+  if (nC) html += statsTableHTML(`Cartons (${nC})`, cartons, mode,
+    lat ? [{ name: 'slosh', vals: sloshByBin(l0.placements, nC, mode, innerBin) }] : null);
+  if (nP) html += statsTableHTML(`Pallets (${nP})`, pallets, mode,
+    lat ? [{ name: 'slosh', vals: sloshByBin(l1.placements, nP, mode, outerBin) }] : null);
   document.getElementById('stats-body').innerHTML = html || '<p class="stats-empty">No containers.</p>';
 }
 
@@ -1627,7 +1708,7 @@ function renderResult({ data, mode, bin }) {
   });
 
   document.getElementById('empty-state').style.display = 'none';
-  renderStats(data, mode);
+  renderStats(data, mode, bin);
 
   if (mode === '1d' || mode === '2d') {
     draw2D(data, mode, bin);
@@ -1670,7 +1751,7 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
   }
 
   document.getElementById('empty-state').style.display = 'none';
-  renderStatsNested(data, mode);
+  renderStatsNested(data, mode, innerBin, outerBin);
 
   if (mode === '3d') {
     document.getElementById('canvas-2d').style.display = 'none';
