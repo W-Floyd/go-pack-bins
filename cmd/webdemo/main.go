@@ -501,7 +501,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
-			compactResult3D(result, bw, bd, bh, dx, dy)
+			compactResult3D(result, bw, bd, bh, dx, dy, req.Contact.Bottom)
 		}
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
@@ -569,7 +569,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	}
 
 	if dx, dy, any := req.Contact.lateralAxes(); any {
-		compactResult3D(result, bw, bd, bh, dx, dy)
+		compactResult3D(result, bw, bd, bh, dx, dy, req.Contact.Bottom)
 	}
 	resp := buildResponse3D(result)
 	resp.BestPacker = bestPacker
@@ -798,7 +798,7 @@ func binImbalance(r pack.Result, items []pack.Item) float64 {
 
 // compactResult3D slides each bin's items toward the lateral walls to remove
 // slosh (in place on the d3 placements).
-func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool) {
+func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support float64) {
 	byBin := map[string][]*d3.Placement3D{}
 	for _, p := range r.Placements {
 		if pl, ok := p.(*d3.Placement3D); ok {
@@ -806,7 +806,7 @@ func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool) {
 		}
 	}
 	for _, ps := range byBin {
-		d3.Compact(ps, bw, bd, bh, doX, doY)
+		d3.Compact(ps, bw, bd, bh, doX, doY, support)
 	}
 }
 
