@@ -1442,6 +1442,10 @@ async function runPack(auto = false) {
 // the request is still in flight after 100ms, so fast packs don't flicker.
 let packSeq = 0;
 let packSpinnerTimer = null;
+// Target number of animation frames to spread a progressive reveal over, so the
+// fill-in lasts ~1.2s at 60fps regardless of item count (perFrame scales up for
+// large packs). Small packs reveal in a frame or two and look near-instant.
+const STREAM_TARGET_FRAMES = 75;
 
 function beginPackIndicator() {
   clearTimeout(packSpinnerTimer);
@@ -1488,28 +1492,106 @@ async function runSinglePack(auto = false) {
     contact: readContact(),
   };
 
-  try {
-    const resp = await fetch('/api/pack', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (seq !== packSeq) return; // superseded by a newer request
-    if (data.error) { if (!auto) showError(data.error); return; }
+  // Stream the solve as NDJSON and reveal placements progressively. The solve
+  // completes server-side quickly; a requestAnimationFrame loop paces the reveal
+  // so the packing visibly "fills in" regardless of how fast frames arrive. In
+  // 3-D meshes are appended to a persistent scene (no per-frame rebuild); in
+  // 2-D/1-D the cheap canvas is redrawn from the revealed slice.
+  const data = { bins_used: 0, placements: [], unplaced: [], item_errors: {}, free_rects: undefined, best_packer: '' };
+  const is3D = (mode === '3d');
+  let count = 0, streamDone = false, revealed = 0, ctl = null, rafId = 0, lastStats = 0;
+
+  const perFrame = () => Math.max(1, Math.ceil((count || data.placements.length || 1) / STREAM_TARGET_FRAMES));
+  const slice = () => ({ ...data, placements: data.placements.slice(0, revealed) });
+
+  const setup = () => {
+    renderShell(data, mode, body.bin, 0);
+    if (is3D) ctl = beginScene3D(body.bin, data.bins_used || 1, count);
+  };
+
+  const finish = () => {
+    if (seq !== packSeq) return;
     lastResult = { data, mode, bin: body.bin };
-    renderResult(lastResult);
+    renderShell(data, mode, body.bin);
+    if (is3D) { if (ctl) ctl.render(); } else { draw2D(data, mode, body.bin); }
+    renderStats(data, mode, body.bin);
     if (!auto) {
-      const errs = data.item_errors || {};
-      const msgs = Object.values(errs);
+      const msgs = Object.values(data.item_errors || {});
       if (msgs.length > 0) showWarn(msgs[0]);
       else if ((data.unplaced || []).length > 0)
         showWarn(`${data.unplaced.length} item(s) could not be placed`);
     }
+    endPackIndicator();
+  };
+
+  const reveal = () => {
+    rafId = 0;
+    if (seq !== packSeq) return; // superseded by a newer request
+    const target = Math.min(revealed + perFrame(), data.placements.length);
+    if (is3D) {
+      if (ctl && target > revealed) ctl.addItems(data.placements.slice(revealed, target));
+      revealed = target;
+      if (ctl) ctl.render();
+    } else {
+      revealed = target;
+      draw2D(slice(), mode, body.bin);
+    }
+    document.getElementById('stat-placed').textContent = revealed;
+    const now = performance.now();
+    if (now - lastStats > 200) { lastStats = now; renderStats(slice(), mode, body.bin); }
+
+    if (revealed < data.placements.length || !streamDone) rafId = requestAnimationFrame(reveal);
+    else finish();
+  };
+  const ensureReveal = () => { if (!rafId && seq === packSeq) rafId = requestAnimationFrame(reveal); };
+
+  try {
+    const resp = await fetch('/api/pack/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok || !resp.body) throw new Error('stream unavailable');
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const f = JSON.parse(line);
+        if (seq !== packSeq) return; // superseded — abandon this stream
+        if (f.type === 'error') {
+          if (!auto) showError(f.error);
+          endPackIndicator();
+          return;
+        } else if (f.type === 'meta') {
+          data.bins_used = f.bins_used || 0;
+          data.best_packer = f.best_packer || '';
+          data.free_rects = f.free_rects;
+          data.item_errors = f.item_errors || {};
+          data.unplaced = f.unplaced || [];
+          count = f.count || 0;
+          setup();
+        } else if (f.type === 'batch') {
+          for (const p of (f.placements || [])) data.placements.push(p);
+          ensureReveal();
+        } else if (f.type === 'done') {
+          streamDone = true;
+          ensureReveal();
+        }
+      }
+    }
   } catch(e) {
-    if (seq === packSeq && !auto) showError(e.message);
-  } finally {
-    if (seq === packSeq) endPackIndicator();
+    if (seq === packSeq) {
+      if (!auto) showError(e.message);
+      endPackIndicator();
+    }
   }
 }
 
@@ -1688,9 +1770,14 @@ function renderStatsNested(data, mode, innerBin, outerBin) {
   document.getElementById('stats-body').innerHTML = html || '<p class="stats-empty">No containers.</p>';
 }
 
-function renderResult({ data, mode, bin }) {
+// renderShell updates the stat counters, "Best:" badge, legend and distribution
+// table from `data` — everything except the viewport draw. Split out so the
+// streaming path can refresh stats progressively without rebuilding the scene.
+// `placedOverride` lets the caller show a partial count during a reveal.
+function renderShell(data, mode, bin, placedOverride) {
   document.getElementById('stat-bins').textContent = data.bins_used;
-  document.getElementById('stat-placed').textContent = (data.placements || []).length;
+  document.getElementById('stat-placed').textContent =
+    placedOverride != null ? placedOverride : (data.placements || []).length;
   document.getElementById('stat-unplaced').textContent = (data.unplaced || []).length;
 
   // "Best:" stat — only shown for Auto, where the winning packer is reported.
@@ -1717,7 +1804,10 @@ function renderResult({ data, mode, bin }) {
 
   document.getElementById('empty-state').style.display = 'none';
   renderStats(data, mode, bin);
+}
 
+function renderResult({ data, mode, bin }) {
+  renderShell(data, mode, bin);
   if (mode === '1d' || mode === '2d') {
     draw2D(data, mode, bin);
   } else {
@@ -2240,7 +2330,15 @@ let scene3d = null;
 let camera3d = null;
 let orbitState = { active: false, lastX: 0, lastY: 0, phi: 0.7, theta: 0.7, dist: 22 };
 
-function draw3D(data, bin) {
+// beginScene3D builds the renderer, scene, camera, lights, bin wireframes and
+// orbit controls once for `nBins` containers and returns a controller whose
+// addItems() can be called repeatedly — appending meshes to the live scene — so
+// placements can be revealed progressively while streaming. `totalCount` governs
+// per-item labels (the occlusion raycast is too costly above the threshold).
+// draw3D() wraps it for the one-shot (non-streaming) path.
+let scene3dCtl = null;
+
+function beginScene3D(bin, nBins, totalCount) {
   const c2d = document.getElementById('canvas-2d');
   c2d.style.display = 'none';
   const canvas = document.getElementById('canvas-3d');
@@ -2262,7 +2360,7 @@ function draw3D(data, bin) {
   // Coordinate mapping: algorithm (x=width, y=depth, z=height) → Three.js (X, Y=up, Z)
   const toThree = (ax, ay, az) => [ax, az, ay];
 
-  const nBins = Math.max(data.bins_used || 1, 1);
+  nBins = Math.max(nBins || 1, 1);
   const gap = bin.width * 0.4;
   const stride = bin.width + gap;
   const totalW = stride * nBins - gap;
@@ -2298,21 +2396,32 @@ function draw3D(data, bin) {
   const raycaster = new THREE.Raycaster();
   // Per-item labels do a per-frame occlusion raycast each — far too expensive at
   // scale. Above this count we draw the boxes only and skip item labels.
-  const showItemLabels = (data.placements || []).length <= 150;
+  const showItemLabels = (totalCount || 0) <= 150;
 
+  // Bin wireframes + bin labels up front; items stream in via addItems().
   for (let b = 0; b < nBins; b++) {
     const offX = b * stride;
-
-    // Bin wireframe
     const binGeo = new THREE.BoxGeometry(bin.width, bin.height, bin.depth);
     const binEdges = new THREE.EdgesGeometry(binGeo);
     const binLine = new THREE.LineSegments(binEdges, new THREE.LineBasicMaterial({color: 0x2a2d3a}));
     binLine.position.set(offX + bin.width/2, bin.height/2, bin.depth/2);
     scene3d.add(binLine);
 
-    // Items
-    const placements = (data.placements || []).filter(p => p.bin_index === b);
-    for (const p of placements) {
+    if (nBins > 1) {
+      const lbl = document.createElement('div');
+      lbl.className = 'bin-label-3d';
+      lbl.textContent = `Bin ${b + 1}`;
+      labelsEl.appendChild(lbl);
+      labelEls.push({ el: lbl, self: null, faces: null,
+                      wx: offX + bin.width/2, wy: bin.height, wz: bin.depth/2 });
+    }
+  }
+
+  // addItems appends meshes (and labels) for a batch of placements to the live
+  // scene. Each placement carries its own bin_index, so batches may span bins.
+  function addItems(placements) {
+    for (const p of (placements || [])) {
+      const offX = p.bin_index * stride;
       const idx = items.findIndex(it => it.id === p.item_id);
       const hex = parseInt(itemColor(idx < 0 ? 0 : idx).replace('#',''), 16);
       const geo = new THREE.BoxGeometry(p.w - 0.08, p.h - 0.08, p.d - 0.08);
@@ -2343,15 +2452,6 @@ function draw3D(data, bin) {
           { wx: offX+tx,    wy: ty,    wz: tz-hd, nx:0,  ny:0,  nz:-1, area: p.w*p.h },
         ]});
       }
-    }
-
-    if (nBins > 1) {
-      const lbl = document.createElement('div');
-      lbl.className = 'bin-label-3d';
-      lbl.textContent = `Bin ${b + 1}`;
-      labelsEl.appendChild(lbl);
-      labelEls.push({ el: lbl, self: null, faces: null,
-                      wx: offX + bin.width/2, wy: bin.height, wz: bin.depth/2 });
     }
   }
 
@@ -2403,7 +2503,6 @@ function draw3D(data, bin) {
     renderer3d.render(scene3d, camera3d);
     updateLabels();
   }
-  render();
 
   // Orbit controls
   canvas.onmousedown = e => { orbitState.active = true; orbitState.lastX = e.clientX; orbitState.lastY = e.clientY; };
@@ -2425,6 +2524,15 @@ function draw3D(data, bin) {
     updateCamera();
     render();
   };
+
+  scene3dCtl = { addItems, render };
+  return scene3dCtl;
+}
+
+function draw3D(data, bin) {
+  const ctl = beginScene3D(bin, data.bins_used || 1, (data.placements || []).length);
+  ctl.addItems(data.placements || []);
+  ctl.render();
 }
 
 // ── misc ──────────────────────────────────────────────────────────────────────

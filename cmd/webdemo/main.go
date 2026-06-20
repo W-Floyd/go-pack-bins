@@ -19,6 +19,7 @@ import (
 func main() {
 	http.Handle("/", http.FileServer(http.Dir("static")))
 	http.HandleFunc("/api/pack", handlePack)
+	http.HandleFunc("/api/pack/stream", handlePackStream)
 	http.HandleFunc("/api/pack/nested", handleNestedPack)
 	log.Println("Listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", nil))
@@ -147,6 +148,108 @@ func handlePack(w http.ResponseWriter, r *http.Request) {
 		resp = PackResponse{Error: err.Error()}
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// ─── streaming handler ─────────────────────────────────────────────────────────
+
+// streamBatch is the placement-batch chunk size. Placements are emitted in
+// solve order so the client can render them progressively as they "appear".
+const streamBatch = 64
+
+// streamFrame is one NDJSON line on the /api/pack/stream response. Exactly one of
+// the optional groups is populated per frame, keyed by Type:
+//   - "meta":  bin/algorithm summary, sent once before any placements
+//   - "batch": a slice of placements (in solve order)
+//   - "done":  terminal marker
+//   - "error": fatal error; terminal
+type streamFrame struct {
+	Type       string            `json:"type"`
+	BinsUsed   int               `json:"bins_used,omitempty"`
+	Count      int               `json:"count,omitempty"` // total placements to expect (meta)
+	BestPacker string            `json:"best_packer,omitempty"`
+	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"`
+	ItemErrors map[string]string `json:"item_errors,omitempty"`
+	Unplaced   []string          `json:"unplaced,omitempty"`
+	Placements []PlacementResult `json:"placements,omitempty"`
+	Error      string            `json:"error,omitempty"`
+}
+
+// handlePackStream runs the same packing as /api/pack but delivers the result as
+// a stream of NDJSON frames (chunked + flushed): one "meta" frame, then placement
+// "batch" frames in solve order, then "done". The solve itself runs to completion
+// server-side (it is fast); the client paces rendering as frames arrive. The frame
+// protocol leaves room for a future genuinely-incremental solver to emit batches
+// mid-solve without any client change.
+func handlePackStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering if present
+
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	enc := json.NewEncoder(w)
+	send := func(f streamFrame) {
+		_ = enc.Encode(f) // Encode writes a trailing newline → NDJSON
+		flusher.Flush()
+	}
+
+	var req PackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		send(streamFrame{Type: "error", Error: err.Error()})
+		return
+	}
+
+	var resp PackResponse
+	var err error
+	switch req.Mode {
+	case "1d":
+		resp, err = pack1D(req)
+	case "2d":
+		resp, err = pack2D(req)
+	case "3d":
+		resp, err = pack3D(req)
+	default:
+		resp = PackResponse{Error: "unknown mode: " + req.Mode}
+	}
+	if err != nil {
+		resp = PackResponse{Error: err.Error()}
+	}
+	if resp.Error != "" {
+		send(streamFrame{Type: "error", Error: resp.Error})
+		return
+	}
+
+	send(streamFrame{
+		Type:       "meta",
+		BinsUsed:   resp.BinsUsed,
+		Count:      len(resp.Placements),
+		BestPacker: resp.BestPacker,
+		FreeRects:  resp.FreeRects,
+		ItemErrors: resp.ItemErrors,
+		Unplaced:   resp.Unplaced,
+	})
+	for i := 0; i < len(resp.Placements); i += streamBatch {
+		j := i + streamBatch
+		if j > len(resp.Placements) {
+			j = len(resp.Placements)
+		}
+		send(streamFrame{Type: "batch", Placements: resp.Placements[i:j]})
+	}
+	send(streamFrame{Type: "done"})
 }
 
 // ─── 1-D ─────────────────────────────────────────────────────────────────────
