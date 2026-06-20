@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -16,6 +17,7 @@ import (
 func main() {
 	http.Handle("/", http.FileServer(http.Dir("static")))
 	http.HandleFunc("/api/pack", handlePack)
+	http.HandleFunc("/api/pack/nested", handleNestedPack)
 	log.Println("Listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }
@@ -23,11 +25,12 @@ func main() {
 // ─── request / response types ─────────────────────────────────────────────────
 
 type ItemSpec struct {
-	ID          string  `json:"id"`
-	Width       float64 `json:"width"`
-	Height      float64 `json:"height"`
-	Depth       float64 `json:"depth"`
-	AllowRotate bool    `json:"allow_rotate"`
+	ID          string             `json:"id"`
+	Width       float64            `json:"width"`
+	Height      float64            `json:"height"`
+	Depth       float64            `json:"depth"`
+	AllowRotate bool               `json:"allow_rotate"`
+	Scalars     map[string]float64 `json:"scalars,omitempty"`
 }
 
 type BinSpec struct {
@@ -36,11 +39,19 @@ type BinSpec struct {
 	Depth  float64 `json:"depth"`
 }
 
+// ConstraintSpec is a hard constraint on the bin's accumulated scalar totals.
+type ConstraintSpec struct {
+	Scalar string  `json:"scalar"` // name of the scalar
+	Op     string  `json:"op"`     // "max" or "min"
+	Value  float64 `json:"value"`
+}
+
 type PackRequest struct {
-	Mode      string     `json:"mode"`      // "1d", "2d", "3d"
-	Algorithm string     `json:"algorithm"` // "ff", "bf", "wf", "nf", "nkf", "awf", "ffd", "bfd", "nfd", "wfd", "mffd", "kk", "bc", "hk", "rff"
-	Bin       BinSpec    `json:"bin"`
-	Items     []ItemSpec `json:"items"`
+	Mode        string           `json:"mode"`      // "1d", "2d", "3d"
+	Algorithm   string           `json:"algorithm"` // "ff", "bf", "wf", "nf", "nkf", "awf", "ffd", "bfd", "nfd", "wfd", "mffd", "kk", "bc", "hk", "rff"
+	Bin         BinSpec          `json:"bin"`
+	Items       []ItemSpec       `json:"items"`
+	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 }
 
 type PlacementResult struct {
@@ -112,11 +123,15 @@ func handlePack(w http.ResponseWriter, r *http.Request) {
 
 func pack1D(req PackRequest) (PackResponse, error) {
 	cap := req.Bin.Width
-	factory := d1.NewFactory(cap)
+	factory := constrainedFactory(d1.NewFactory(cap), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
-		items[i] = d1.NewItem(spec.ID, spec.Width)
+		it := d1.NewItem(spec.ID, spec.Width)
+		for k, v := range spec.Scalars {
+			it.WithScalar(k, v)
+		}
+		items[i] = it
 	}
 
 	var result pack.Result
@@ -197,7 +212,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	case "kk":
 		result, err = offline.KarmarkarKarp(items, cap, factory)
 	case "bc":
-		result, err = offline.BinCompletion(items, cap, factory)
+		result, err = offline.BinCompletion(items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
 	default:
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -257,11 +272,15 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	if req.Algorithm == "guillotine" {
 		makeStrat = d2.NewGuillotineDefault
 	}
-	factory := d2.NewFactory(bw, bh, makeStrat)
+	factory := constrainedFactory(d2.NewFactory(bw, bh, makeStrat), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
-		items[i] = d2.NewItem(spec.ID, spec.Width, spec.Height, spec.AllowRotate)
+		it := d2.NewItem(spec.ID, spec.Width, spec.Height, spec.AllowRotate)
+		for k, v := range spec.Scalars {
+			it.WithScalar(k, v)
+		}
+		items[i] = it
 	}
 
 	var result pack.Result
@@ -364,11 +383,15 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 func pack3D(req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	factory := d3.NewFactory(bw, bd, bh, d3.NewExtremePointStrategy)
+	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewExtremePointStrategy), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
-		items[i] = d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
+		it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
+		for k, v := range spec.Scalars {
+			it.WithScalar(k, v)
+		}
+		items[i] = it
 	}
 
 	var result pack.Result
@@ -454,6 +477,31 @@ func buildResponse3D(result pack.Result) PackResponse {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+// buildConstraints converts ConstraintSpec slice to pack.Constraint slice.
+func buildConstraints(specs []ConstraintSpec) []pack.Constraint {
+	cs := make([]pack.Constraint, 0, len(specs))
+	for _, s := range specs {
+		switch s.Op {
+		case "max":
+			cs = append(cs, pack.MaxAggregate(s.Scalar, s.Value))
+		case "min":
+			cs = append(cs, pack.MinAggregate(s.Scalar, s.Value))
+		case "allsame":
+			cs = append(cs, pack.AllSame(s.Scalar))
+		}
+	}
+	return cs
+}
+
+// constrainedFactory wraps factory with hard constraints if any are specified.
+func constrainedFactory(factory pack.BinFactory, specs []ConstraintSpec) pack.BinFactory {
+	cs := buildConstraints(specs)
+	if len(cs) == 0 {
+		return factory
+	}
+	return pack.NewConstrainedFactory(factory, cs...)
+}
+
 func binIndexFromID(bins []pack.Bin, id string) int {
 	for i, b := range bins {
 		type idder interface{ ID() string }
@@ -462,4 +510,142 @@ func binIndexFromID(bins []pack.Bin, id string) int {
 		}
 	}
 	return 0
+}
+
+// ─── nested pack ─────────────────────────────────────────────────────────────
+
+type NestedLevelSpec struct {
+	Bin         BinSpec          `json:"bin"`
+	Algorithm   string           `json:"algorithm"`
+	Constraints []ConstraintSpec `json:"constraints,omitempty"`
+}
+
+type NestedPackRequest struct {
+	Mode   string            `json:"mode"`
+	Levels []NestedLevelSpec `json:"levels"`
+	Items  []ItemSpec        `json:"items"`
+}
+
+type NestedLevelResult struct {
+	BinsUsed   int               `json:"bins_used"`
+	Placements []PlacementResult `json:"placements"`
+	Unplaced   []string          `json:"unplaced"`
+	BinDims    BinSpec           `json:"bin_dims"`
+}
+
+type NestedPackResponse struct {
+	Levels []NestedLevelResult `json:"levels"`
+	Error  string              `json:"error,omitempty"`
+}
+
+func handleNestedPack(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req NestedPackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(NestedPackResponse{Error: err.Error()})
+		return
+	}
+	resp, err := doNestedPack(req)
+	if err != nil {
+		json.NewEncoder(w).Encode(NestedPackResponse{Error: err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
+	if len(req.Levels) < 2 {
+		return NestedPackResponse{}, fmt.Errorf("nested packing requires at least 2 levels")
+	}
+
+	// Level 0: pack items into inner bins (cartons).
+	l0spec := req.Levels[0]
+	l0req := PackRequest{
+		Mode:        req.Mode,
+		Algorithm:   l0spec.Algorithm,
+		Bin:         l0spec.Bin,
+		Items:       req.Items,
+		Constraints: l0spec.Constraints,
+	}
+	l0resp, err := packByMode(l0req)
+	if err != nil {
+		return NestedPackResponse{}, err
+	}
+
+	// Accumulate scalars per carton bin from placed items.
+	binScalars := make(map[int]map[string]float64)
+	itemScalarsByID := make(map[string]map[string]float64, len(req.Items))
+	for _, spec := range req.Items {
+		itemScalarsByID[spec.ID] = spec.Scalars
+	}
+	for _, p := range l0resp.Placements {
+		if p.ItemID == "" {
+			continue
+		}
+		bs := binScalars[p.BinIndex]
+		if bs == nil {
+			bs = make(map[string]float64)
+			binScalars[p.BinIndex] = bs
+		}
+		for k, v := range itemScalarsByID[p.ItemID] {
+			bs[k] += v
+		}
+	}
+
+	// Build one carton item per filled bin.
+	cartonItems := make([]ItemSpec, l0resp.BinsUsed)
+	for b := 0; b < l0resp.BinsUsed; b++ {
+		cartonItems[b] = ItemSpec{
+			ID:      fmt.Sprintf("carton_%d", b),
+			Width:   l0spec.Bin.Width,
+			Height:  l0spec.Bin.Height,
+			Depth:   l0spec.Bin.Depth,
+			Scalars: binScalars[b],
+		}
+	}
+
+	// Level 1: pack carton items into outer bins (pallets).
+	l1spec := req.Levels[1]
+	l1req := PackRequest{
+		Mode:        req.Mode,
+		Algorithm:   l1spec.Algorithm,
+		Bin:         l1spec.Bin,
+		Items:       cartonItems,
+		Constraints: l1spec.Constraints,
+	}
+	l1resp, err := packByMode(l1req)
+	if err != nil {
+		return NestedPackResponse{}, err
+	}
+
+	return NestedPackResponse{
+		Levels: []NestedLevelResult{
+			{BinsUsed: l0resp.BinsUsed, Placements: l0resp.Placements, Unplaced: l0resp.Unplaced, BinDims: l0spec.Bin},
+			{BinsUsed: l1resp.BinsUsed, Placements: l1resp.Placements, Unplaced: l1resp.Unplaced, BinDims: l1spec.Bin},
+		},
+	}, nil
+}
+
+// packByMode dispatches to the appropriate dimensioned packer.
+func packByMode(req PackRequest) (PackResponse, error) {
+	switch req.Mode {
+	case "1d":
+		return pack1D(req)
+	case "2d":
+		return pack2D(req)
+	case "3d":
+		return pack3D(req)
+	default:
+		return PackResponse{}, fmt.Errorf("unknown mode: %s", req.Mode)
+	}
 }

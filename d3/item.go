@@ -9,6 +9,7 @@ type Item3D struct {
 	id          string
 	W, D, H     float64 // natural dimensions: width, depth, height
 	AllowRotate bool
+	scalars     map[string]float64
 }
 
 // NewItem creates a box item with the given dimensions.
@@ -40,4 +41,24 @@ func (i *Item3D) Orientations() [][3]float64 {
 	return result
 }
 
+// WithScalar attaches a named scalar value to the item and returns the item
+// for chaining: d3.NewItem("box", 3, 3, 3, false).WithScalar("weight", 8.0)
+func (i *Item3D) WithScalar(name string, value float64) *Item3D {
+	if i.scalars == nil {
+		i.scalars = make(map[string]float64)
+	}
+	i.scalars[name] = value
+	return i
+}
+
+// Scalars returns a snapshot of all named scalar values on this item.
+func (i *Item3D) Scalars() map[string]float64 {
+	out := make(map[string]float64, len(i.scalars))
+	for k, v := range i.scalars {
+		out[k] = v
+	}
+	return out
+}
+
 var _ pack.Item = (*Item3D)(nil)
+var _ pack.Scalar = (*Item3D)(nil)

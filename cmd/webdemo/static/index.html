@@ -335,20 +335,48 @@
 
       <!-- bin spec -->
       <div>
-        <div class="section-label">Bin capacity</div>
+        <div id="outer-bin-label" class="section-label">Bin capacity</div>
         <div id="bin-fields" class="row"></div>
+      </div>
+
+      <!-- nested containers -->
+      <div>
+        <div class="section-label" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Nested containers</span>
+          <label class="checkbox-row" style="margin:0">
+            <input type="checkbox" id="nested-toggle" onchange="onNestedToggle()"> Enable
+          </label>
+        </div>
+        <div id="nested-inner-section" style="display:none;margin-top:8px">
+          <div class="section-label" style="margin-bottom:6px">Inner bin (carton)</div>
+          <div id="inner-bin-fields" class="row"></div>
+          <div style="margin-top:6px">
+            <div class="field">
+              <label>Inner algorithm</label>
+              <select id="inner-algorithm" onchange="scheduleAutoPack()"></select>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- add item form -->
       <div>
         <div class="section-label">Add item</div>
         <div id="item-form" class="row" style="flex-wrap:wrap; gap:8px;"></div>
+        <div style="margin-top:6px;">
+          <div class="field">
+            <label>Scalars <span style="color:var(--muted);font-weight:400">(name=value, comma-separated)</span></label>
+            <input type="text" id="new-scalars" placeholder="weight=5, value=100" style="font-family:var(--mono);font-size:12px">
+          </div>
+        </div>
         <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
           <label class="checkbox-row" id="rotate-row" style="display:none;">
             <input type="checkbox" id="allow-rotate"> Allow rotation
           </label>
           <button class="btn btn-ghost btn-sm" onclick="addItem()">+ Add item</button>
-          <button class="btn btn-ghost btn-sm" onclick="loadPreset()">Load preset</button>
+          <select id="preset-select" style="font-size:12px;padding:5px 8px" onchange="loadPreset(this.value); this.value=''">
+            <option value="">Load preset…</option>
+          </select>
         </div>
       </div>
 
@@ -356,6 +384,31 @@
       <div>
         <div class="section-label">Items <span id="item-count" style="color:var(--text)">0</span></div>
         <div class="item-list" id="item-list"></div>
+      </div>
+
+      <!-- constraints -->
+      <div>
+        <div class="section-label">Constraints</div>
+        <div class="item-list" id="constraint-list"></div>
+        <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field" style="flex:2; min-width:70px">
+            <label>Scalar</label>
+            <input type="text" id="con-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px">
+          </div>
+          <div class="field" style="flex:1; min-width:54px">
+            <label>Op</label>
+            <select id="con-op" onchange="onConOpChange()">
+              <option value="max">max ≤</option>
+              <option value="min">min ≥</option>
+              <option value="allsame">all same</option>
+            </select>
+          </div>
+          <div class="field" id="con-value-field" style="flex:1; min-width:54px">
+            <label>Value</label>
+            <input type="number" id="con-value" placeholder="100" step="any" style="font-size:12px">
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addConstraint()">+ Add</button>
+        </div>
       </div>
 
     </div>
@@ -404,9 +457,11 @@ function itemColor(idx) { return COLORS[idx % COLORS.length]; }
 
 // ── state ────────────────────────────────────────────────────────────────────
 let items = [];
+let constraints = []; // [{scalar, op, value}]
 let lastResult = null;
 let activeBin = 0;
 let itemCounter = 0;
+let nestedEnabled = false;
 
 // ── algorithm lists ──────────────────────────────────────────────────────────
 const ALGOS = {
@@ -455,8 +510,15 @@ function onModeChange() {
   buildBinFields(mode);
   buildItemForm(mode);
   items = [];
+  constraints = [];
   renderItemList();
+  renderConstraintList();
+  buildPresetSelect();
   clearViz();
+  if (nestedEnabled) {
+    buildInnerBinFields(mode);
+    buildInnerAlgorithmSelect(mode);
+  }
 }
 
 function buildAlgorithmSelect(mode) {
@@ -506,17 +568,103 @@ function buildItemForm(mode) {
   }
 }
 
+function onNestedToggle() {
+  nestedEnabled = document.getElementById('nested-toggle').checked;
+  document.getElementById('nested-inner-section').style.display = nestedEnabled ? '' : 'none';
+  document.getElementById('outer-bin-label').textContent = nestedEnabled ? 'Outer container (pallet)' : 'Bin capacity';
+  if (nestedEnabled) {
+    const mode = document.getElementById('mode').value;
+    buildInnerBinFields(mode);
+    buildInnerAlgorithmSelect(mode);
+  }
+  scheduleAutoPack();
+}
+
+function buildInnerBinFields(mode) {
+  const el = document.getElementById('inner-bin-fields');
+  const oi = 'oninput="scheduleAutoPack()"';
+  if (mode === '1d') {
+    el.innerHTML = `<div class="field"><label>Width</label><input type="number" id="inner-w" value="10" min="1" step="any" ${oi}></div>`;
+  } else if (mode === '2d') {
+    el.innerHTML = `
+      <div class="field"><label>Width</label><input type="number" id="inner-w" value="30" min="1" step="any" ${oi}></div>
+      <div class="field"><label>Height</label><input type="number" id="inner-h" value="30" min="1" step="any" ${oi}></div>`;
+  } else {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="inner-w" value="5" min="1" step="any" ${oi}></div>
+      <div class="field"><label>D</label><input type="number" id="inner-d" value="5" min="1" step="any" ${oi}></div>
+      <div class="field"><label>H</label><input type="number" id="inner-h" value="5" min="1" step="any" ${oi}></div>`;
+  }
+}
+
+function buildInnerAlgorithmSelect(mode) {
+  const sel = document.getElementById('inner-algorithm');
+  sel.innerHTML = '';
+  for (const a of ALGOS[mode]) {
+    const o = document.createElement('option');
+    o.value = a.v; o.textContent = a.l;
+    sel.appendChild(o);
+  }
+}
+
+function parseScalars(str) {
+  const out = {};
+  for (const part of str.split(',')) {
+    const [k, v] = part.split('=').map(s => s.trim());
+    if (k && v !== undefined && !isNaN(parseFloat(v))) {
+      out[k] = parseFloat(v);
+    }
+  }
+  return out;
+}
+
 function addItem() {
   const mode = document.getElementById('mode').value;
   const w = parseFloat(document.getElementById('new-w').value) || 1;
   const h = parseFloat(document.getElementById('new-h')?.value) || w;
   const d = parseFloat(document.getElementById('new-d')?.value) || w;
   const rot = document.getElementById('allow-rotate')?.checked || false;
+  const scalars = parseScalars(document.getElementById('new-scalars').value || '');
   itemCounter++;
   const id = 'i' + itemCounter;
-  items.push({ id, width: w, height: h, depth: d, allow_rotate: rot, _mode: mode });
+  items.push({ id, width: w, height: h, depth: d, allow_rotate: rot, scalars, _mode: mode });
   renderItemList();
   scheduleAutoPack();
+}
+
+function onConOpChange() {
+  const op = document.getElementById('con-op').value;
+  document.getElementById('con-value-field').style.display = op === 'allsame' ? 'none' : '';
+}
+
+function addConstraint() {
+  const scalar = document.getElementById('con-scalar').value.trim();
+  const op = document.getElementById('con-op').value;
+  const value = op === 'allsame' ? 0 : parseFloat(document.getElementById('con-value').value);
+  if (!scalar || (op !== 'allsame' && isNaN(value))) return;
+  constraints.push({ scalar, op, value });
+  renderConstraintList();
+  scheduleAutoPack();
+}
+
+function removeConstraint(idx) {
+  constraints.splice(idx, 1);
+  renderConstraintList();
+  scheduleAutoPack();
+}
+
+function renderConstraintList() {
+  const el = document.getElementById('constraint-list');
+  el.innerHTML = '';
+  constraints.forEach((c, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : 'all same';
+    row.innerHTML = `
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${c.scalar} ${opLabel}</span>
+      <button class="remove-btn" onclick="removeConstraint(${idx})">✕</button>`;
+    el.appendChild(row);
+  });
 }
 
 function removeItem(id) {
@@ -525,35 +673,245 @@ function removeItem(id) {
   scheduleAutoPack();
 }
 
-function loadPreset() {
+// ── presets ───────────────────────────────────────────────────────────────────
+const PRESETS = {
+  '1d': [
+    {
+      label: 'Classic mix',
+      bin: {w:10}, algo: 'ffd',
+      items: [6,6,5,5,4,4,3,3,2,2,1].map(s => ({w:s})),
+    },
+    {
+      label: 'Weight limit (max 8 kg)',
+      bin: {w:10}, algo: 'ff',
+      constraints: [{scalar:'weight', op:'max', value:8}],
+      items: [
+        {w:5, s:{weight:6}}, {w:5, s:{weight:6}},
+        {w:4, s:{weight:4}}, {w:4, s:{weight:4}},
+        {w:3, s:{weight:2}}, {w:3, s:{weight:2}},
+        {w:2, s:{weight:1}}, {w:2, s:{weight:1}},
+      ],
+    },
+    {
+      label: 'Exact solver (Bin Completion)',
+      bin: {w:10}, algo: 'bc',
+      items: [4,4,4,4,6,6,6,6].map(s => ({w:s})),
+    },
+    {
+      label: 'Nested: Packages → Containers → Trucks',
+      nested: true,
+      innerBin: {w:20}, innerAlgo: 'ffd',
+      bin: {w:100}, algo: 'ffd',
+      items: [8,7,6,6,5,5,4,4,3,3,2,2].map(w => ({w})),
+    },
+    {
+      label: 'High-value colocate (KK)',
+      bin: {w:12}, algo: 'kk',
+      items: [
+        {w:5, s:{value:100}}, {w:5, s:{value:100}},
+        {w:4, s:{value:1}},   {w:4, s:{value:1}},
+        {w:3, s:{value:50}},  {w:3, s:{value:50}},
+        {w:2, s:{value:1}},   {w:2, s:{value:1}},
+      ],
+    },
+    {
+      label: 'Fragile items (weight + fragility cap)',
+      bin: {w:20}, algo: 'ff',
+      constraints: [
+        {scalar:'weight',    op:'max', value:30},
+        {scalar:'fragility', op:'max', value:5},
+      ],
+      items: [
+        {w:8, s:{weight:10, fragility:1}},
+        {w:8, s:{weight:10, fragility:1}},
+        {w:6, s:{weight:8,  fragility:3}},
+        {w:6, s:{weight:8,  fragility:3}},
+        {w:4, s:{weight:4,  fragility:2}},
+        {w:4, s:{weight:4,  fragility:2}},
+        {w:3, s:{weight:2,  fragility:4}},
+        {w:3, s:{weight:2,  fragility:4}},
+      ],
+    },
+  ],
+  '2d': [
+    {
+      label: 'Mixed rectangles (MaxRects)',
+      bin: {w:100, h:100}, algo: 'ff',
+      items: [[30,40],[50,20],[20,20],[40,60],[10,80],[35,35],[60,30],[25,45],[45,45],[15,90]].map(([w,h]) => ({w,h,rot:true})),
+    },
+    {
+      label: 'Guillotine cuts visible',
+      bin: {w:100, h:100}, algo: 'guillotine',
+      items: [[40,30],[30,40],[20,20],[50,20],[25,25],[10,60]].map(([w,h]) => ({w,h,rot:false})),
+    },
+    {
+      label: 'Weight limit (max 50 kg)',
+      bin: {w:100, h:100}, algo: 'ffd',
+      constraints: [{scalar:'weight', op:'max', value:50}],
+      items: [
+        {w:40, h:40, s:{weight:20}}, {w:40, h:40, s:{weight:20}},
+        {w:30, h:30, s:{weight:18}}, {w:30, h:30, s:{weight:18}},
+        {w:20, h:20, s:{weight:10}}, {w:20, h:20, s:{weight:10}},
+        {w:50, h:20, s:{weight:15}}, {w:50, h:20, s:{weight:15}},
+      ],
+    },
+    {
+      label: 'Nested: Products → Boxes → Pallet',
+      nested: true,
+      innerBin: {w:60, h:40}, innerAlgo: 'ff',
+      bin: {w:200, h:160}, algo: 'ffd',
+      items: [
+        {w:30, h:20}, {w:30, h:20},
+        {w:20, h:30}, {w:20, h:30},
+        {w:40, h:15}, {w:40, h:15},
+        {w:25, h:25}, {w:25, h:25},
+        {w:50, h:20}, {w:50, h:20},
+        {w:15, h:35}, {w:15, h:35},
+      ],
+    },
+    {
+      label: 'Fragile: keep loads light',
+      bin: {w:120, h:120}, algo: 'ff',
+      constraints: [
+        {scalar:'weight',    op:'max', value:40},
+        {scalar:'fragility', op:'max', value:4},
+      ],
+      items: [
+        {w:50, h:50, s:{weight:25, fragility:1}},
+        {w:50, h:50, s:{weight:25, fragility:1}},
+        {w:40, h:30, s:{weight:12, fragility:3}},
+        {w:40, h:30, s:{weight:12, fragility:3}},
+        {w:30, h:30, s:{weight:8,  fragility:2}},
+        {w:30, h:30, s:{weight:8,  fragility:2}},
+        {w:20, h:60, s:{weight:5,  fragility:4}},
+        {w:20, h:60, s:{weight:5,  fragility:4}},
+      ],
+    },
+  ],
+  '3d': [
+    {
+      label: '8 cubes in one bin',
+      bin: {w:10, d:10, h:10}, algo: 'ff',
+      items: Array(8).fill({w:5, d:5, h:5}),
+    },
+    {
+      label: 'Mixed boxes (FFD)',
+      bin: {w:10, d:10, h:10}, algo: 'ffd',
+      items: [[3,3,3],[5,2,4],[2,2,2],[4,4,2],[3,5,1],[6,3,2],[2,4,3],[1,1,5]].map(([w,d,h]) => ({w,d,h})),
+    },
+    {
+      label: 'Weight limit (max 20 kg)',
+      bin: {w:10, d:10, h:10}, algo: 'ff',
+      constraints: [{scalar:'weight', op:'max', value:20}],
+      items: [
+        {w:5, d:5, h:5, s:{weight:12}}, {w:5, d:5, h:5, s:{weight:12}},
+        {w:4, d:4, h:4, s:{weight:8}},  {w:4, d:4, h:4, s:{weight:8}},
+        {w:3, d:3, h:3, s:{weight:5}},  {w:3, d:3, h:3, s:{weight:5}},
+        {w:2, d:2, h:2, s:{weight:2}},  {w:2, d:2, h:2, s:{weight:2}},
+      ],
+    },
+    {
+      label: 'Nested: Goods → Cartons → Pallet',
+      nested: true,
+      innerBin: {w:8, d:8, h:8}, innerAlgo: 'ffd',
+      bin: {w:30, d:30, h:30}, algo: 'ffd',
+      items: [
+        {w:4, d:4, h:4}, {w:4, d:4, h:4},
+        {w:3, d:4, h:3}, {w:3, d:4, h:3},
+        {w:4, d:3, h:2}, {w:4, d:3, h:2},
+        {w:2, d:2, h:4}, {w:2, d:2, h:4},
+        {w:3, d:2, h:3}, {w:3, d:2, h:3},
+        {w:2, d:4, h:3}, {w:2, d:4, h:3},
+      ],
+    },
+    {
+      label: 'Perishables: no mixed temp zones',
+      bin: {w:12, d:12, h:12}, algo: 'ffd',
+      constraints: [
+        {scalar:'weight',   op:'max',     value:25},
+        {scalar:'temp_zone', op:'allsame', value:0},
+      ],
+      items: [
+        {w:4, d:4, h:4, s:{weight:8,  temp_zone:0}},  // ambient
+        {w:4, d:4, h:4, s:{weight:8,  temp_zone:0}},
+        {w:3, d:3, h:3, s:{weight:6,  temp_zone:1}},  // chilled
+        {w:3, d:3, h:3, s:{weight:6,  temp_zone:1}},
+        {w:5, d:3, h:2, s:{weight:4,  temp_zone:1}},
+        {w:5, d:3, h:2, s:{weight:4,  temp_zone:2}},  // frozen
+        {w:2, d:2, h:6, s:{weight:3,  temp_zone:2}},
+        {w:2, d:2, h:6, s:{weight:3,  temp_zone:0}},
+      ],
+    },
+  ],
+};
+
+function buildPresetSelect() {
   const mode = document.getElementById('mode').value;
+  const sel = document.getElementById('preset-select');
+  sel.innerHTML = '<option value="">Load preset…</option>';
+  (PRESETS[mode] || []).forEach((p, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = p.label;
+    sel.appendChild(o);
+  });
+}
+
+function loadPreset(idx) {
+  if (idx === '' || idx === undefined) return;
+  const mode = document.getElementById('mode').value;
+  const preset = PRESETS[mode][parseInt(idx)];
+  if (!preset) return;
+
   items = [];
+  constraints = preset.constraints ? preset.constraints.map(c => ({...c})) : [];
   itemCounter = 0;
-  if (mode === '1d') {
-    for (const s of [6,6,5,5,4,4,3,3,2,2,1]) {
-      itemCounter++;
-      items.push({id:'i'+itemCounter, width:s, height:s, depth:s, allow_rotate:false, _mode:'1d'});
-    }
-    document.getElementById('bin-w').value = 10;
-  } else if (mode === '2d') {
-    const rects = [[30,40],[50,20],[20,20],[40,60],[10,80],[35,35],[60,30],[25,45]];
-    for (const [w,h] of rects) {
-      itemCounter++;
-      items.push({id:'i'+itemCounter, width:w, height:h, depth:1, allow_rotate:true, _mode:'2d'});
-    }
-    document.getElementById('bin-w').value = 100;
-    document.getElementById('bin-h').value = 100;
+
+  // Nested mode toggle
+  const toggleEl = document.getElementById('nested-toggle');
+  if (preset.nested) {
+    nestedEnabled = true;
+    toggleEl.checked = true;
+    document.getElementById('nested-inner-section').style.display = '';
+    document.getElementById('outer-bin-label').textContent = 'Outer container (pallet)';
+    buildInnerBinFields(mode);
+    buildInnerAlgorithmSelect(mode);
+    const ib = preset.innerBin || {};
+    if (document.getElementById('inner-w')) document.getElementById('inner-w').value = ib.w || 10;
+    if (document.getElementById('inner-h')) document.getElementById('inner-h').value = ib.h || ib.w || 10;
+    if (document.getElementById('inner-d')) document.getElementById('inner-d').value = ib.d || ib.w || 10;
+    if (document.getElementById('inner-algorithm')) document.getElementById('inner-algorithm').value = preset.innerAlgo || 'ff';
   } else {
-    const boxes = [[3,3,3],[5,2,4],[2,2,2],[4,4,2],[3,5,1],[6,3,2],[2,4,3],[1,1,5]];
-    for (const [w,d,h] of boxes) {
-      itemCounter++;
-      items.push({id:'i'+itemCounter, width:w, height:h, depth:d, allow_rotate:false, _mode:'3d'});
-    }
-    document.getElementById('bin-w').value = 10;
-    document.getElementById('bin-d').value = 10;
-    document.getElementById('bin-h').value = 10;
+    nestedEnabled = false;
+    toggleEl.checked = false;
+    document.getElementById('nested-inner-section').style.display = 'none';
+    document.getElementById('outer-bin-label').textContent = 'Bin capacity';
   }
+
+  // Outer bin dims
+  if (document.getElementById('bin-w')) document.getElementById('bin-w').value = preset.bin.w || 10;
+  if (document.getElementById('bin-h')) document.getElementById('bin-h').value = preset.bin.h || preset.bin.w || 10;
+  if (document.getElementById('bin-d')) document.getElementById('bin-d').value = preset.bin.d || preset.bin.w || 10;
+
+  // Algorithm
+  document.getElementById('algorithm').value = preset.algo || 'ff';
+
+  // Items
+  for (const spec of preset.items) {
+    itemCounter++;
+    items.push({
+      id: 'i' + itemCounter,
+      width:  spec.w || 1,
+      height: spec.h || spec.w || 1,
+      depth:  spec.d || spec.w || 1,
+      allow_rotate: spec.rot || false,
+      scalars: spec.s || {},
+      _mode: mode,
+    });
+  }
+
   renderItemList();
+  renderConstraintList();
   scheduleAutoPack();
 }
 
@@ -570,10 +928,11 @@ function renderItemList() {
     else if (mode === '2d') dims = `${it.width}×${it.height}`;
     else dims = `${it.width}×${it.depth}×${it.height}`;
     const swatch = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>`;
+    const scalarStr = Object.entries(it.scalars || {}).map(([k,v]) => `${k}=${v}`).join(' ');
     row.innerHTML = `
       ${swatch}
       <span class="item-id">${it.id}</span>
-      <span class="item-dims">${dims}</span>
+      <span class="item-dims">${dims}${scalarStr ? ' · ' + scalarStr : ''}</span>
       <button class="remove-btn" onclick="removeItem('${it.id}')">✕</button>`;
     el.appendChild(row);
   });
@@ -588,6 +947,14 @@ function scheduleAutoPack() {
 }
 
 async function runPack(auto = false) {
+  if (nestedEnabled) {
+    await runNestedPack(auto);
+  } else {
+    await runSinglePack(auto);
+  }
+}
+
+async function runSinglePack(auto = false) {
   if (items.length === 0) {
     if (!auto) showError('Add at least one item first.');
     return;
@@ -612,7 +979,9 @@ async function runPack(auto = false) {
       height: it.height,
       depth: it.depth,
       allow_rotate: it.allow_rotate,
+      scalars: it.scalars || {},
     })),
+    constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
   };
 
   const controller = new AbortController();
@@ -632,7 +1001,61 @@ async function runPack(auto = false) {
     renderResult(lastResult);
   } catch(e) {
     if (!auto) showError(e.message);
-    // auto timeout: silently ignore
+  } finally {
+    clearTimeout(timeoutId);
+    if (!auto) { btn.disabled = false; btn.textContent = 'Pack'; }
+  }
+}
+
+async function runNestedPack(auto = false) {
+  if (items.length === 0) {
+    if (!auto) showError('Add at least one item first.');
+    return;
+  }
+  const btn = document.getElementById('pack-btn');
+  if (!auto) { btn.disabled = true; btn.textContent = 'Packing…'; }
+  hideError();
+
+  const mode = document.getElementById('mode').value;
+  const bw = parseFloat(document.getElementById('bin-w').value) || 10;
+  const bh = parseFloat(document.getElementById('bin-h')?.value) || bw;
+  const bd = parseFloat(document.getElementById('bin-d')?.value) || bw;
+  const iw = parseFloat(document.getElementById('inner-w')?.value) || 5;
+  const ih = parseFloat(document.getElementById('inner-h')?.value) || iw;
+  const idp = parseFloat(document.getElementById('inner-d')?.value) || iw;
+  const innerAlgo = document.getElementById('inner-algorithm')?.value || 'ff';
+  const outerAlgo = document.getElementById('algorithm').value;
+
+  const body = {
+    mode,
+    levels: [
+      { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [] },
+      { bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
+        constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })) },
+    ],
+    items: items.map(it => ({
+      id: it.id, width: it.width, height: it.height, depth: it.depth,
+      allow_rotate: it.allow_rotate, scalars: it.scalars || {},
+    })),
+  };
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  if (auto) timeoutId = setTimeout(() => controller.abort(), 1000);
+
+  try {
+    const resp = await fetch('/api/pack/nested', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = await resp.json();
+    if (data.error) { if (!auto) showError(data.error); return; }
+    lastResult = { data, mode, nested: true, innerBin: body.levels[0].bin, outerBin: body.levels[1].bin };
+    renderNestedResult(lastResult);
+  } catch(e) {
+    if (!auto) showError(e.message);
   } finally {
     clearTimeout(timeoutId);
     if (!auto) { btn.disabled = false; btn.textContent = 'Pack'; }
@@ -674,6 +1097,166 @@ function renderResult({ data, mode, bin }) {
     draw2D(data, mode, bin);
   } else {
     draw3D(data, bin);
+  }
+}
+
+// ── nested result rendering ───────────────────────────────────────────────────
+const CARTON_COLORS = [
+  '#f97316','#e879f9','#2dd4bf','#facc15','#818cf8','#fb923c',
+  '#4ade80','#38bdf8','#f472b6','#a3e635','#c084fc','#60a5fa',
+];
+function cartonColor(idx) { return CARTON_COLORS[idx % CARTON_COLORS.length]; }
+
+function renderNestedResult({ data, mode, innerBin, outerBin }) {
+  const l0 = data.levels[0];
+  const l1 = data.levels[1];
+  document.getElementById('stat-bins').textContent =
+    `${l0.bins_used} carton${l0.bins_used !== 1 ? 's' : ''} / ${l1.bins_used} pallet${l1.bins_used !== 1 ? 's' : ''}`;
+  document.getElementById('stat-placed').textContent = (l0.placements || []).length;
+  document.getElementById('stat-unplaced').textContent = (l0.unplaced || []).length;
+  document.getElementById('bin-tabs').innerHTML = '';
+
+  const legEl = document.getElementById('legend');
+  legEl.innerHTML = '';
+  items.forEach((it, idx) => {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.innerHTML = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>${it.id}`;
+    legEl.appendChild(div);
+  });
+  for (let b = 0; b < l0.bins_used; b++) {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.innerHTML = `<div class="legend-swatch" style="background:${cartonColor(b)};outline:1px solid #fff4"></div>Carton ${b+1}`;
+    legEl.appendChild(div);
+  }
+
+  document.getElementById('empty-state').style.display = 'none';
+  const c3d = document.getElementById('canvas-3d');
+  c3d.style.display = 'none';
+  if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
+
+  drawNested(data, mode, innerBin, outerBin);
+}
+
+function drawNested(data, mode, innerBin, outerBin) {
+  const canvas = document.getElementById('canvas-2d');
+  canvas.style.display = 'block';
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const l0 = data.levels[0];
+  const l1 = data.levels[1];
+  const W = canvas.width, H = canvas.height;
+  const divX = Math.floor(W / 2);
+
+  // Divider line
+  ctx.strokeStyle = '#2a2d3a';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(divX, 8); ctx.lineTo(divX, H - 8); ctx.stroke();
+
+  // Left panel: items → cartons
+  drawNestedPanel(ctx, l0, innerBin, mode, 0, divX - 4, H,
+    `Level 1: Items → ${l0.bins_used} carton${l0.bins_used !== 1 ? 's' : ''}`,
+    'Carton',
+    p => { const idx = items.findIndex(it => it.id === p.item_id); return itemColor(idx < 0 ? 0 : idx); },
+    p => p.item_id
+  );
+
+  // Right panel: cartons → pallets
+  drawNestedPanel(ctx, l1, outerBin, mode, divX + 4, W - divX - 4, H,
+    `Level 2: Cartons → ${l1.bins_used} pallet${l1.bins_used !== 1 ? 's' : ''}`,
+    'Pallet',
+    p => { const m = p.item_id.match(/carton_(\d+)/); return cartonColor(m ? parseInt(m[1]) : 0); },
+    p => { const m = p.item_id.match(/carton_(\d+)/); return `C${m ? parseInt(m[1])+1 : '?'}`; }
+  );
+}
+
+function drawNestedPanel(ctx, levelResult, binSpec, mode, startX, panelW, canvasH, title, binLabel, colorFn, labelFn) {
+  const pad = 12, headerH = 20, labelH = 16;
+  const nBins = levelResult.bins_used || 0;
+  const placements = levelResult.placements || [];
+  const availW = panelW - pad * 2;
+  const availH = canvasH - headerH - pad;
+
+  // Title
+  ctx.fillStyle = '#7b7f92';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(title, startX + panelW / 2, headerH / 2 + 2);
+
+  if (nBins === 0) return;
+
+  if (mode === '1d') {
+    const stripH = Math.min(40, Math.max(14, (availH - labelH * nBins - 8 * nBins) / nBins));
+    const gapY = labelH + stripH + 8;
+    const scale = availW / binSpec.width;
+    for (let b = 0; b < nBins; b++) {
+      const offX = startX + pad;
+      const offY = headerH + pad / 2 + b * gapY + labelH;
+      const bPls = placements.filter(p => p.bin_index === b);
+      ctx.fillStyle = '#7b7f92'; ctx.font = '10px sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(`${binLabel} ${b+1}`, offX, offY - labelH / 2);
+      ctx.strokeStyle = '#3a3d4a'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(offX, offY, availW, stripH);
+      for (const p of bPls) {
+        const color = colorFn(p);
+        ctx.fillStyle = hexToRgba(color, 0.85);
+        ctx.fillRect(offX + p.x * scale + 1, offY + 1, p.w * scale - 2, stripH - 2);
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1;
+        ctx.strokeRect(offX + p.x * scale + 1, offY + 1, p.w * scale - 2, stripH - 2);
+        if (p.w * scale > 16) {
+          ctx.fillStyle = '#fff'; ctx.font = '9px monospace';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(labelFn(p), offX + (p.x + p.w / 2) * scale, offY + stripH / 2);
+        }
+      }
+    }
+    return;
+  }
+
+  // 2D / 3D: bins side by side (top-view for 3D)
+  const binW = binSpec.width;
+  const binH = mode === '3d' ? binSpec.depth : binSpec.height;
+  const gap = 8;
+  const rowAvailW = availW - gap * (nBins - 1);
+  const scaleW = rowAvailW / (binW * nBins);
+  const scaleH = (availH - labelH - 4) / binH;
+  const scale = Math.min(scaleW, scaleH);
+  const bPxW = binW * scale, bPxH = binH * scale;
+
+  for (let b = 0; b < nBins; b++) {
+    const offX = startX + pad + b * (bPxW + gap);
+    const offY = headerH + labelH + (availH - labelH - bPxH) / 2;
+    const bPls = placements.filter(p => p.bin_index === b);
+
+    ctx.fillStyle = '#7b7f92'; ctx.font = '10px sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(`${binLabel} ${b+1}`, offX, headerH + labelH / 2 + 4);
+    ctx.strokeStyle = '#3a3d4a'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(offX, offY, bPxW, bPxH);
+
+    for (const p of bPls) {
+      const color = colorFn(p);
+      const px = offX + p.x * scale;
+      const py = offY + p.y * scale;
+      const pw = p.w * scale;
+      const ph = (mode === '3d' ? p.d : p.h) * scale;
+      ctx.fillStyle = hexToRgba(color, 0.78);
+      ctx.fillRect(px + 1, py + 1, pw - 2, ph - 2);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.strokeRect(px + 1, py + 1, pw - 2, ph - 2);
+      if (pw > 18 && ph > 12) {
+        ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(labelFn(p), px + pw / 2, py + ph / 2);
+      }
+    }
   }
 }
 
@@ -826,9 +1409,15 @@ function draw3D(data, bin) {
   scene3d = new THREE.Scene();
   camera3d = new THREE.PerspectiveCamera(45, W/H, 0.01, 1000);
 
-  const cx = bin.width/2, cy = bin.depth/2, cz = bin.height/2;
+  // Coordinate mapping: algorithm (x=width, y=depth, z=height) → Three.js (X, Y=up, Z)
+  // alg x → three X,  alg z → three Y (up),  alg y → three Z (depth)
+  const toThree = (ax, ay, az) => [ax, az, ay];
+
+  const cx = bin.width/2, cy = bin.height/2, cz = bin.depth/2; // three-space centre
   const maxDim = Math.max(bin.width, bin.depth, bin.height);
   orbitState.dist = maxDim * 2.2;
+  orbitState.phi   = 1.0;  // slightly above horizon
+  orbitState.theta = 0.6;
 
   function updateCamera() {
     const { phi, theta, dist } = orbitState;
@@ -841,8 +1430,8 @@ function draw3D(data, bin) {
   }
   updateCamera();
 
-  // Bin wireframe
-  const binGeo = new THREE.BoxGeometry(bin.width, bin.depth, bin.height);
+  // Bin wireframe — three-space: width × height × depth
+  const binGeo = new THREE.BoxGeometry(bin.width, bin.height, bin.depth);
   const binEdges = new THREE.EdgesGeometry(binGeo);
   const binLine = new THREE.LineSegments(binEdges, new THREE.LineBasicMaterial({color: 0x2a2d3a}));
   binLine.position.set(cx, cy, cz);
@@ -851,18 +1440,20 @@ function draw3D(data, bin) {
   // Lights
   scene3d.add(new THREE.AmbientLight(0xffffff, 0.5));
   const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-  dir.position.set(1, 2, 1.5);
+  dir.position.set(1, 3, 2);
   scene3d.add(dir);
 
-  // Items
+  // Items — remap alg coords to three-space
   const placements = (data.placements || []).filter(p => p.bin_index === activeBin);
   for (const p of placements) {
     const idx = items.findIndex(it => it.id === p.item_id);
     const hex = parseInt(itemColor(idx < 0 ? 0 : idx).replace('#',''), 16);
-    const geo = new THREE.BoxGeometry(p.w - 0.08, p.d - 0.08, p.h - 0.08);
+    // three-space dims: W (alg w), H_three (alg h), D_three (alg d)
+    const geo = new THREE.BoxGeometry(p.w - 0.08, p.h - 0.08, p.d - 0.08);
     const mat = new THREE.MeshLambertMaterial({ color: hex, transparent: true, opacity: 0.82 });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(p.x + p.w/2, p.y + p.d/2, p.z + p.h/2);
+    const [tx, ty, tz] = toThree(p.x + p.w/2, p.y + p.d/2, p.z + p.h/2);
+    mesh.position.set(tx, ty, tz);
     scene3d.add(mesh);
     const edges = new THREE.EdgesGeometry(geo);
     const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }));

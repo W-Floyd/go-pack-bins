@@ -1,8 +1,10 @@
 package offline
 
 import (
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/wfloyd/go-pack-bins/pack"
 )
@@ -10,27 +12,25 @@ import (
 // BinCompletion implements the Bin Completion exact algorithm for the 1-D
 // bin packing problem (Korf, 2002; Schreiber & Korf, 2013).
 //
-// The algorithm searches for an optimal packing using branch-and-bound with:
-//   - Lower bound: ceil(sum of sizes / bin capacity)
-//   - Dominance pruning: skip partial completions dominated by previously found ones
-//   - Undominated completion search: only generate maximal completions
-//
-// Complexity is exponential in the worst case but very fast in practice for
-// instances with a small optimal number of bins.
+// Optional scalar Constraints are checked during the branch-and-bound search:
+// branches that would violate a constraint are pruned, so the solver still
+// finds the globally optimal feasible packing.
 //
 // Only 1-D items are supported. Items larger than binCapacity are rejected.
-func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFactory) (pack.Result, error) {
+func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFactory, constraints ...pack.Constraint) (pack.Result, error) {
 	if len(items) == 0 {
 		return pack.Result{}, nil
 	}
 
 	sizes := make([]float64, len(items))
+	scalars := make([]map[string]float64, len(items))
 	for i, item := range items {
 		s := item.Volume()
 		if s > binCapacity {
 			return pack.Result{}, pack.ErrItemTooLarge
 		}
 		sizes[i] = s
+		scalars[i] = pack.ScalarsOf(item)
 	}
 
 	// Sort items by decreasing size (required for branch-and-bound efficiency).
@@ -43,8 +43,10 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 	})
 
 	sortedSizes := make([]float64, len(items))
+	sortedScalars := make([]map[string]float64, len(items))
 	for i, idx := range order {
 		sortedSizes[i] = sizes[idx]
+		sortedScalars[i] = scalars[idx]
 	}
 
 	// Compute lower bound from continuous relaxation.
@@ -57,27 +59,29 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 	solver := &bcSolver{
 		n:           len(items),
 		sizes:       sortedSizes,
+		scalars:     sortedScalars,
 		binCapacity: binCapacity,
-		bestBins:    len(items), // worst case: one item per bin
+		constraints: constraints,
+		bestBins:    len(items),
 		bestAssign:  nil,
 	}
 
-	// Search for the optimal number of bins starting from the lower bound.
 	for k := lowerBound; k <= len(items); k++ {
 		assign := make([]int, len(items))
 		remaining := make([]float64, k)
+		binAgg := make([]map[string]float64, k)
 		for i := range remaining {
 			remaining[i] = binCapacity
+			binAgg[i] = make(map[string]float64)
 		}
 		solver.bestBins = k + 1
 		solver.bestAssign = nil
-		if solver.search(assign, remaining, 0, k) {
+		if solver.search(assign, remaining, binAgg, 0, k) {
 			break
 		}
 	}
 
 	if solver.bestAssign == nil {
-		// Fallback: one item per bin (should not happen).
 		solver.bestAssign = make([]int, len(items))
 		for i := range solver.bestAssign {
 			solver.bestAssign[i] = i
@@ -85,7 +89,6 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 		solver.bestBins = len(items)
 	}
 
-	// Build the result using the best assignment found.
 	bins := make([]pack.Bin, solver.bestBins)
 	for i := range bins {
 		bins[i] = factory.Open()
@@ -107,17 +110,17 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 type bcSolver struct {
 	n           int
 	sizes       []float64
+	scalars     []map[string]float64
 	binCapacity float64
+	constraints []pack.Constraint
 	bestBins    int
 	bestAssign  []int
 }
 
-// search attempts to assign item[itemIdx] to one of k bins.
-// Prunes via lower bound and dominance.
-// Returns true if a complete valid assignment using exactly k bins was found.
-func (s *bcSolver) search(assign []int, remaining []float64, itemIdx, k int) bool {
+// search attempts to assign items[itemIdx..] to k bins.
+// binAgg tracks accumulated scalar totals per bin (mutated and restored).
+func (s *bcSolver) search(assign []int, remaining []float64, binAgg []map[string]float64, itemIdx, k int) bool {
 	if itemIdx == s.n {
-		// Count non-empty bins.
 		usedBins := 0
 		for _, r := range remaining {
 			if r < s.binCapacity {
@@ -157,22 +160,70 @@ func (s *bcSolver) search(assign []int, remaining []float64, itemIdx, k int) boo
 	}
 
 	sz := s.sizes[itemIdx]
+	itemScalars := s.scalars[itemIdx]
 	found := false
-	seen := make(map[float64]bool) // skip bins with the same remaining (symmetry breaking)
+	seen := make(map[string]bool) // symmetry key: remaining + scalar aggregates
 	for j := 0; j < k; j++ {
 		if remaining[j] < sz {
 			continue
 		}
-		if seen[remaining[j]] {
-			continue // dominated by a previous identical bin
+		// Hard scalar constraints.
+		if !s.checkConstraints(binAgg[j], itemScalars) {
+			continue
 		}
-		seen[remaining[j]] = true
+		// Symmetry breaking: skip bins that are identical to one already tried.
+		key := symKey(remaining[j], binAgg[j])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
 		assign[itemIdx] = j
 		remaining[j] -= sz
-		if s.search(assign, remaining, itemIdx+1, k) {
+		applyScalars(binAgg[j], itemScalars, +1)
+		pack.ApplyConstraints(s.constraints, binAgg[j], itemScalars)
+		if s.search(assign, remaining, binAgg, itemIdx+1, k) {
 			found = true
 		}
+		pack.RevertConstraints(s.constraints, binAgg[j], itemScalars)
+		applyScalars(binAgg[j], itemScalars, -1)
 		remaining[j] += sz
 	}
 	return found
+}
+
+func (s *bcSolver) checkConstraints(binAgg, itemScalars map[string]float64) bool {
+	for _, con := range s.constraints {
+		if !con.Check(binAgg, itemScalars) {
+			return false
+		}
+	}
+	return true
+}
+
+// applyScalars adds (sign=+1) or subtracts (sign=-1) itemScalars into agg.
+func applyScalars(agg, itemScalars map[string]float64, sign float64) {
+	for k, v := range itemScalars {
+		agg[k] += sign * v
+	}
+}
+
+// symKey builds a canonical string key for a bin state used in symmetry pruning.
+// Two bins are symmetric only if both their remaining capacity and scalar
+// aggregates are identical.
+func symKey(remaining float64, agg map[string]float64) string {
+	if len(agg) == 0 {
+		return fmt.Sprintf("%g", remaining)
+	}
+	keys := make([]string, 0, len(agg))
+	for k := range agg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%g", remaining)
+	for _, k := range keys {
+		fmt.Fprintf(&sb, ",%s=%g", k, agg[k])
+	}
+	return sb.String()
 }
