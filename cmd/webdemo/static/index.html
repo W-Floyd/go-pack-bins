@@ -189,6 +189,17 @@
   .btn-primary:hover { opacity: 0.88; }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-sm { padding: 5px 10px; font-size: 12px; }
+  /* spinner shown on the Pack button while a pack is in flight */
+  .spinner {
+    display: inline-block;
+    width: 13px; height: 13px;
+    border: 2px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   /* ── main canvas area ── */
   .canvas-area {
     flex: 1;
@@ -1324,14 +1335,33 @@ async function runPack(auto = false) {
   }
 }
 
+// ── pack progress indicator ────────────────────────────────────────────────
+// Monotonic request token so a slow response can't overwrite a newer one (there
+// is no longer a request timeout). A spinner appears on the Pack button only if
+// the request is still in flight after 100ms, so fast packs don't flicker.
+let packSeq = 0;
+let packSpinnerTimer = null;
+
+function beginPackIndicator() {
+  clearTimeout(packSpinnerTimer);
+  packSpinnerTimer = setTimeout(() => {
+    document.getElementById('pack-btn').innerHTML = '<span class="spinner"></span> Packing…';
+  }, 100);
+}
+
+function endPackIndicator() {
+  clearTimeout(packSpinnerTimer);
+  document.getElementById('pack-btn').textContent = 'Pack';
+}
+
 async function runSinglePack(auto = false) {
   if (items.length === 0) {
     if (!auto) showError('Add at least one item first.');
     return;
   }
-  const btn = document.getElementById('pack-btn');
-  if (!auto) { btn.disabled = true; btn.textContent = 'Packing…'; }
   hideError(); hideWarn();
+  const seq = ++packSeq;
+  beginPackIndicator();
 
   const mode = document.getElementById('mode').value;
   const algo = document.getElementById('algorithm').value;
@@ -1356,18 +1386,14 @@ async function runSinglePack(auto = false) {
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
   };
 
-  const controller = new AbortController();
-  let timeoutId = null;
-  if (auto) timeoutId = setTimeout(() => controller.abort(), 1000);
-
   try {
     const resp = await fetch('/api/pack', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
-      signal: controller.signal,
     });
     const data = await resp.json();
+    if (seq !== packSeq) return; // superseded by a newer request
     if (data.error) { if (!auto) showError(data.error); return; }
     lastResult = { data, mode, bin: body.bin };
     renderResult(lastResult);
@@ -1379,10 +1405,9 @@ async function runSinglePack(auto = false) {
         showWarn(`${data.unplaced.length} item(s) could not be placed`);
     }
   } catch(e) {
-    if (!auto) showError(e.message);
+    if (seq === packSeq && !auto) showError(e.message);
   } finally {
-    clearTimeout(timeoutId);
-    if (!auto) { btn.disabled = false; btn.textContent = 'Pack'; }
+    if (seq === packSeq) endPackIndicator();
   }
 }
 
@@ -1391,9 +1416,9 @@ async function runNestedPack(auto = false) {
     if (!auto) showError('Add at least one item first.');
     return;
   }
-  const btn = document.getElementById('pack-btn');
-  if (!auto) { btn.disabled = true; btn.textContent = 'Packing…'; }
   hideError();
+  const seq = ++packSeq;
+  beginPackIndicator();
 
   const mode = document.getElementById('mode').value;
   const bw = parseFloat(document.getElementById('bin-w').value) || 10;
@@ -1421,18 +1446,14 @@ async function runNestedPack(auto = false) {
     })),
   };
 
-  const controller = new AbortController();
-  let timeoutId = null;
-  if (auto) timeoutId = setTimeout(() => controller.abort(), 1000);
-
   try {
     const resp = await fetch('/api/pack/nested', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: controller.signal,
     });
     const data = await resp.json();
+    if (seq !== packSeq) return; // superseded by a newer request
     if (data.error) { if (!auto) showError(data.error); return; }
     lastResult = { data, mode, nested: true, innerBin: body.levels[0].bin, outerBin: body.levels[1].bin };
     renderNestedResult(lastResult);
@@ -1444,10 +1465,9 @@ async function runNestedPack(auto = false) {
         showWarn(`${data.unplaced.length} item(s) could not be placed`);
     }
   } catch(e) {
-    if (!auto) showError(e.message);
+    if (seq === packSeq && !auto) showError(e.message);
   } finally {
-    clearTimeout(timeoutId);
-    if (!auto) { btn.disabled = false; btn.textContent = 'Pack'; }
+    if (seq === packSeq) endPackIndicator();
   }
 }
 
