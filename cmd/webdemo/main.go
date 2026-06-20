@@ -148,17 +148,19 @@ func pack1D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Preference-fit is its own selection algorithm, scored by the balance objectives.
-	if req.Algorithm == "pref" {
-		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
-		if perr != nil {
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
 		sizeByID := make(map[string]float64, len(req.Items))
 		for _, spec := range req.Items {
 			sizeByID[spec.ID] = spec.Width
 		}
-		return buildResponse1D(result, req.Bin.Width, sizeByID), nil
+		resp := buildResponse1D(result, req.Bin.Width, sizeByID)
+		resp.BestPacker = best
+		return resp, nil
 	}
 
 	var result pack.Result
@@ -326,13 +328,15 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Preference-fit is its own selection algorithm, scored by the balance objectives.
-	if req.Algorithm == "pref" {
-		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
-		if perr != nil {
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
-		return buildResponse2D(result, false), nil
+		resp := buildResponse2D(result, false)
+		resp.BestPacker = best
+		return resp, nil
 	}
 
 	var result pack.Result
@@ -467,13 +471,15 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Preference-fit is its own selection algorithm, scored by the balance objectives.
-	if req.Algorithm == "pref" {
-		result, perr := runPreferenceFit(factory, buildPreferences(req.Preferences), items)
-		if perr != nil {
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
-		return buildResponse3D(result), nil
+		resp := buildResponse3D(result)
+		resp.BestPacker = best
+		return resp, nil
 	}
 
 	var result pack.Result
@@ -642,15 +648,54 @@ func buildPreferences(specs []PreferenceSpec) []pack.Preference {
 // preferences. This balances within the fewest bins instead of spilling into an
 // extra one the way single-pass online preference selection can. The factory is
 // wrapped in a ConstrainedFactory if needed so bins expose Aggregates().
-func runPreferenceFit(factory pack.BinFactory, prefs []pack.Preference, items []pack.Item) (pack.Result, error) {
+// isBalanceable reports whether balance objectives can layer on an algorithm.
+// Only fit policies expressible as preferences qualify: Best-Fit (FillHigh),
+// Worst-Fit (FillLow), Preference-Fit (objectives only), and Auto (which then
+// chooses among the balanceable fit flavors).
+func isBalanceable(algo string) bool {
+	switch algo {
+	case "bf", "wf", "pref", "auto":
+		return true
+	}
+	return false
+}
+
+// runBalanced layers balance objectives on a balanceable algorithm via the
+// two-pass BalancedFit. Best-Fit/Worst-Fit prepend a fill preference so the
+// distribution leans full/empty; Auto tries both balanceable flavors and keeps
+// the one using fewer bins. Returns the winning flavor label (for Auto).
+func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, items []pack.Item) (pack.Result, string, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
-	r, err := offline.NewBalancedFit(factory, prefs...).PackAll(items)
-	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
-		return pack.Result{}, err
+	run := func(fill pack.Preference) (pack.Result, error) {
+		full := prefs
+		if fill != nil {
+			full = append([]pack.Preference{fill}, prefs...)
+		}
+		return offline.NewBalancedFit(factory, full...).PackAll(items)
 	}
-	return r, nil
+	switch algo {
+	case "bf":
+		r, err := run(pack.FillHigh())
+		return r, "", err
+	case "wf":
+		r, err := run(pack.FillLow())
+		return r, "", err
+	case "pref":
+		r, err := run(nil)
+		return r, "", err
+	case "auto":
+		rh, eh := run(pack.FillHigh())
+		rl, el := run(pack.FillLow())
+		hOK := eh == nil || errors.Is(eh, pack.ErrItemTooLarge)
+		lOK := el == nil || errors.Is(el, pack.ErrItemTooLarge)
+		if hOK && (!lOK || rh.BinsUsed() <= rl.BinsUsed()) {
+			return rh, "Best-Fit + balance", eh
+		}
+		return rl, "Worst-Fit + balance", el
+	}
+	return pack.Result{}, "", nil
 }
 
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.

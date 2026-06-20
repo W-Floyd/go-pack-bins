@@ -517,7 +517,7 @@
       <div id="balance-section" style="display:none">
         <div class="section-label" id="balance-label">Balance objectives</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
-          Scores Preference-Fit bin selection. Constraints still apply.
+          Layered on the chosen ⚖ algorithm. Constraints still apply.
         </div>
         <div class="item-list" id="pref-list"></div>
         <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
@@ -548,7 +548,7 @@
       <div id="inner-balance-section" style="display:none">
         <div class="section-label">Inner balance objectives</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
-          Scores Preference-Fit selection inside cartons. Constraints still apply.
+          Layered on the inner ⚖ algorithm. Constraints still apply.
         </div>
         <div class="item-list" id="ipref-list"></div>
         <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
@@ -659,7 +659,7 @@ const ALGOS = {
     {v:'mffd',l:'Modified FFD (MFFD)'},
     {v:'kk',  l:'Karmarkar-Karp (KK)'},
     {v:'bc',  l:'Bin Completion (exact)'},
-    {v:'pref',l:'Preference-Fit (balancing)'},
+    {v:'pref',l:'Preference-Fit'},
   ],
   '2d': [
     {v:'auto',       l:'Auto (best-of)'},
@@ -671,7 +671,7 @@ const ALGOS = {
     {v:'ffd',        l:'First Fit Decreasing (FFD)'},
     {v:'bfd',        l:'Best Fit Decreasing (BFD)'},
     {v:'nfd',        l:'Next Fit Decreasing (NFD)'},
-    {v:'pref',       l:'Preference-Fit (balancing)'},
+    {v:'pref',       l:'Preference-Fit'},
   ],
   '3d': [
     {v:'auto',l:'Auto (best-of)'},
@@ -682,7 +682,7 @@ const ALGOS = {
     {v:'ffd', l:'First Fit Decreasing (FFD)'},
     {v:'bfd', l:'Best Fit Decreasing (BFD)'},
     {v:'nfd', l:'Next Fit Decreasing (NFD)'},
-    {v:'pref',l:'Preference-Fit (balancing)'},
+    {v:'pref',l:'Preference-Fit'},
   ],
 };
 
@@ -724,12 +724,17 @@ function onModeChange() {
   updateBalanceVisibility();
 }
 
+// Algorithms that can host balance objectives (see backend isBalanceable).
+// The ⚖ marker in the dropdown flags them.
+function balanceableAlgo(v) { return v === 'bf' || v === 'wf' || v === 'pref' || v === 'auto'; }
+function algoLabel(a) { return balanceableAlgo(a.v) ? a.l + ' ⚖' : a.l; }
+
 function buildAlgorithmSelect(mode) {
   const sel = document.getElementById('algorithm');
   sel.innerHTML = '';
   for (const a of ALGOS[mode]) {
     const o = document.createElement('option');
-    o.value = a.v; o.textContent = a.l;
+    o.value = a.v; o.textContent = algoLabel(a);
     sel.appendChild(o);
   }
 }
@@ -806,7 +811,7 @@ function buildInnerAlgorithmSelect(mode) {
   sel.innerHTML = '';
   for (const a of ALGOS[mode]) {
     const o = document.createElement('option');
-    o.value = a.v; o.textContent = a.l;
+    o.value = a.v; o.textContent = algoLabel(a);
     sel.appendChild(o);
   }
 }
@@ -922,16 +927,16 @@ function onAlgorithmChange() {
   scheduleAutoPack();
 }
 
-// Each balance panel shows only when its level's algorithm is Preference-Fit.
+// Each balance panel shows only when its level's algorithm is balanceable (⚖).
 // The outer label switches to "Outer …" in nested mode to disambiguate.
 function updateBalanceVisibility() {
-  const outerPref = document.getElementById('algorithm').value === 'pref';
-  document.getElementById('balance-section').style.display = outerPref ? '' : 'none';
+  const outerOK = balanceableAlgo(document.getElementById('algorithm').value);
+  document.getElementById('balance-section').style.display = outerOK ? '' : 'none';
   document.getElementById('balance-label').textContent =
     nestedEnabled ? 'Outer balance objectives' : 'Balance objectives';
   const innerSel = document.getElementById('inner-algorithm');
-  const innerPref = nestedEnabled && innerSel && innerSel.value === 'pref';
-  document.getElementById('inner-balance-section').style.display = innerPref ? '' : 'none';
+  const innerOK = nestedEnabled && innerSel && balanceableAlgo(innerSel.value);
+  document.getElementById('inner-balance-section').style.display = innerOK ? '' : 'none';
 }
 
 function renderPreferenceList(lvl) {
