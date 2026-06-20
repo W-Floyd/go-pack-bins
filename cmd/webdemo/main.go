@@ -604,13 +604,24 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 	}
 
 	// Level 0: pack items into inner bins (cartons).
+	// Forward any minsupport constraint from the outer level so the physical
+	// stacking rule is enforced inside cartons as well as on pallets.
 	l0spec := req.Levels[0]
+	l0Constraints := l0spec.Constraints
+	if len(req.Levels) > 1 {
+		for _, c := range req.Levels[1].Constraints {
+			if c.Op == "minsupport" {
+				l0Constraints = append(l0Constraints, c)
+				break
+			}
+		}
+	}
 	l0req := PackRequest{
 		Mode:        req.Mode,
 		Algorithm:   l0spec.Algorithm,
 		Bin:         l0spec.Bin,
 		Items:       req.Items,
-		Constraints: l0spec.Constraints,
+		Constraints: l0Constraints,
 	}
 	l0resp, err := packByMode(l0req)
 	if err != nil {
