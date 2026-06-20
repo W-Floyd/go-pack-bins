@@ -10,6 +10,7 @@ import (
 	"github.com/wfloyd/go-pack-bins/d1"
 	"github.com/wfloyd/go-pack-bins/d2"
 	"github.com/wfloyd/go-pack-bins/d3"
+	"github.com/wfloyd/go-pack-bins/meta"
 	"github.com/wfloyd/go-pack-bins/offline"
 	"github.com/wfloyd/go-pack-bins/online"
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -215,6 +216,17 @@ func pack1D(req PackRequest) (PackResponse, error) {
 		result, err = offline.KarmarkarKarp(items, cap, factory)
 	case "bc":
 		result, err = offline.BinCompletion(items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
+	case "auto":
+		p := meta.BestOf(
+			offline.FirstFitDecreasing(factory),
+			offline.BestFitDecreasing(factory),
+			offline.WorstFitDecreasing(factory),
+			offline.ModifiedFirstFitDecreasing(cap, factory),
+			meta.NewFunc("kk", func(it []pack.Item) (pack.Result, error) {
+				return offline.KarmarkarKarp(it, cap, d1.NewFactory(cap))
+			}),
+		)
+		result, err = p.PackAll(items)
 	default:
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -323,6 +335,17 @@ func pack2D(req PackRequest) (PackResponse, error) {
 			}
 		}
 		result = p.Result()
+	case "auto":
+		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
+		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
+		p := meta.BestOf(
+			offline.FirstFitDecreasing(mrFactory),
+			offline.BestFitDecreasing(mrFactory),
+			offline.NextFitDecreasing(mrFactory),
+			offline.FirstFitDecreasing(gFactory),
+			offline.BestFitDecreasing(gFactory),
+		)
+		result, err = p.PackAll(items)
 	default: // ff, maxrects, guillotine
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -440,6 +463,13 @@ func pack3D(req PackRequest) (PackResponse, error) {
 			}
 		}
 		result = p.Result()
+	case "auto":
+		p := meta.BestOf(
+			offline.FirstFitDecreasing(factory),
+			offline.BestFitDecreasing(factory),
+			offline.NextFitDecreasing(factory),
+		)
+		result, err = p.PackAll(items)
 	default: // ff
 		p := online.FirstFit(factory)
 		for _, it := range items {
