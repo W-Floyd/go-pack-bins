@@ -11,7 +11,7 @@ func TestCompact_SlidesToOriginAndContact(t *testing.T) {
 	// yet). Now both share x, so y-slide stacks b flush against a at y=2.
 	a := &d3.Placement3D{X: 0, Y: 0, Z: 0, W: 2, D: 2, H: 2}
 	b := &d3.Placement3D{X: 5, Y: 5, Z: 0, W: 2, D: 2, H: 2}
-	d3.Compact([]*d3.Placement3D{a, b}, 10, 10, 10, true, true)
+	d3.Compact([]*d3.Placement3D{a, b}, 10, 10, 10, true, true, 0)
 
 	if b.X != 0 || b.Y != 2 {
 		t.Errorf("b compacted to (%v,%v), want (0,2) flush against a", b.X, b.Y)
@@ -26,9 +26,26 @@ func TestCompact_StopsAtNeighbor(t *testing.T) {
 	// b overlaps a in y and z, so sliding -x stops flush against a's right face.
 	a := &d3.Placement3D{X: 0, Y: 0, Z: 0, W: 3, D: 4, H: 4}
 	b := &d3.Placement3D{X: 6, Y: 0, Z: 0, W: 2, D: 4, H: 4}
-	d3.Compact([]*d3.Placement3D{a, b}, 10, 10, 10, true, true)
+	d3.Compact([]*d3.Placement3D{a, b}, 10, 10, 10, true, true, 0)
 	if b.X != 3 {
 		t.Errorf("b.x = %v, want 3 (flush against a)", b.X)
+	}
+}
+
+func TestCompact_PreservesSupport(t *testing.T) {
+	// base on the floor at x=4; top resting on base. Compacting x toward 0 must
+	// NOT slide base out from under top (which would leave top floating). Either
+	// both move together-ish or base stays; in all cases top stays supported.
+	base := &d3.Placement3D{X: 4, Y: 0, Z: 0, W: 3, D: 3, H: 2}
+	top := &d3.Placement3D{X: 4, Y: 0, Z: 2, W: 3, D: 3, H: 2}
+	d3.Compact([]*d3.Placement3D{base, top}, 10, 10, 10, true, true, 0)
+
+	// top must remain fully over base (supported), whatever the final x/y.
+	ox := minf(top.X+top.W, base.X+base.W) - maxf(top.X, base.X)
+	oy := minf(top.Y+top.D, base.Y+base.D) - maxf(top.Y, base.Y)
+	if base.Z+base.H != top.Z || ox <= 0 || oy <= 0 {
+		t.Errorf("top no longer supported by base: base=(%v,%v) top=(%v,%v) ox=%v oy=%v",
+			base.X, base.Y, top.X, top.Y, ox, oy)
 	}
 }
 
