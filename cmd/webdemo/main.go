@@ -64,6 +64,21 @@ type PackRequest struct {
 	Items       []ItemSpec       `json:"items"`
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
+	Contact     ContactSpec      `json:"contact,omitempty"` // per-face support/anti-slosh
+}
+
+// ContactSpec is the per-face contact requirement (fractions 0-1). Bottom is a
+// hard support gate (3-D); SideX/SideY are lateral anti-slosh targets that drive
+// contact-maximizing placement and lateral compaction.
+type ContactSpec struct {
+	Bottom float64 `json:"bottom,omitempty"`
+	SideX  float64 `json:"side_x,omitempty"`
+	SideY  float64 `json:"side_y,omitempty"`
+}
+
+// lateralAxes reports which lateral axes have an anti-slosh target (and whether any do).
+func (c ContactSpec) lateralAxes() (doX, doY, any bool) {
+	return c.SideX > 0, c.SideY > 0, c.SideX > 0 || c.SideY > 0
 }
 
 type PlacementResult struct {
@@ -334,6 +349,9 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
+		if dx, dy, any := req.Contact.lateralAxes(); any {
+			compactResult2D(result, bw, bh, dx, dy)
+		}
 		resp := buildResponse2D(result, false)
 		resp.BestPacker = best
 		return resp, nil
@@ -403,6 +421,10 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
+	// Skip compaction for guillotine — it would desync the free-rect overlay.
+	if dx, dy, any := req.Contact.lateralAxes(); any && req.Algorithm != "guillotine" {
+		compactResult2D(result, bw, bh, dx, dy)
+	}
 	resp := buildResponse2D(result, req.Algorithm == "guillotine")
 	resp.BestPacker = bestPacker
 	return resp, nil
@@ -455,12 +477,11 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 func pack3D(req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	minSup, scalarSpecs := extractMinSupport(req.Constraints)
-	stratFn := d3.NewExtremePointStrategy
-	if minSup > 0 {
-		stratFn = d3.NewExtremePointStrategyWithSupport(minSup)
-	}
-	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), scalarSpecs)
+	// Bottom → hard support gate; SideX/SideY → contact-maximizing placement.
+	stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
+		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
+	})
+	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
@@ -476,6 +497,9 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
+		}
+		if dx, dy, any := req.Contact.lateralAxes(); any {
+			compactResult3D(result, bw, bd, bh, dx, dy)
 		}
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
@@ -542,6 +566,9 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
+	if dx, dy, any := req.Contact.lateralAxes(); any {
+		compactResult3D(result, bw, bd, bh, dx, dy)
+	}
 	resp := buildResponse3D(result)
 	resp.BestPacker = bestPacker
 	return resp, nil
@@ -587,19 +614,6 @@ func placementErrors(errs map[string]error) map[string]string {
 		out[k] = v.Error()
 	}
 	return out
-}
-
-// extractMinSupport pulls out any "minsupport" spec (value 0-100) and returns
-// the fraction (0-1) plus the remaining scalar-only specs.
-func extractMinSupport(specs []ConstraintSpec) (frac float64, rest []ConstraintSpec) {
-	for _, s := range specs {
-		if s.Op == "minsupport" {
-			frac = s.Value / 100.0
-		} else {
-			rest = append(rest, s)
-		}
-	}
-	return
 }
 
 // buildPreferences converts PreferenceSpec slice to parallel preference and
@@ -780,6 +794,33 @@ func binImbalance(r pack.Result, items []pack.Item) float64 {
 	return total
 }
 
+// compactResult3D slides each bin's items toward the lateral walls to remove
+// slosh (in place on the d3 placements).
+func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool) {
+	byBin := map[string][]*d3.Placement3D{}
+	for _, p := range r.Placements {
+		if pl, ok := p.(*d3.Placement3D); ok {
+			byBin[pl.BinID()] = append(byBin[pl.BinID()], pl)
+		}
+	}
+	for _, ps := range byBin {
+		d3.Compact(ps, bw, bd, bh, doX, doY)
+	}
+}
+
+// compactResult2D is the 2-D equivalent of compactResult3D.
+func compactResult2D(r pack.Result, bw, bh float64, doX, doY bool) {
+	byBin := map[string][]*d2.Placement2D{}
+	for _, p := range r.Placements {
+		if pl, ok := p.(*d2.Placement2D); ok {
+			byBin[pl.BinID()] = append(byBin[pl.BinID()], pl)
+		}
+	}
+	for _, ps := range byBin {
+		d2.Compact(ps, bw, bh, doX, doY)
+	}
+}
+
 // binID extracts a bin's ID via its optional ID() method.
 func binID(b pack.Bin) string {
 	if idr, ok := b.(interface{ ID() string }); ok {
@@ -830,6 +871,7 @@ type NestedLevelSpec struct {
 	Algorithm   string           `json:"algorithm"`
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
+	Contact     ContactSpec      `json:"contact,omitempty"`
 }
 
 type NestedPackRequest struct {
@@ -881,25 +923,21 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 	}
 
 	// Level 0: pack items into inner bins (cartons).
-	// Forward any minsupport constraint from the outer level so the physical
+	// Inherit the outer level's bottom-support requirement so the physical
 	// stacking rule is enforced inside cartons as well as on pallets.
 	l0spec := req.Levels[0]
-	l0Constraints := l0spec.Constraints
-	if len(req.Levels) > 1 {
-		for _, c := range req.Levels[1].Constraints {
-			if c.Op == "minsupport" {
-				l0Constraints = append(l0Constraints, c)
-				break
-			}
-		}
+	l0Contact := l0spec.Contact
+	if b := req.Levels[1].Contact.Bottom; b > l0Contact.Bottom {
+		l0Contact.Bottom = b
 	}
 	l0req := PackRequest{
 		Mode:        req.Mode,
 		Algorithm:   l0spec.Algorithm,
 		Bin:         l0spec.Bin,
 		Items:       req.Items,
-		Constraints: l0Constraints,
+		Constraints: l0spec.Constraints,
 		Preferences: l0spec.Preferences,
+		Contact:     l0Contact,
 	}
 	l0resp, err := packByMode(l0req)
 	if err != nil {
@@ -947,6 +985,7 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 		Items:       cartonItems,
 		Constraints: l1spec.Constraints,
 		Preferences: l1spec.Preferences,
+		Contact:     l1spec.Contact,
 	}
 	l1resp, err := packByMode(l1req)
 	if err != nil {
