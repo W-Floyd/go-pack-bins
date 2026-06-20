@@ -678,7 +678,10 @@ func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, 
 			p = append([]pack.Preference{fill}, prefs...)
 			w = append([]float64{1}, weights...)
 		}
-		return offline.NewBalancedFitW(factory, p, w).PackAll(items)
+		r, err := offline.NewBalancedFitW(factory, p, w).PackAll(items)
+		// Local-search pass: move/swap items between bins to tighten the balance
+		// (no-op above RefineBalanceMaxItems items).
+		return offline.RefineBalance(factory, r, items), err
 	}
 	switch algo {
 	case "bf":
