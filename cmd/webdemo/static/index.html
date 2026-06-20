@@ -415,7 +415,7 @@
         </div>
         <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
           <label class="checkbox-row" id="rotate-row" style="display:none;">
-            <input type="checkbox" id="allow-rotate"> Rotate (default)
+            <input type="checkbox" id="allow-rotate" onchange="scheduleAutoPack()"> Rotate (default)
           </label>
           <button class="btn btn-ghost btn-sm" onclick="addItem()">+ Add item</button>
           <select id="preset-select" style="font-size:12px;padding:5px 8px" onchange="loadPreset(this.value); this.value=''">
@@ -437,7 +437,7 @@
         <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
           <div class="field" style="flex:2; min-width:70px">
             <label>Scalar</label>
-            <input type="text" id="con-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px">
+            <input type="text" id="con-scalar" placeholder="weight" style="font-family:var(--mono);font-size:12px" onkeydown="if(event.key==='Enter')addConstraint()">
           </div>
           <div class="field" style="flex:1; min-width:54px">
             <label>Op</label>
@@ -450,7 +450,7 @@
           </div>
           <div class="field" id="con-value-field" style="flex:1; min-width:54px">
             <label>Value</label>
-            <input type="number" id="con-value" placeholder="100" step="any" style="font-size:12px">
+            <input type="number" id="con-value" placeholder="100" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addConstraint()">
           </div>
           <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addConstraint()">+ Add</button>
         </div>
@@ -513,6 +513,7 @@ let nestedEnabled = false;
 // ── algorithm lists ──────────────────────────────────────────────────────────
 const ALGOS = {
   '1d': [
+    {v:'auto',l:'Auto (best-of)'},
     {v:'ff',  l:'First Fit (FF)'},
     {v:'nf',  l:'Next Fit (NF)'},
     {v:'nkf', l:'Next K-Fit (NkF, k=3)'},
@@ -530,6 +531,7 @@ const ALGOS = {
     {v:'bc',  l:'Bin Completion (exact)'},
   ],
   '2d': [
+    {v:'auto',       l:'Auto (best-of)'},
     {v:'ff',         l:'First Fit / MaxRects'},
     {v:'guillotine', l:'First Fit / Guillotine'},
     {v:'nf',         l:'Next Fit'},
@@ -540,6 +542,7 @@ const ALGOS = {
     {v:'nfd',        l:'Next Fit Decreasing (NFD)'},
   ],
   '3d': [
+    {v:'auto',l:'Auto (best-of)'},
     {v:'ff',  l:'First Fit / Extreme-point'},
     {v:'nf',  l:'Next Fit'},
     {v:'bf',  l:'Best Fit'},
