@@ -156,16 +156,20 @@ func handlePack(w http.ResponseWriter, r *http.Request) {
 // solve order so the client can render them progressively as they "appear".
 const streamBatch = 64
 
-// streamFrame is one NDJSON line on the /api/pack/stream response. Exactly one of
-// the optional groups is populated per frame, keyed by Type:
-//   - "meta":  bin/algorithm summary, sent once before any placements
-//   - "batch": a slice of placements (in solve order)
-//   - "done":  terminal marker
-//   - "error": fatal error; terminal
+// streamFrame is one NDJSON line on the /api/pack/stream response. Frames arrive
+// in order, keyed by Type:
+//   - "meta":  sent once up front. Count is the item count (for label budgeting);
+//     Streaming reports whether placements will arrive genuinely mid-solve (true)
+//     or all at once after the solve completes (false, for non-incremental algos).
+//   - "batch": a slice of placements in commit order. For streaming algos these
+//     are flushed as the packer decides them; otherwise sent after the full solve.
+//   - "done":  terminal; carries the authoritative final summary.
+//   - "error": fatal error; terminal.
 type streamFrame struct {
 	Type       string            `json:"type"`
-	BinsUsed   int               `json:"bins_used,omitempty"`
-	Count      int               `json:"count,omitempty"` // total placements to expect (meta)
+	Streaming  bool              `json:"streaming,omitempty"` // meta: genuine mid-solve emission?
+	Count      int               `json:"count,omitempty"`     // meta: item count
+	BinsUsed   int               `json:"bins_used,omitempty"` // done
 	BestPacker string            `json:"best_packer,omitempty"`
 	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"`
 	ItemErrors map[string]string `json:"item_errors,omitempty"`
@@ -213,6 +217,39 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A buffered emitter coalesces placements into batches so we are not flushing
+	// one tiny frame per box, while still pushing each batch the moment it fills.
+	var buf []PlacementResult
+	flushBatch := func() {
+		if len(buf) > 0 {
+			send(streamFrame{Type: "batch", Placements: buf})
+			buf = nil
+		}
+	}
+	emit := func(pr PlacementResult) {
+		buf = append(buf, pr)
+		if len(buf) >= streamBatch {
+			flushBatch()
+		}
+	}
+
+	streaming := isStreamable(req)
+	send(streamFrame{Type: "meta", Count: len(req.Items), Streaming: streaming})
+
+	// Genuine path: the observer fires as the packer commits each placement, so
+	// batches leave mid-solve. The solve runs synchronously here; flushing per
+	// batch is what makes the bytes genuinely progressive.
+	if streaming {
+		if resp, ok := streamSolve(req, emit); ok {
+			flushBatch()
+			send(streamFrame{Type: "done", BinsUsed: resp.BinsUsed,
+				Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
+			return
+		}
+	}
+
+	// Non-incremental algorithms (auto, exact solvers, balancing, compaction):
+	// no honest partial state exists, so solve fully and send the result at once.
 	var resp PackResponse
 	var err error
 	switch req.Mode {
@@ -232,16 +269,6 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 		send(streamFrame{Type: "error", Error: resp.Error})
 		return
 	}
-
-	send(streamFrame{
-		Type:       "meta",
-		BinsUsed:   resp.BinsUsed,
-		Count:      len(resp.Placements),
-		BestPacker: resp.BestPacker,
-		FreeRects:  resp.FreeRects,
-		ItemErrors: resp.ItemErrors,
-		Unplaced:   resp.Unplaced,
-	})
 	for i := 0; i < len(resp.Placements); i += streamBatch {
 		j := i + streamBatch
 		if j > len(resp.Placements) {
@@ -249,7 +276,212 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 		}
 		send(streamFrame{Type: "batch", Placements: resp.Placements[i:j]})
 	}
-	send(streamFrame{Type: "done"})
+	send(streamFrame{Type: "done", BinsUsed: resp.BinsUsed, BestPacker: resp.BestPacker,
+		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
+}
+
+// isStreamable reports whether req's solve is a single sequential pass that can
+// honestly emit placements as it commits them. It excludes:
+//   - balancing objectives, which run a post-pass (RefineBalance) that relocates
+//     already-committed items;
+//   - lateral compaction (any side contact target), which slides items after
+//     placement;
+//   - algorithms with no incremental commit point: auto (BestOf), exact solvers
+//     (bc, kk), the multi-phase mffd, the self-managed harmonic/RFF variants, and
+//     2-D guillotine (its free-rect overlay is only meaningful when complete).
+func isStreamable(req PackRequest) bool {
+	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		return false
+	}
+	if _, _, any := req.Contact.lateralAxes(); any {
+		return false
+	}
+	switch req.Mode {
+	case "1d":
+		switch req.Algorithm {
+		case "", "ff", "nf", "nkf", "bf", "wf", "awf", "ffd", "bfd", "nfd", "wfd":
+			return true
+		}
+	case "2d":
+		switch req.Algorithm {
+		case "", "ff", "maxrects", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+			return true
+		}
+	case "3d":
+		switch req.Algorithm {
+		case "", "ff", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+			return true
+		}
+	}
+	return false
+}
+
+// placeConv turns committed pack.Placements into PlacementResults for the stream,
+// assigning bin indices in first-seen order — which equals bin-opening order, so
+// they match the non-streaming buildResponseND. For 1-D it accumulates per-bin
+// x-offsets exactly as buildResponse1D does.
+type placeConv struct {
+	mode     string
+	binIdx   map[string]int
+	next     int
+	offsets  map[string]float64
+	sizeByID map[string]float64
+	binW     float64
+}
+
+func (c *placeConv) idx(binID string) int {
+	if i, ok := c.binIdx[binID]; ok {
+		return i
+	}
+	i := c.next
+	c.binIdx[binID] = i
+	c.next++
+	return i
+}
+
+func (c *placeConv) conv(p pack.Placement) (PlacementResult, bool) {
+	switch c.mode {
+	case "1d":
+		pl, ok := p.(*d1.Placement1D)
+		if !ok {
+			return PlacementResult{}, false
+		}
+		bi := c.idx(pl.BinID())
+		sz := c.sizeByID[pl.ItemID()]
+		x := c.offsets[pl.BinID()]
+		c.offsets[pl.BinID()] += sz
+		return PlacementResult{BinIndex: bi, ItemID: pl.ItemID(), X: x, W: sz, H: c.binW}, true
+	case "2d":
+		pl, ok := p.(*d2.Placement2D)
+		if !ok {
+			return PlacementResult{}, false
+		}
+		return PlacementResult{BinIndex: c.idx(pl.BinID()), ItemID: pl.ItemID(),
+			X: pl.X, Y: pl.Y, W: pl.W, H: pl.H, Rotated: pl.Rotated}, true
+	case "3d":
+		pl, ok := p.(*d3.Placement3D)
+		if !ok {
+			return PlacementResult{}, false
+		}
+		return PlacementResult{BinIndex: c.idx(pl.BinID()), ItemID: pl.ItemID(),
+			X: pl.X, Y: pl.Y, Z: pl.Z, W: pl.W, H: pl.H, D: pl.D}, true
+	}
+	return PlacementResult{}, false
+}
+
+// streamSolve builds the same factory, items and packer the non-streaming path
+// would, attaches an observer that converts and emits each placement as the
+// packer commits it, then runs the solve. It returns the final summary and true.
+// Returns ok=false only if the algorithm is not a recognised sequential packer
+// (the caller then falls back to the full solve). Precondition: isStreamable(req).
+func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, bool) {
+	conv := &placeConv{
+		mode: req.Mode, binIdx: map[string]int{}, offsets: map[string]float64{},
+		sizeByID: map[string]float64{}, binW: req.Bin.Width,
+	}
+	for _, s := range req.Items {
+		conv.sizeByID[s.ID] = s.Width
+	}
+	observer := func(p pack.Placement) {
+		if pr, ok := conv.conv(p); ok {
+			emit(pr)
+		}
+	}
+
+	var factory pack.BinFactory
+	var items []pack.Item
+	switch req.Mode {
+	case "1d":
+		factory = constrainedFactory(d1.NewFactory(req.Bin.Width), req.Constraints)
+		for _, spec := range req.Items {
+			it := d1.NewItem(spec.ID, spec.Width)
+			for k, v := range spec.Scalars {
+				it.WithScalar(k, v)
+			}
+			items = append(items, it)
+		}
+	case "2d":
+		// Guillotine is excluded by isStreamable, so MaxRects is the only strategy here.
+		factory = constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewMaxRectsDefault), req.Constraints)
+		for _, spec := range req.Items {
+			it := d2.NewItem(spec.ID, spec.Width, spec.Height, spec.AllowRotate)
+			for k, v := range spec.Scalars {
+				it.WithScalar(k, v)
+			}
+			items = append(items, it)
+		}
+	case "3d":
+		// No lateral compaction here (isStreamable rules it out); the Bottom and
+		// NoFloating gates are placement-time, so streamed positions are final.
+		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
+			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
+		})
+		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
+		for _, spec := range req.Items {
+			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
+			for k, v := range spec.Scalars {
+				it.WithScalar(k, v)
+			}
+			items = append(items, it)
+		}
+	default:
+		return PackResponse{}, false
+	}
+
+	obs, run, ok := buildStreamPacker(req, factory)
+	if !ok {
+		return PackResponse{}, false
+	}
+	obs.Observe(observer)
+	result := run(items)
+	return PackResponse{
+		BinsUsed:   result.BinsUsed(),
+		Unplaced:   result.Unplaced,
+		ItemErrors: placementErrors(result.PlacementErrors),
+	}, true
+}
+
+// buildStreamPacker returns the observable packer for req's (streamable) algorithm
+// and a closure that runs it over the items, returning the final result. Online
+// algorithms loop Pack; the decreasing offline wrappers (sort-then-online) run
+// PackAll — both commit through online.Packer, so the observer fires either way.
+func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observable, func([]pack.Item) pack.Result, bool) {
+	online1 := func(op *online.Packer) (pack.Observable, func([]pack.Item) pack.Result, bool) {
+		return op, func(items []pack.Item) pack.Result {
+			for _, it := range items {
+				op.Pack(it) // failures are recorded in the result (unplaced / errors)
+			}
+			return op.Result()
+		}, true
+	}
+	wrap := func(w *offline.Wrapper) (pack.Observable, func([]pack.Item) pack.Result, bool) {
+		return w, func(items []pack.Item) pack.Result {
+			r, _ := w.PackAll(items)
+			return r
+		}, true
+	}
+	switch req.Algorithm {
+	case "nf":
+		return online1(online.NextFit(factory))
+	case "bf":
+		return online1(online.BestFit(factory))
+	case "wf":
+		return online1(online.WorstFit(factory))
+	case "nkf":
+		return online1(online.NextKFit(3, factory))
+	case "awf":
+		return online1(online.AlmostWorstFit(factory))
+	case "ffd":
+		return wrap(offline.FirstFitDecreasing(factory))
+	case "bfd":
+		return wrap(offline.BestFitDecreasing(factory))
+	case "nfd":
+		return wrap(offline.NextFitDecreasing(factory))
+	case "wfd":
+		return wrap(offline.WorstFitDecreasing(factory))
+	default: // "", "ff", 2-D "maxrects"
+		return online1(online.FirstFit(factory))
+	}
 }
 
 // ─── 1-D ─────────────────────────────────────────────────────────────────────

@@ -57,4 +57,14 @@ func (w *Wrapper) PackAll(items []pack.Item) (pack.Result, error) {
 
 func (w *Wrapper) Name() string { return w.name }
 
+// Observe forwards to the wrapped online packer so a sort-then-online offline
+// algorithm (FFD/BFD/NFD/WFD) streams each placement as it is committed. No-op
+// if the underlying packer is not observable.
+func (w *Wrapper) Observe(fn pack.PlaceObserver) {
+	if o, ok := w.online.(pack.Observable); ok {
+		o.Observe(fn)
+	}
+}
+
 var _ pack.OfflinePacker = (*Wrapper)(nil)
+var _ pack.Observable = (*Wrapper)(nil)
