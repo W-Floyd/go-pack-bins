@@ -24,13 +24,21 @@ import (
 type BalancedFit struct {
 	factory pack.BinFactory
 	prefs   []pack.Preference
+	weights []float64
 }
 
-// NewBalancedFit returns a BalancedFit using factory and the given preferences.
-// The factory should produce *pack.ConstrainedBin (wrap with NewConstrainedFactory)
-// so preferences can read bin aggregates.
+// NewBalancedFit returns a BalancedFit using factory and the given preferences,
+// each at weight 1. The factory should produce *pack.ConstrainedBin (wrap with
+// NewConstrainedFactory) so preferences can read bin aggregates.
 func NewBalancedFit(factory pack.BinFactory, prefs ...pack.Preference) *BalancedFit {
 	return &BalancedFit{factory: factory, prefs: prefs}
+}
+
+// NewBalancedFitW is NewBalancedFit with positional weights for each preference.
+// Scores are min-max normalized per preference before weighting, so weights are
+// comparable across preferences on different scales.
+func NewBalancedFitW(factory pack.BinFactory, prefs []pack.Preference, weights []float64) *BalancedFit {
+	return &BalancedFit{factory: factory, prefs: prefs, weights: weights}
 }
 
 func (b *BalancedFit) Name() string { return "BalancedFit" }
@@ -54,7 +62,7 @@ func (b *BalancedFit) PackAll(items []pack.Item) (pack.Result, error) {
 	copy(sorted, items)
 	DecreasingVolume(sorted)
 
-	packer := online.PreferenceFit(b.factory, b.prefs...)
+	packer := online.PreferenceFitNorm(b.factory, b.prefs, b.weights)
 	packer.Prefill(target)
 	var lastErr error
 	for _, it := range sorted {

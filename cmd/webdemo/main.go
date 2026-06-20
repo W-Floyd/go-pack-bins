@@ -149,8 +149,8 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	}
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
-	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -329,8 +329,8 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	}
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
-	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -472,8 +472,8 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	}
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
-	if prefs := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, items)
+	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
+		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -602,11 +602,13 @@ func extractMinSupport(specs []ConstraintSpec) (frac float64, rest []ConstraintS
 	return
 }
 
-// buildPreferences converts PreferenceSpec slice to weighted pack.Preference slice.
-// "balance" spreads a scalar evenly (ColocateLow); anything else concentrates it
-// (ColocateHigh). A missing or zero weight defaults to 1.
-func buildPreferences(specs []PreferenceSpec) []pack.Preference {
-	prefs := make([]pack.Preference, 0, len(specs))
+// buildPreferences converts PreferenceSpec slice to parallel preference and
+// weight slices. Weights are kept separate (not baked via pack.Weighted) so the
+// normalized selector can apply them after min-max normalizing each preference —
+// making weights comparable across preferences on different scales. "balance"
+// spreads a scalar evenly (ColocateLow); "concentrate" groups it (ColocateHigh);
+// an empty scalar uses item count. A missing or zero weight defaults to 1.
+func buildPreferences(specs []PreferenceSpec) (prefs []pack.Preference, weights []float64) {
 	for _, s := range specs {
 		w := s.Weight
 		if w == 0 {
@@ -638,9 +640,10 @@ func buildPreferences(specs []PreferenceSpec) []pack.Preference {
 				base = pack.ColocateHigh(s.Scalar)
 			}
 		}
-		prefs = append(prefs, pack.Weighted(base, w))
+		prefs = append(prefs, base)
+		weights = append(weights, w)
 	}
-	return prefs
+	return prefs, weights
 }
 
 // runPreferenceFit packs items with the two-phase BalancedFit: it learns the
@@ -661,19 +664,21 @@ func isBalanceable(algo string) bool {
 }
 
 // runBalanced layers balance objectives on a balanceable algorithm via the
-// two-pass BalancedFit. Best-Fit/Worst-Fit prepend a fill preference so the
-// distribution leans full/empty; Auto tries both balanceable flavors and keeps
-// the one using fewer bins. Returns the winning flavor label (for Auto).
-func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, items []pack.Item) (pack.Result, string, error) {
+// two-pass BalancedFit. Best-Fit/Worst-Fit prepend a fill preference (at weight
+// 1) so the distribution leans full/empty; Auto tries both balanceable flavors
+// and keeps the one using fewer bins, breaking ties on lower imbalance. Returns
+// the winning flavor label (for Auto).
+func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item) (pack.Result, string, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
 	run := func(fill pack.Preference) (pack.Result, error) {
-		full := prefs
+		p, w := prefs, weights
 		if fill != nil {
-			full = append([]pack.Preference{fill}, prefs...)
+			p = append([]pack.Preference{fill}, prefs...)
+			w = append([]float64{1}, weights...)
 		}
-		return offline.NewBalancedFit(factory, full...).PackAll(items)
+		return offline.NewBalancedFitW(factory, p, w).PackAll(items)
 	}
 	switch algo {
 	case "bf":
@@ -690,12 +695,94 @@ func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, 
 		rl, el := run(pack.FillLow())
 		hOK := eh == nil || errors.Is(eh, pack.ErrItemTooLarge)
 		lOK := el == nil || errors.Is(el, pack.ErrItemTooLarge)
-		if hOK && (!lOK || rh.BinsUsed() <= rl.BinsUsed()) {
+		switch {
+		case hOK && !lOK:
 			return rh, "Best-Fit + balance", eh
+		case lOK && !hOK:
+			return rl, "Worst-Fit + balance", el
+		case rh.BinsUsed() != rl.BinsUsed():
+			if rh.BinsUsed() < rl.BinsUsed() {
+				return rh, "Best-Fit + balance", eh
+			}
+			return rl, "Worst-Fit + balance", el
+		case binImbalance(rh, items) <= binImbalance(rl, items):
+			return rh, "Best-Fit + balance", eh
+		default:
+			return rl, "Worst-Fit + balance", el
 		}
-		return rl, "Worst-Fit + balance", el
 	}
 	return pack.Result{}, "", nil
+}
+
+// binImbalance scores how unevenly a result spreads its metrics across bins,
+// summing the coefficient of variation (σ/mean) of item count and each scalar.
+// Lower is more balanced; used to break Auto ties between fit flavors.
+func binImbalance(r pack.Result, items []pack.Item) float64 {
+	scalars := make(map[string]map[string]float64, len(items))
+	for _, it := range items {
+		scalars[it.ID()] = pack.ScalarsOf(it)
+	}
+	// Per-bin count and per-bin scalar totals.
+	keys := map[string]bool{}
+	counts := map[string]float64{}
+	totals := map[string]map[string]float64{} // binID -> scalar -> sum
+	for _, p := range r.Placements {
+		if p == nil {
+			continue
+		}
+		b := p.BinID()
+		counts[b]++
+		if totals[b] == nil {
+			totals[b] = map[string]float64{}
+		}
+		for k, v := range scalars[p.ItemID()] {
+			totals[b][k] += v
+			keys[k] = true
+		}
+	}
+	n := r.BinsUsed()
+	if n == 0 {
+		return 0
+	}
+	cv := func(vals []float64) float64 {
+		mean := 0.0
+		for _, v := range vals {
+			mean += v
+		}
+		mean /= float64(n)
+		if mean == 0 {
+			return 0
+		}
+		varc := 0.0
+		for _, v := range vals {
+			varc += (v - mean) * (v - mean)
+		}
+		return (varc/float64(n)) / (mean * mean) // σ²/mean² — scale-free
+	}
+	// item count
+	countVals := make([]float64, 0, n)
+	for _, b := range r.Bins {
+		countVals = append(countVals, counts[binID(b)])
+	}
+	total := cv(countVals)
+	// each scalar
+	for k := range keys {
+		vals := make([]float64, 0, n)
+		for _, b := range r.Bins {
+			id := binID(b)
+			vals = append(vals, totals[id][k])
+		}
+		total += cv(vals)
+	}
+	return total
+}
+
+// binID extracts a bin's ID via its optional ID() method.
+func binID(b pack.Bin) string {
+	if idr, ok := b.(interface{ ID() string }); ok {
+		return idr.ID()
+	}
+	return ""
 }
 
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.
