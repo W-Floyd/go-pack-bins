@@ -71,6 +71,7 @@ func (c *ConstrainedBin) Aggregates() map[string]float64 {
 		out[k] = v
 	}
 	out[MetricItemCount] = float64(c.count)
+	out[MetricUtilization] = c.Bin.Utilization()
 	if m, ok := c.Bin.(BinMetricer); ok {
 		for k, v := range m.Metrics() {
 			out[k] = v

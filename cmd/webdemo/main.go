@@ -87,6 +87,7 @@ type PackResponse struct {
 	Unplaced   []string           `json:"unplaced"`
 	FreeRects  [][]FreeRect       `json:"free_rects,omitempty"` // per-bin, guillotine only
 	ItemErrors map[string]string  `json:"item_errors,omitempty"`
+	BestPacker string             `json:"best_packer,omitempty"` // winning algorithm name (auto mode)
 	Error      string             `json:"error,omitempty"`
 }
 
@@ -162,6 +163,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 
 	var result pack.Result
 	var err error
+	var bestPacker string
 
 	switch req.Algorithm {
 	case "nf":
@@ -250,6 +252,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 			}),
 		)
 		result, err = p.PackAll(items)
+		bestPacker = p.Winner()
 	default:
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -269,7 +272,9 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	for _, spec := range req.Items {
 		sizeByID[spec.ID] = spec.Width
 	}
-	return buildResponse1D(result, req.Bin.Width, sizeByID), nil
+	resp := buildResponse1D(result, req.Bin.Width, sizeByID)
+	resp.BestPacker = bestPacker
+	return resp, nil
 }
 
 func buildResponse1D(result pack.Result, binWidth float64, sizeByID map[string]float64) PackResponse {
@@ -332,6 +337,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 
 	var result pack.Result
 	var err error
+	var bestPacker string
 
 	switch req.Algorithm {
 	case "ffd":
@@ -378,6 +384,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 			offline.BestFitDecreasing(gFactory),
 		)
 		result, err = p.PackAll(items)
+		bestPacker = p.Winner()
 	default: // ff, maxrects, guillotine
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -392,7 +399,9 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
-	return buildResponse2D(result, req.Algorithm == "guillotine"), nil
+	resp := buildResponse2D(result, req.Algorithm == "guillotine")
+	resp.BestPacker = bestPacker
+	return resp, nil
 }
 
 func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackResponse {
@@ -469,6 +478,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 
 	var result pack.Result
 	var err error
+	var bestPacker string
 
 	switch req.Algorithm {
 	case "ffd":
@@ -511,6 +521,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 			offline.NextFitDecreasing(factory),
 		)
 		result, err = p.PackAll(items)
+		bestPacker = p.Winner()
 	default: // ff
 		p := online.FirstFit(factory)
 		for _, it := range items {
@@ -525,7 +536,9 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
-	return buildResponse3D(result), nil
+	resp := buildResponse3D(result)
+	resp.BestPacker = bestPacker
+	return resp, nil
 }
 
 func buildResponse3D(result pack.Result) PackResponse {
@@ -595,6 +608,10 @@ func buildPreferences(specs []PreferenceSpec) []pack.Preference {
 		}
 		var base pack.Preference
 		switch s.Mode {
+		case "fillhigh":
+			base = pack.FillHigh() // best-fit as a preference, no scalar
+		case "filllow":
+			base = pack.FillLow() // worst-fit as a preference, no scalar
 		case "minheight":
 			base = pack.MinimizeHeight() // geometric, no scalar needed
 		case "mincg":
@@ -620,19 +637,20 @@ func buildPreferences(specs []PreferenceSpec) []pack.Preference {
 	return prefs
 }
 
-// runPreferenceFit packs items with PreferenceFit. The factory is wrapped in a
-// ConstrainedFactory if it isn't already, so bins expose Aggregates() for scoring.
+// runPreferenceFit packs items with the two-phase BalancedFit: it learns the
+// minimum bin count, then distributes items across that many bins using the
+// preferences. This balances within the fewest bins instead of spilling into an
+// extra one the way single-pass online preference selection can. The factory is
+// wrapped in a ConstrainedFactory if needed so bins expose Aggregates().
 func runPreferenceFit(factory pack.BinFactory, prefs []pack.Preference, items []pack.Item) (pack.Result, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
-	p := online.PreferenceFit(factory, prefs...)
-	for _, it := range items {
-		if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return pack.Result{}, e
-		}
+	r, err := offline.NewBalancedFit(factory, prefs...).PackAll(items)
+	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
+		return pack.Result{}, err
 	}
-	return p.Result(), nil
+	return r, nil
 }
 
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.

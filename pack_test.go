@@ -851,6 +851,78 @@ func TestBalanceCount_1D(t *testing.T) {
 	}
 }
 
+// ─── FillHigh / FillLow (fit-family as preferences) ───────────────────────────
+
+func TestUtilization_Metric(t *testing.T) {
+	cb := pack.NewConstrainedBin(d1.NewFactory(10).Open(), nil)
+	if got := cb.Aggregates()[pack.MetricUtilization]; got != 0 {
+		t.Errorf("empty bin utilization = %v, want 0", got)
+	}
+	if _, err := cb.TryPlace(d1.NewItem("x", 4)); err != nil {
+		t.Fatal(err)
+	}
+	if got := cb.Aggregates()[pack.MetricUtilization]; got != 0.4 { // 4 / 10
+		t.Errorf("utilization after size-4 item = %v, want 0.4", got)
+	}
+}
+
+func TestFillHigh_BehavesLikeBestFit_1D(t *testing.T) {
+	// a(6) opens bin0, b(6) opens bin1. c(3) fits both; FillHigh prefers the
+	// fuller bin. Both are equally full here, so make bin0 fuller first with a
+	// filler, then check c lands in the fuller bin.
+	factory := pack.NewConstrainedFactory(d1.NewFactory(10))
+	packer := online.PreferenceFit(factory, pack.FillHigh())
+	items := []pack.Item{
+		d1.NewItem("a", 6), d1.NewItem("b", 5), // a->bin0(6), b->bin1(5)
+		d1.NewItem("c", 3), // bin0 rem4 (util .6), bin1 rem5 (util .5) → FillHigh picks bin0
+	}
+	for i, it := range items {
+		if _, err := packer.Pack(it); err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+	}
+	binOf := map[string]string{}
+	for _, p := range packer.Result().Placements {
+		if p != nil {
+			binOf[p.ItemID()] = p.BinID()
+		}
+	}
+	if binOf["c"] != binOf["a"] {
+		t.Errorf("FillHigh: c=%s, want the fuller bin with a=%s", binOf["c"], binOf["a"])
+	}
+}
+
+// ─── BalancedFit (2-phase: min bins, then balance within) ─────────────────────
+
+func TestBalancedFit_BalancesWithoutExtraBin_1D(t *testing.T) {
+	// FFD packs these into 2 bins (caps 10). Online balance-count would fill bin0
+	// before bin1 opens and could spill; BalancedFit pre-opens 2 bins and levels
+	// the item counts within them — no third bin, and an even split.
+	factory := pack.NewConstrainedFactory(d1.NewFactory(10))
+	items := []pack.Item{
+		d1.NewItem("a", 6), d1.NewItem("b", 6),
+		d1.NewItem("c", 2), d1.NewItem("d", 2), d1.NewItem("e", 2), d1.NewItem("f", 2),
+	}
+	r, err := offline.NewBalancedFit(factory, pack.BalanceCount()).PackAll(items)
+	if err != nil {
+		t.Fatalf("PackAll: %v", err)
+	}
+	if r.BinsUsed() != 2 {
+		t.Errorf("BinsUsed = %d, want 2 (no spill)", r.BinsUsed())
+	}
+	countByBin := map[string]int{}
+	for _, p := range r.Placements {
+		if p != nil {
+			countByBin[p.BinID()]++
+		}
+	}
+	for bin, n := range countByBin {
+		if n != 3 {
+			t.Errorf("bin %s holds %d items, want 3 (balanced)", bin, n)
+		}
+	}
+}
+
 // ─── MinimizeCG preference (3D) ───────────────────────────────────────────────
 
 func TestCGHeight_Metric(t *testing.T) {

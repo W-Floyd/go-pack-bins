@@ -29,6 +29,7 @@ var _ pack.OfflinePacker = (*Func)(nil)
 // Candidates that return a non-ErrItemTooLarge error are skipped.
 type BestOfPacker struct {
 	candidates []pack.OfflinePacker
+	winner     string
 }
 
 // BestOf returns a packer that tries every candidate and keeps the best result.
@@ -36,11 +37,16 @@ func BestOf(candidates ...pack.OfflinePacker) *BestOfPacker {
 	return &BestOfPacker{candidates: candidates}
 }
 
+// Winner returns the Name of the candidate that produced the best result on the
+// most recent PackAll, or "" if none succeeded.
+func (p *BestOfPacker) Winner() string { return p.winner }
+
 func (p *BestOfPacker) Name() string { return "auto" }
 
 func (p *BestOfPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	var best pack.Result
 	found := false
+	p.winner = ""
 	for _, c := range p.candidates {
 		r, err := c.PackAll(items)
 		if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
@@ -49,6 +55,7 @@ func (p *BestOfPacker) PackAll(items []pack.Item) (pack.Result, error) {
 		if !found || isBetter(r, best) {
 			best = r
 			found = true
+			p.winner = c.Name()
 		}
 	}
 	if !found {

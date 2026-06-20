@@ -473,6 +473,8 @@
             <select id="pref-mode" onchange="onPrefModeChange('outer')">
               <option value="balance">balance</option>
               <option value="concentrate">concentrate</option>
+              <option value="fillhigh">pack tight (best-fit)</option>
+              <option value="filllow">pack loose (worst-fit)</option>
               <option value="minheight" id="pref-minheight" style="display:none">min height</option>
               <option value="mincg" id="pref-mincg" style="display:none">min CG</option>
             </select>
@@ -502,6 +504,8 @@
             <select id="ipref-mode" onchange="onPrefModeChange('inner')">
               <option value="balance">balance</option>
               <option value="concentrate">concentrate</option>
+              <option value="fillhigh">pack tight (best-fit)</option>
+              <option value="filllow">pack loose (worst-fit)</option>
               <option value="minheight" id="ipref-minheight" style="display:none">min height</option>
               <option value="mincg" id="ipref-mincg" style="display:none">min CG</option>
             </select>
@@ -529,6 +533,7 @@
       <div class="stat">Bins: <strong id="stat-bins">—</strong></div>
       <div class="stat">Placed: <strong id="stat-placed">—</strong></div>
       <div class="stat">Unplaced: <strong id="stat-unplaced">—</strong></div>
+      <div class="stat" id="stat-best-wrap" style="display:none">Best: <strong id="stat-best">—</strong></div>
       <div style="flex:1"></div>
       <div class="bin-tabs" id="bin-tabs"></div>
     </div>
@@ -815,12 +820,15 @@ function prefCtx(lvl) {
     : { pre: 'pref', arr: preferences };
 }
 
+// Modes that ignore the scalar field (geometric / intrinsic metrics).
+const NO_SCALAR_MODES = ['fillhigh', 'filllow', 'minheight'];
+
 function onPrefModeChange(lvl) {
-  // min-height is purely geometric — no scalar. min-CG needs the mass scalar.
+  // fill/min-height are intrinsic — no scalar. min-CG needs the mass scalar.
   // balance/concentrate take an optional scalar; blank means "by item count".
   const { pre } = prefCtx(lvl);
   const mode = document.getElementById(pre + '-mode').value;
-  document.getElementById(pre + '-scalar-field').style.display = mode === 'minheight' ? 'none' : '';
+  document.getElementById(pre + '-scalar-field').style.display = NO_SCALAR_MODES.includes(mode) ? 'none' : '';
   document.getElementById(pre + '-scalar').placeholder =
     mode === 'mincg' ? 'weight (mass)' : 'weight (blank = item count)';
 }
@@ -828,7 +836,7 @@ function onPrefModeChange(lvl) {
 function addPreference(lvl) {
   const { pre, arr } = prefCtx(lvl);
   const mode = document.getElementById(pre + '-mode').value;
-  const scalar = mode === 'minheight' ? '' : document.getElementById(pre + '-scalar').value.trim();
+  const scalar = NO_SCALAR_MODES.includes(mode) ? '' : document.getElementById(pre + '-scalar').value.trim();
   if (mode === 'mincg' && !scalar) return; // min-CG requires a mass scalar
   let weight = parseFloat(document.getElementById(pre + '-weight').value);
   if (isNaN(weight) || weight === 0) weight = 1;
@@ -869,6 +877,8 @@ function renderPreferenceList(lvl) {
     const row = document.createElement('div');
     row.className = 'item-row';
     const label = p.mode === 'minheight' ? 'minimize stack height'
+                : p.mode === 'fillhigh' ? 'pack tight (best-fit)'
+                : p.mode === 'filllow' ? 'pack loose (worst-fit)'
                 : p.mode === 'mincg' ? `minimize CG (${p.scalar})`
                 : p.mode === 'balance' ? (p.scalar ? `balance ${p.scalar}` : 'balance item count')
                 : (p.scalar ? `concentrate ${p.scalar}` : 'concentrate item count');
@@ -1090,6 +1100,11 @@ const PRESETS = {
       bin: {w:200, h:200}, algo: 'ffd',
       items: bigMix('2d', 60, 22),
     },
+    {
+      label: 'Stress test (1200 boxes)',
+      bin: {w:300, h:300}, algo: 'ffd',
+      items: bigMix('2d', 1200, 44),
+    },
   ],
   '3d': [
     {
@@ -1169,6 +1184,11 @@ const PRESETS = {
       label: 'Large mixed (60 boxes)',
       bin: {w:12, d:12, h:12}, algo: 'ffd',
       items: bigMix('3d', 60, 33),
+    },
+    {
+      label: 'Stress test (1200 boxes)',
+      bin: {w:20, d:20, h:20}, algo: 'ffd',
+      items: bigMix('3d', 1200, 55),
     },
   ],
 };
@@ -1428,6 +1448,15 @@ function renderResult({ data, mode, bin }) {
   document.getElementById('stat-placed').textContent = (data.placements || []).length;
   document.getElementById('stat-unplaced').textContent = (data.unplaced || []).length;
 
+  // "Best:" stat — only shown for Auto, where the winning packer is reported.
+  const bestWrap = document.getElementById('stat-best-wrap');
+  if (data.best_packer) {
+    document.getElementById('stat-best').textContent = data.best_packer;
+    bestWrap.style.display = '';
+  } else {
+    bestWrap.style.display = 'none';
+  }
+
   // no tabs needed — 3D shows all bins side by side, like 2D/1D
   document.getElementById('bin-tabs').innerHTML = '';
 
@@ -1464,6 +1493,7 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
     `${l0.bins_used} carton${l0.bins_used !== 1 ? 's' : ''} / ${l1.bins_used} pallet${l1.bins_used !== 1 ? 's' : ''}`;
   document.getElementById('stat-placed').textContent = (l0.placements || []).length;
   document.getElementById('stat-unplaced').textContent = (l0.unplaced || []).length;
+  document.getElementById('stat-best-wrap').style.display = 'none';
 
   document.getElementById('bin-tabs').innerHTML = '';
 
@@ -2014,6 +2044,9 @@ function draw3D(data, bin) {
   const labelEls = [];
   const occludeMeshes = []; // solid item meshes used for occlusion testing
   const raycaster = new THREE.Raycaster();
+  // Per-item labels do a per-frame occlusion raycast each — far too expensive at
+  // scale. Above this count we draw the boxes only and skip item labels.
+  const showItemLabels = (data.placements || []).length <= 150;
 
   for (let b = 0; b < nBins; b++) {
     const offX = b * stride;
@@ -2042,20 +2075,22 @@ function draw3D(data, bin) {
       line.position.copy(mesh.position);
       scene3d.add(line);
 
-      const lbl = document.createElement('div');
-      lbl.className = 'item-label-3d';
-      lbl.textContent = p.item_id;
-      labelsEl.appendChild(lbl);
-      // Six face centres + normals + world areas so updateLabels can pick the best visible face
-      const hw = p.w/2, hh = p.h/2, hd = p.d/2;
-      labelEls.push({ el: lbl, self: mesh, center: { wx: offX+tx, wy: ty, wz: tz }, faces: [
-        { wx: offX+tx+hw, wy: ty,    wz: tz,    nx:1,  ny:0,  nz:0,  area: p.h*p.d },
-        { wx: offX+tx-hw, wy: ty,    wz: tz,    nx:-1, ny:0,  nz:0,  area: p.h*p.d },
-        { wx: offX+tx,    wy: ty+hh, wz: tz,    nx:0,  ny:1,  nz:0,  area: p.w*p.d },
-        { wx: offX+tx,    wy: ty-hh, wz: tz,    nx:0,  ny:-1, nz:0,  area: p.w*p.d },
-        { wx: offX+tx,    wy: ty,    wz: tz+hd, nx:0,  ny:0,  nz:1,  area: p.w*p.h },
-        { wx: offX+tx,    wy: ty,    wz: tz-hd, nx:0,  ny:0,  nz:-1, area: p.w*p.h },
-      ]});
+      if (showItemLabels) {
+        const lbl = document.createElement('div');
+        lbl.className = 'item-label-3d';
+        lbl.textContent = p.item_id;
+        labelsEl.appendChild(lbl);
+        // Six face centres + normals + world areas so updateLabels can pick the best visible face
+        const hw = p.w/2, hh = p.h/2, hd = p.d/2;
+        labelEls.push({ el: lbl, self: mesh, center: { wx: offX+tx, wy: ty, wz: tz }, faces: [
+          { wx: offX+tx+hw, wy: ty,    wz: tz,    nx:1,  ny:0,  nz:0,  area: p.h*p.d },
+          { wx: offX+tx-hw, wy: ty,    wz: tz,    nx:-1, ny:0,  nz:0,  area: p.h*p.d },
+          { wx: offX+tx,    wy: ty+hh, wz: tz,    nx:0,  ny:1,  nz:0,  area: p.w*p.d },
+          { wx: offX+tx,    wy: ty-hh, wz: tz,    nx:0,  ny:-1, nz:0,  area: p.w*p.d },
+          { wx: offX+tx,    wy: ty,    wz: tz+hd, nx:0,  ny:0,  nz:1,  area: p.w*p.h },
+          { wx: offX+tx,    wy: ty,    wz: tz-hd, nx:0,  ny:0,  nz:-1, area: p.w*p.h },
+        ]});
+      }
     }
 
     if (nBins > 1) {
