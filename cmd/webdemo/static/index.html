@@ -111,6 +111,11 @@
   .row .field { flex: 1; }
   /* ── item list ── */
   .item-list { display: flex; flex-direction: column; gap: 6px; }
+  /* The items list scrolls on its own so a large item count doesn't blow out
+     the sidebar (constraint/preference lists stay short and aren't capped). */
+  #item-list { max-height: 260px; overflow-y: auto; padding-right: 2px; }
+  #item-list::-webkit-scrollbar { width: 6px; }
+  #item-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   .item-row {
     display: flex;
     align-items: center;
