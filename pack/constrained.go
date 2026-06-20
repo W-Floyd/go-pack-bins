@@ -60,11 +60,18 @@ func (c *ConstrainedBin) TryPlace(item Item) (Placement, error) {
 // Aggregate returns the accumulated total of the named scalar across all placed items.
 func (c *ConstrainedBin) Aggregate(name string) float64 { return c.agg[name] }
 
-// Aggregates returns a snapshot of all accumulated scalar totals.
+// Aggregates returns a snapshot of all accumulated scalar totals, merged with
+// any geometric metrics reported by the wrapped bin (see BinMetricer). This lets
+// preferences score on both scalar accumulations and metrics like stack height.
 func (c *ConstrainedBin) Aggregates() map[string]float64 {
 	out := make(map[string]float64, len(c.agg))
 	for k, v := range c.agg {
 		out[k] = v
+	}
+	if m, ok := c.Bin.(BinMetricer); ok {
+		for k, v := range m.Metrics() {
+			out[k] = v
+		}
 	}
 	return out
 }
