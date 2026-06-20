@@ -533,6 +533,9 @@
             <input type="number" id="contact-y" value="0" min="0" max="100" step="any" oninput="scheduleAutoPack()">
           </div>
         </div>
+        <label class="checkbox-row" id="contact-nofloat-row" style="margin-top:8px">
+          <input type="checkbox" id="contact-nofloat" onchange="scheduleAutoPack()"> No floating items (must rest on floor/box)
+        </label>
       </div>
 
       <!-- balance objectives — one panel per Preference-Fit level -->
@@ -732,6 +735,7 @@ function onModeChange() {
   const threeD = mode === '3d';
   document.getElementById('contact-section').style.display = (mode === '1d') ? 'none' : '';
   document.getElementById('contact-bottom-field').style.display = threeD ? '' : 'none';
+  document.getElementById('contact-nofloat-row').style.display = threeD ? '' : 'none';
   setContact({});
   // min-height / min-CG preferences rely on 3D bin metrics — gate both panels
   ['pref', 'ipref'].forEach(pre => {
@@ -855,7 +859,10 @@ function readContact() {
   if (mode === '1d') return {};
   const pct = id => Math.max(0, Math.min(100, parseFloat(document.getElementById(id).value) || 0)) / 100;
   const c = { side_x: pct('contact-x'), side_y: pct('contact-y') };
-  if (mode === '3d') c.bottom = pct('contact-bottom');
+  if (mode === '3d') {
+    c.bottom = pct('contact-bottom');
+    c.no_floating = document.getElementById('contact-nofloat').checked;
+  }
   return c;
 }
 
@@ -865,6 +872,7 @@ function setContact(spec) {
   document.getElementById('contact-bottom').value = spec.bottom || 0;
   document.getElementById('contact-x').value = spec.side_x || 0;
   document.getElementById('contact-y').value = spec.side_y || 0;
+  document.getElementById('contact-nofloat').checked = !!spec.no_floating;
 }
 
 function addItem() {

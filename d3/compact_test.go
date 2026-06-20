@@ -45,6 +45,56 @@ func TestContactStrategy_PrefersWallHugging(t *testing.T) {
 	}
 }
 
+func TestNoFloating_EveryItemSupported(t *testing.T) {
+	// Pack a mix of boxes with NoFloating and assert each is on the floor or
+	// resting (with positive overlap) on the top of another box — never airborne.
+	strat := d3.NewExtremePointStrategyContact(d3.ContactSpec{NoFloating: true})
+	bin := d3.NewBin("b", 10, 10, 10, strat(10, 10, 10))
+	dims := [][3]float64{{4, 4, 3}, {6, 3, 2}, {3, 3, 5}, {5, 5, 2}, {2, 6, 4}, {4, 4, 4}}
+	var placed []*d3.Placement3D
+	for i, dm := range dims {
+		p, err := bin.TryPlace(d3.NewItem("i"+string(rune('0'+i)), dm[0], dm[1], dm[2], false))
+		if err != nil {
+			continue // ran out of room; fine
+		}
+		placed = append(placed, p.(*d3.Placement3D))
+	}
+	for _, p := range placed {
+		if p.Z == 0 {
+			continue // on the floor
+		}
+		supported := false
+		for _, q := range placed {
+			if q == p {
+				continue
+			}
+			top := q.Z + q.H
+			ox := minf(p.X+p.W, q.X+q.W) - maxf(p.X, q.X)
+			oy := minf(p.Y+p.D, q.Y+q.D) - maxf(p.Y, q.Y)
+			if top == p.Z && ox > 0 && oy > 0 {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			t.Errorf("item at z=%v is floating (no box beneath)", p.Z)
+		}
+	}
+}
+
+func minf(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+func maxf(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func TestContactStrategy_SupportGate(t *testing.T) {
 	// Bottom support gate still rejects oversize / unsupported as before.
 	strat := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: 0.9})(10, 10, 10)

@@ -71,9 +71,10 @@ type PackRequest struct {
 // hard support gate (3-D); SideX/SideY are lateral anti-slosh targets that drive
 // contact-maximizing placement and lateral compaction.
 type ContactSpec struct {
-	Bottom float64 `json:"bottom,omitempty"`
-	SideX  float64 `json:"side_x,omitempty"`
-	SideY  float64 `json:"side_y,omitempty"`
+	Bottom     float64 `json:"bottom,omitempty"`
+	SideX      float64 `json:"side_x,omitempty"`
+	SideY      float64 `json:"side_y,omitempty"`
+	NoFloating bool    `json:"no_floating,omitempty"` // every item must rest on floor/box (3-D)
 }
 
 // lateralAxes reports which lateral axes have an anti-slosh target (and whether any do).
@@ -480,6 +481,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	// Bottom → hard support gate; SideX/SideY → contact-maximizing placement.
 	stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
+		NoFloating: req.Contact.NoFloating,
 	})
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
@@ -929,6 +931,9 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 	l0Contact := l0spec.Contact
 	if b := req.Levels[1].Contact.Bottom; b > l0Contact.Bottom {
 		l0Contact.Bottom = b
+	}
+	if req.Levels[1].Contact.NoFloating {
+		l0Contact.NoFloating = true
 	}
 	l0req := PackRequest{
 		Mode:        req.Mode,
