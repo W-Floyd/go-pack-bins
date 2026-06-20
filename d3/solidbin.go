@@ -186,14 +186,14 @@ var _ pack.Bin = (*SolidBin3D)(nil)
 // rotatedBBox returns the AABB of the solid's bbox corners after rotation.
 func rotatedBBox(bbox geometry.BBox3, rot geometry.Mat3x3) geometry.BBox3 {
 	corners := [8]geometry.Vec3{
-		{bbox.Min.X, bbox.Min.Y, bbox.Min.Z},
-		{bbox.Max.X, bbox.Min.Y, bbox.Min.Z},
-		{bbox.Min.X, bbox.Max.Y, bbox.Min.Z},
-		{bbox.Max.X, bbox.Max.Y, bbox.Min.Z},
-		{bbox.Min.X, bbox.Min.Y, bbox.Max.Z},
-		{bbox.Max.X, bbox.Min.Y, bbox.Max.Z},
-		{bbox.Min.X, bbox.Max.Y, bbox.Max.Z},
-		{bbox.Max.X, bbox.Max.Y, bbox.Max.Z},
+		{X: bbox.Min.X, Y: bbox.Min.Y, Z: bbox.Min.Z},
+		{X: bbox.Max.X, Y: bbox.Min.Y, Z: bbox.Min.Z},
+		{X: bbox.Min.X, Y: bbox.Max.Y, Z: bbox.Min.Z},
+		{X: bbox.Max.X, Y: bbox.Max.Y, Z: bbox.Min.Z},
+		{X: bbox.Min.X, Y: bbox.Min.Y, Z: bbox.Max.Z},
+		{X: bbox.Max.X, Y: bbox.Min.Y, Z: bbox.Max.Z},
+		{X: bbox.Min.X, Y: bbox.Max.Y, Z: bbox.Max.Z},
+		{X: bbox.Max.X, Y: bbox.Max.Y, Z: bbox.Max.Z},
 	}
 	r0 := rot.MulVec(corners[0])
 	min, max := r0, r0
