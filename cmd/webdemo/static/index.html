@@ -1114,7 +1114,18 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
     `${l0.bins_used} carton${l0.bins_used !== 1 ? 's' : ''} / ${l1.bins_used} pallet${l1.bins_used !== 1 ? 's' : ''}`;
   document.getElementById('stat-placed').textContent = (l0.placements || []).length;
   document.getElementById('stat-unplaced').textContent = (l0.unplaced || []).length;
-  document.getElementById('bin-tabs').innerHTML = '';
+
+  const tabsEl = document.getElementById('bin-tabs');
+  tabsEl.innerHTML = '';
+  if (mode === '3d') {
+    for (let i = 0; i < l1.bins_used; i++) {
+      const t = document.createElement('button');
+      t.className = 'bin-tab' + (i === activeBin ? ' active' : '');
+      t.textContent = 'Pallet ' + (i + 1);
+      t.onclick = () => { activeBin = i; renderNestedResult(lastResult); };
+      tabsEl.appendChild(t);
+    }
+  }
 
   const legEl = document.getElementById('legend');
   legEl.innerHTML = '';
@@ -1132,11 +1143,16 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
   }
 
   document.getElementById('empty-state').style.display = 'none';
-  const c3d = document.getElementById('canvas-3d');
-  c3d.style.display = 'none';
-  if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
 
-  drawNested(data, mode, innerBin, outerBin);
+  if (mode === '3d') {
+    document.getElementById('canvas-2d').style.display = 'none';
+    drawNested3D(data, innerBin, outerBin);
+  } else {
+    const c3d = document.getElementById('canvas-3d');
+    c3d.style.display = 'none';
+    if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
+    drawNested(data, mode, innerBin, outerBin);
+  }
 }
 
 function drawNested(data, mode, innerBin, outerBin) {
@@ -1258,6 +1274,120 @@ function drawNestedPanel(ctx, levelResult, binSpec, mode, startX, panelW, canvas
       }
     }
   }
+}
+
+// ── nested 3-D renderer ───────────────────────────────────────────────────────
+function drawNested3D(data, innerBin, outerBin) {
+  const c2d = document.getElementById('canvas-2d');
+  c2d.style.display = 'none';
+  const canvas = document.getElementById('canvas-3d');
+  canvas.style.display = 'block';
+
+  const parent = canvas.parentElement;
+  const W = parent.clientWidth, H = parent.clientHeight;
+
+  if (renderer3d) { renderer3d.dispose(); renderer3d = null; }
+
+  renderer3d = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer3d.setSize(W, H);
+  renderer3d.setClearColor(0x0f1117);
+  renderer3d.setPixelRatio(window.devicePixelRatio);
+
+  scene3d = new THREE.Scene();
+  camera3d = new THREE.PerspectiveCamera(45, W/H, 0.01, 1000);
+
+  // alg x → three X,  alg z (height) → three Y (up),  alg y (depth) → three Z
+  const toThree = (ax, ay, az) => [ax, az, ay];
+
+  const l0 = data.levels[0]; // items → cartons
+  const l1 = data.levels[1]; // cartons → pallets
+  const bin = outerBin;
+  const maxDim = Math.max(bin.width, bin.depth, bin.height);
+  const cx = bin.width/2, cy = bin.height/2, cz = bin.depth/2;
+
+  orbitState.dist  = maxDim * 2.2;
+  orbitState.phi   = 1.0;
+  orbitState.theta = 0.6;
+
+  function updateCamera() {
+    const { phi, theta, dist } = orbitState;
+    camera3d.position.set(
+      cx + dist * Math.sin(phi) * Math.cos(theta),
+      cy + dist * Math.cos(phi),
+      cz + dist * Math.sin(phi) * Math.sin(theta),
+    );
+    camera3d.lookAt(cx, cy, cz);
+  }
+  updateCamera();
+
+  // Pallet wireframe
+  const palletGeo = new THREE.BoxGeometry(bin.width, bin.height, bin.depth);
+  const palletEdges = new THREE.EdgesGeometry(palletGeo);
+  const palletLine = new THREE.LineSegments(palletEdges, new THREE.LineBasicMaterial({ color: 0x2a2d3a }));
+  palletLine.position.set(cx, cy, cz);
+  scene3d.add(palletLine);
+
+  scene3d.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+  dir.position.set(1, 3, 2);
+  scene3d.add(dir);
+
+  // Cartons placed in the active pallet
+  const cartonPlacements = (l1.placements || []).filter(p => p.bin_index === activeBin);
+  for (const cp of cartonPlacements) {
+    const m = cp.item_id.match(/carton_(\d+)/);
+    const cartonIdx = m ? parseInt(m[1]) : 0;
+    const cHex = parseInt(cartonColor(cartonIdx).replace('#', ''), 16);
+
+    // Items inside this carton — rendered first so they appear inside the shell
+    const itemPlacements = (l0.placements || []).filter(p => p.bin_index === cartonIdx);
+    for (const ip of itemPlacements) {
+      const itemIdx = items.findIndex(it => it.id === ip.item_id);
+      const iHex = parseInt(itemColor(itemIdx < 0 ? 0 : itemIdx).replace('#', ''), 16);
+      const igeo = new THREE.BoxGeometry(ip.w - 0.08, ip.h - 0.08, ip.d - 0.08);
+      const imat = new THREE.MeshLambertMaterial({ color: iHex, transparent: true, opacity: 0.92 });
+      const imesh = new THREE.Mesh(igeo, imat);
+      const [itx, ity, itz] = toThree(cp.x + ip.x + ip.w/2, cp.y + ip.y + ip.d/2, cp.z + ip.z + ip.h/2);
+      imesh.position.set(itx, ity, itz);
+      scene3d.add(imesh);
+      const iedges = new THREE.EdgesGeometry(igeo);
+      const iline = new THREE.LineSegments(iedges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 }));
+      iline.position.copy(imesh.position);
+      scene3d.add(iline);
+    }
+
+    // Carton shell — semi-transparent so items are visible through it
+    const cgeo = new THREE.BoxGeometry(cp.w - 0.06, cp.h - 0.06, cp.d - 0.06);
+    const cmat = new THREE.MeshLambertMaterial({ color: cHex, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.FrontSide });
+    const cmesh = new THREE.Mesh(cgeo, cmat);
+    const [tx, ty, tz] = toThree(cp.x + cp.w/2, cp.y + cp.d/2, cp.z + cp.h/2);
+    cmesh.position.set(tx, ty, tz);
+    scene3d.add(cmesh);
+    const cedges = new THREE.EdgesGeometry(cgeo);
+    const cline = new THREE.LineSegments(cedges, new THREE.LineBasicMaterial({ color: cHex, transparent: true, opacity: 0.9 }));
+    cline.position.copy(cmesh.position);
+    scene3d.add(cline);
+  }
+
+  function render() { renderer3d && renderer3d.render(scene3d, camera3d); }
+  render();
+
+  canvas.onmousedown = e => { orbitState.active = true; orbitState.lastX = e.clientX; orbitState.lastY = e.clientY; };
+  canvas.onmousemove = e => {
+    if (!orbitState.active) return;
+    const dx = e.clientX - orbitState.lastX;
+    const dy = e.clientY - orbitState.lastY;
+    orbitState.lastX = e.clientX; orbitState.lastY = e.clientY;
+    orbitState.theta -= dx * 0.01;
+    orbitState.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbitState.phi - dy * 0.01));
+    updateCamera(); render();
+  };
+  canvas.onmouseup = canvas.onmouseleave = () => { orbitState.active = false; };
+  canvas.onwheel = e => {
+    e.preventDefault();
+    orbitState.dist = Math.max(maxDim * 0.5, orbitState.dist + e.deltaY * 0.05);
+    updateCamera(); render();
+  };
 }
 
 // ── 2-D / 1-D canvas renderer ────────────────────────────────────────────────
@@ -1516,7 +1646,9 @@ function hexToRgba(hex, alpha) {
 }
 
 window.addEventListener('resize', () => {
-  if (lastResult) renderResult(lastResult);
+  if (!lastResult) return;
+  if (lastResult.nested) renderNestedResult(lastResult);
+  else renderResult(lastResult);
 });
 
 // ── boot ──────────────────────────────────────────────────────────────────────
