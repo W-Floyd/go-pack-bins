@@ -80,3 +80,81 @@ func (s pfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int
 func PreferenceFit(factory pack.BinFactory, prefs ...pack.Preference) *Packer {
 	return NewPacker("PF", pfSelector{prefs: prefs}, factory)
 }
+
+// pfNormSelector scores like pfSelector but min-max normalizes each preference's
+// raw value across the candidate bins to [0,1] before applying its weight and
+// summing. This makes weights comparable across preferences whose raw scales
+// differ wildly (e.g. utilization in [0,1] vs a weight total in the hundreds),
+// so blending "pack tight" with "balance weight" behaves predictably.
+type pfNormSelector struct {
+	prefs   []pack.Preference
+	weights []float64
+}
+
+func (s pfNormSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
+	itemScalars := pack.ScalarsOf(item)
+	vol := item.Volume()
+
+	var idxs []int
+	var aggs []map[string]float64
+	for i, b := range bins {
+		if b.Remaining() < vol {
+			continue
+		}
+		idxs = append(idxs, i)
+		aggs = append(aggs, aggregatesOf(b))
+	}
+
+	scores := make([]float64, len(idxs))
+	for pi, pref := range s.prefs {
+		w := 1.0
+		if pi < len(s.weights) {
+			w = s.weights[pi]
+		}
+		// Raw value of this preference at each candidate, then min-max normalize.
+		raw := make([]float64, len(idxs))
+		min, max := 0.0, 0.0
+		for k := range idxs {
+			raw[k] = pref(aggs[k], itemScalars)
+			if k == 0 || raw[k] < min {
+				min = raw[k]
+			}
+			if k == 0 || raw[k] > max {
+				max = raw[k]
+			}
+		}
+		span := max - min
+		for k := range idxs {
+			norm := 0.0
+			if span > 0 {
+				norm = (raw[k] - min) / span
+			}
+			scores[k] += w * norm
+		}
+	}
+
+	order := make([]int, len(idxs))
+	for k := range order {
+		order[k] = k
+	}
+	sort.SliceStable(order, func(a, b int) bool { return scores[order[a]] > scores[order[b]] })
+
+	for _, k := range order {
+		p, err := bins[idxs[k]].TryPlace(item)
+		if err == nil {
+			return p, idxs[k], nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err
+		}
+	}
+	return nil, -1, nil
+}
+
+// PreferenceFitNorm is like PreferenceFit but min-max normalizes each preference
+// across the candidate bins before weighting, so weights set the relative pull
+// of preferences on different scales. weights is positional (weights[i] applies
+// to prefs[i]); a missing/short entry defaults to 1.
+func PreferenceFitNorm(factory pack.BinFactory, prefs []pack.Preference, weights []float64) *Packer {
+	return NewPacker("PFN", pfNormSelector{prefs: prefs, weights: weights}, factory)
+}
