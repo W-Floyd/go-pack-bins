@@ -48,12 +48,22 @@ type ConstraintSpec struct {
 	Value  float64 `json:"value"`
 }
 
+// PreferenceSpec is a soft balancing objective on a scalar. When any are
+// present the packer switches to PreferenceFit and the algorithm dropdown is
+// ignored (preferences are an online-selection concept).
+type PreferenceSpec struct {
+	Scalar string  `json:"scalar"`           // name of the scalar to balance
+	Mode   string  `json:"mode"`             // "concentrate" (fill fullest first) or "balance" (even totals)
+	Weight float64 `json:"weight,omitempty"` // relative pull; defaults to 1
+}
+
 type PackRequest struct {
 	Mode        string           `json:"mode"`      // "1d", "2d", "3d"
 	Algorithm   string           `json:"algorithm"` // "ff", "bf", "wf", "nf", "nkf", "awf", "ffd", "bfd", "nfd", "wfd", "mffd", "kk", "bc", "hk", "rff"
 	Bin         BinSpec          `json:"bin"`
 	Items       []ItemSpec       `json:"items"`
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
+	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 }
 
 type PlacementResult struct {
@@ -135,6 +145,19 @@ func pack1D(req PackRequest) (PackResponse, error) {
 			it.WithScalar(k, v)
 		}
 		items[i] = it
+	}
+
+	// Soft balancing objectives override the algorithm and use PreferenceFit.
+	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
+		result, perr := runPreferenceFit(factory, prefs, items)
+		if perr != nil {
+			return PackResponse{Error: perr.Error()}, nil
+		}
+		sizeByID := make(map[string]float64, len(req.Items))
+		for _, spec := range req.Items {
+			sizeByID[spec.ID] = spec.Width
+		}
+		return buildResponse1D(result, req.Bin.Width, sizeByID), nil
 	}
 
 	var result pack.Result
@@ -298,6 +321,15 @@ func pack2D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
+	// Soft balancing objectives override the algorithm and use PreferenceFit.
+	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
+		result, perr := runPreferenceFit(factory, prefs, items)
+		if perr != nil {
+			return PackResponse{Error: perr.Error()}, nil
+		}
+		return buildResponse2D(result, false), nil
+	}
+
 	var result pack.Result
 	var err error
 
@@ -426,6 +458,15 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
+	// Soft balancing objectives override the algorithm and use PreferenceFit.
+	if prefs := buildPreferences(req.Preferences); len(prefs) > 0 {
+		result, perr := runPreferenceFit(factory, prefs, items)
+		if perr != nil {
+			return PackResponse{Error: perr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
+	}
+
 	var result pack.Result
 	var err error
 
@@ -542,6 +583,56 @@ func extractMinSupport(specs []ConstraintSpec) (frac float64, rest []ConstraintS
 	return
 }
 
+// buildPreferences converts PreferenceSpec slice to weighted pack.Preference slice.
+// "balance" spreads a scalar evenly (ColocateLow); anything else concentrates it
+// (ColocateHigh). A missing or zero weight defaults to 1.
+func buildPreferences(specs []PreferenceSpec) []pack.Preference {
+	prefs := make([]pack.Preference, 0, len(specs))
+	for _, s := range specs {
+		w := s.Weight
+		if w == 0 {
+			w = 1
+		}
+		var base pack.Preference
+		switch s.Mode {
+		case "minheight":
+			base = pack.MinimizeHeight() // geometric, no scalar needed
+		case "mincg":
+			if s.Scalar == "" {
+				continue
+			}
+			base = pack.MinimizeCG(s.Scalar) // s.Scalar names the mass scalar
+		case "balance":
+			if s.Scalar == "" {
+				continue
+			}
+			base = pack.ColocateLow(s.Scalar)
+		default: // "concentrate"
+			if s.Scalar == "" {
+				continue
+			}
+			base = pack.ColocateHigh(s.Scalar)
+		}
+		prefs = append(prefs, pack.Weighted(base, w))
+	}
+	return prefs
+}
+
+// runPreferenceFit packs items with PreferenceFit. The factory is wrapped in a
+// ConstrainedFactory if it isn't already, so bins expose Aggregates() for scoring.
+func runPreferenceFit(factory pack.BinFactory, prefs []pack.Preference, items []pack.Item) (pack.Result, error) {
+	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
+		factory = pack.NewConstrainedFactory(factory)
+	}
+	p := online.PreferenceFit(factory, prefs...)
+	for _, it := range items {
+		if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return pack.Result{}, e
+		}
+	}
+	return p.Result(), nil
+}
+
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.
 func buildConstraints(specs []ConstraintSpec) []pack.Constraint {
 	cs := make([]pack.Constraint, 0, len(specs))
@@ -583,6 +674,7 @@ type NestedLevelSpec struct {
 	Bin         BinSpec          `json:"bin"`
 	Algorithm   string           `json:"algorithm"`
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
+	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 }
 
 type NestedPackRequest struct {
@@ -652,6 +744,7 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 		Bin:         l0spec.Bin,
 		Items:       req.Items,
 		Constraints: l0Constraints,
+		Preferences: l0spec.Preferences,
 	}
 	l0resp, err := packByMode(l0req)
 	if err != nil {
@@ -698,6 +791,7 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 		Bin:         l1spec.Bin,
 		Items:       cartonItems,
 		Constraints: l1spec.Constraints,
+		Preferences: l1spec.Preferences,
 	}
 	l1resp, err := packByMode(l1req)
 	if err != nil {

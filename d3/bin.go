@@ -13,12 +13,16 @@ type Bin3D struct {
 	W, D, H  float64
 	strategy PlacementStrategy3D
 	items    []pack.Item
+	// cgZNum holds, per scalar, the running sum of (scalar value × vertical
+	// centre) over placed items — the numerator of the bin's centre-of-gravity
+	// height for that scalar. See pack.MinimizeCG.
+	cgZNum map[string]float64
 }
 
 // NewBin creates a Bin3D with the given strategy.
 // Use extremepoint.New(w, d, h) for the default extreme-point strategy.
 func NewBin(id string, w, d, h float64, strategy PlacementStrategy3D) *Bin3D {
-	return &Bin3D{id: id, W: w, D: d, H: h, strategy: strategy}
+	return &Bin3D{id: id, W: w, D: d, H: h, strategy: strategy, cgZNum: map[string]float64{}}
 }
 
 func (b *Bin3D) ID() string      { return b.id }
@@ -43,6 +47,11 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 		W: w, D: d, H: h,
 	}
 	b.items = append(b.items, item)
+	// Accumulate the mass-weighted vertical moment per scalar for CG scoring.
+	zCenter := z + h/2
+	for k, v := range pack.ScalarsOf(item) {
+		b.cgZNum[k] += v * zCenter
+	}
 	return p, nil
 }
 
@@ -61,7 +70,22 @@ func (b *Bin3D) Utilization() float64 { return b.strategy.Utilization() }
 func (b *Bin3D) Remaining() float64   { return b.strategy.Remaining() }
 func (b *Bin3D) Items() []pack.Item   { return b.items }
 
+// Metrics exposes geometric metrics for preference scoring. It reports the
+// bin's current stack height under pack.MetricPeakHeight when the underlying
+// strategy can supply it (the extreme-point strategy does).
+func (b *Bin3D) Metrics() map[string]float64 {
+	m := make(map[string]float64, len(b.cgZNum)+1)
+	if hr, ok := b.strategy.(interface{ PeakHeight() float64 }); ok {
+		m[pack.MetricPeakHeight] = hr.PeakHeight()
+	}
+	for k, v := range b.cgZNum {
+		m[pack.CGHeightNumeratorKey(k)] = v
+	}
+	return m
+}
+
 var _ pack.Bin = (*Bin3D)(nil)
+var _ pack.BinMetricer = (*Bin3D)(nil)
 
 // Factory3D creates Bin3D instances.
 type Factory3D struct {

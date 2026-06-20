@@ -704,6 +704,150 @@ func TestColocateLow_1D(t *testing.T) {
 	}
 }
 
+// ─── Weighted preference ──────────────────────────────────────────────────────
+
+func TestWeighted_InvertsAndScales(t *testing.T) {
+	// Weighted(ColocateHigh, -1) must behave exactly like ColocateLow, and a
+	// large positive weight on a balancing objective must dominate a competing
+	// colocation objective.
+	binAgg := map[string]float64{"w": 10}
+	if got, want := pack.Weighted(pack.ColocateHigh("w"), -1)(binAgg, nil),
+		pack.ColocateLow("w")(binAgg, nil); got != want {
+		t.Errorf("Weighted(ColocateHigh,-1)=%v, ColocateLow=%v; want equal", got, want)
+	}
+	if got := pack.Weighted(pack.ColocateLow("w"), 0)(binAgg, nil); got != 0 {
+		t.Errorf("zero weight should disable preference, got %v", got)
+	}
+}
+
+func TestWeighted_BalanceDominates_1D(t *testing.T) {
+	// Two competing objectives: ColocateHigh("value") would pull cheap2 toward
+	// the high-value bin, but a heavily weighted ColocateLow("weight") should win
+	// and steer cheap2 to the lighter bin instead.
+	factory := pack.NewConstrainedFactory(d1.NewFactory(10))
+	packer := online.PreferenceFit(factory,
+		pack.Weighted(pack.ColocateLow("weight"), 100),
+		pack.ColocateHigh("value"),
+	)
+
+	items := []pack.Item{
+		d1.NewItem("a", 5).WithScalar("weight", 9).WithScalar("value", 100),
+		d1.NewItem("b", 5).WithScalar("weight", 1).WithScalar("value", 1),
+		d1.NewItem("c", 4).WithScalar("weight", 1).WithScalar("value", 1),
+	}
+	for i, it := range items {
+		if _, err := packer.Pack(it); err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+	}
+	binOf := map[string]string{}
+	for _, p := range packer.Result().Placements {
+		if p != nil {
+			binOf[p.ItemID()] = p.BinID()
+		}
+	}
+	// a opens bin0 (weight 9), b opens bin1 (bin0 full). c fits only bin1 (rem 5).
+	// Regardless, c must avoid the heavy bin0 — balance pull keeps loads even.
+	if binOf["c"] == binOf["a"] {
+		t.Error("Weighted balance: c should avoid the heavy bin")
+	}
+}
+
+// ─── MinimizeHeight preference (3D) ───────────────────────────────────────────
+
+func TestMinimizeHeight_3D(t *testing.T) {
+	// Bin 10×10×10, rotation off.
+	//   A(8×10×8) opens bin0 → peak 8.
+	//   B(10×10×5) can't fit bin0 (overlaps A / overflows), opens bin1 → peak 5.
+	//   C(6×6×2) fits both: on top of A (bin0, peak 8) or on top of B (bin1, peak 5).
+	// First Fit would drop C in bin0; MinimizeHeight must steer it to the lower bin1.
+	factory := pack.NewConstrainedFactory(d3.NewFactory(10, 10, 10, d3.NewExtremePointStrategy))
+	packer := online.PreferenceFit(factory, pack.MinimizeHeight())
+
+	items := []pack.Item{
+		d3.NewItem("a", 8, 10, 8, false),
+		d3.NewItem("b", 10, 10, 5, false),
+		d3.NewItem("c", 6, 6, 2, false),
+	}
+	for i, it := range items {
+		if _, err := packer.Pack(it); err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+	}
+	binOf := map[string]string{}
+	for _, p := range packer.Result().Placements {
+		if p != nil {
+			binOf[p.ItemID()] = p.BinID()
+		}
+	}
+	if binOf["c"] == binOf["a"] {
+		t.Errorf("MinimizeHeight: c landed on the tall stack (bin of a); want the shorter stack (bin of b)")
+	}
+	if binOf["c"] != binOf["b"] {
+		t.Errorf("MinimizeHeight: c=%s, want same bin as b=%s", binOf["c"], binOf["b"])
+	}
+}
+
+func TestPeakHeight_Metric(t *testing.T) {
+	// A bin reports its stack height via Metrics()/Aggregates() under the reserved key.
+	cb := pack.NewConstrainedBin(d3.NewBin("x", 10, 10, 10, d3.NewExtremePointStrategy(10, 10, 10)), nil)
+	if got := cb.Aggregates()[pack.MetricPeakHeight]; got != 0 {
+		t.Errorf("empty bin peak height = %v, want 0", got)
+	}
+	if _, err := cb.TryPlace(d3.NewItem("a", 5, 5, 4, false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := cb.Aggregates()[pack.MetricPeakHeight]; got != 4 {
+		t.Errorf("peak height after 4-tall item = %v, want 4", got)
+	}
+}
+
+// ─── MinimizeCG preference (3D) ───────────────────────────────────────────────
+
+func TestCGHeight_Metric(t *testing.T) {
+	// CG height = Σ(weight × vertical centre) / Σ(weight). One 4-tall item at
+	// z=0 has centre 2, so a single item gives CG = 2 regardless of its mass.
+	cb := pack.NewConstrainedBin(d3.NewBin("x", 10, 10, 10, d3.NewExtremePointStrategy(10, 10, 10)), nil)
+	if _, err := cb.TryPlace(d3.NewItem("a", 4, 4, 4, false).WithScalar("weight", 10)); err != nil {
+		t.Fatal(err)
+	}
+	agg := cb.Aggregates()
+	if got := agg[pack.CGHeightNumeratorKey("weight")]; got != 20 { // 10 × 2
+		t.Errorf("CG numerator = %v, want 20", got)
+	}
+	if got := pack.MinimizeCG("weight")(agg, nil); got != -2 {
+		t.Errorf("MinimizeCG score = %v, want -2 (CG height 2)", got)
+	}
+}
+
+func TestMinimizeCG_3D(t *testing.T) {
+	// bin0 gets a light-but-tall item (CG 4); bin1 gets a heavy flat item (CG 2.5).
+	// A subsequent item fits in both bins — MinimizeCG must steer it to bin1, the
+	// more stable (lower centre-of-gravity) bin.
+	factory := pack.NewConstrainedFactory(d3.NewFactory(10, 10, 10, d3.NewExtremePointStrategy))
+	packer := online.PreferenceFit(factory, pack.MinimizeCG("weight"))
+
+	items := []pack.Item{
+		d3.NewItem("a", 8, 10, 8, false).WithScalar("weight", 1),
+		d3.NewItem("b", 10, 10, 5, false).WithScalar("weight", 100),
+		d3.NewItem("c", 6, 6, 2, false).WithScalar("weight", 50),
+	}
+	for i, it := range items {
+		if _, err := packer.Pack(it); err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+	}
+	binOf := map[string]string{}
+	for _, p := range packer.Result().Placements {
+		if p != nil {
+			binOf[p.ItemID()] = p.BinID()
+		}
+	}
+	if binOf["c"] != binOf["b"] {
+		t.Errorf("MinimizeCG: c=%s, want the low-CG bin with b=%s", binOf["c"], binOf["b"])
+	}
+}
+
 // ─── AllSame + BinCompletion (stateful constraint in branch-and-bound) ────────
 
 func TestAllSame_BinCompletion(t *testing.T) {

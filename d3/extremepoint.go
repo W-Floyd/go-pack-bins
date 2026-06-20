@@ -47,6 +47,18 @@ func (ep *ExtremePoint) Remaining() float64 {
 	return ep.binW*ep.binD*ep.binH - ep.usedVol
 }
 
+// PeakHeight returns the highest top face (max z+h) of any placed box, i.e. the
+// current stack height of the bin. Returns 0 for an empty bin.
+func (ep *ExtremePoint) PeakHeight() float64 {
+	peak := 0.0
+	for _, b := range ep.placed {
+		if top := b.z + b.h; top > peak {
+			peak = top
+		}
+	}
+	return peak
+}
+
 func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
 	pts := ep.extremePoints()
 

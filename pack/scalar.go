@@ -45,6 +45,24 @@ func (f ConstraintFunc) Check(binAgg, itemScalars map[string]float64) bool {
 // Used by PreferenceFit to rank candidate bins.
 type Preference func(binAgg, itemScalars map[string]float64) float64
 
+// BinMetricer is an optional Bin extension that reports geometric metrics (as
+// opposed to scalar accumulations) for preference scoring — e.g. the current
+// stack height. ConstrainedBin merges these into the map passed to preferences,
+// so a Preference can score on them via their reserved key.
+type BinMetricer interface {
+	Metrics() map[string]float64
+}
+
+// MetricPeakHeight is the reserved key under which a BinMetricer reports the
+// current peak stack height of a bin (the highest top face of any placed item).
+const MetricPeakHeight = "\x00m:peak_height"
+
+// CGHeightNumeratorKey returns the reserved metric key under which a BinMetricer
+// reports the mass-weighted vertical moment for a scalar — i.e. the running sum
+// of (scalar value × vertical centre) over placed items. Dividing this by the
+// bin's accumulated total of the same scalar yields the centre-of-gravity height.
+func CGHeightNumeratorKey(scalar string) string { return "\x00m:cgz:" + scalar }
+
 // ── constraint constructors ───────────────────────────────────────────────────
 
 // maxAggConstraint enforces an upper bound on the accumulated total of a named scalar.
@@ -132,14 +150,62 @@ var _ StatefulConstraint = allSameConstraint{}
 // ── preference constructors ───────────────────────────────────────────────────
 
 // ColocateHigh returns a Preference that scores bins by their current aggregate
-// of name — bins that already contain high values are preferred.
+// of name — bins that already contain high values are preferred. This concentrates
+// a scalar: it fills the fullest bin first, then the next (e.g. "top off pallet 1
+// before opening pallet 2").
 func ColocateHigh(name string) Preference {
 	return func(binAgg, _ map[string]float64) float64 { return binAgg[name] }
 }
 
 // ColocateLow returns a Preference that prefers bins with the lowest aggregate.
+// This balances a scalar: each item goes to the emptiest bin, driving the bins
+// toward roughly equal totals (e.g. even weight distribution across containers).
 func ColocateLow(name string) Preference {
 	return func(binAgg, _ map[string]float64) float64 { return -binAgg[name] }
+}
+
+// MinimizeHeight returns a Preference that prefers bins with the lowest current
+// stack height, keeping loads flat. It scores on MetricPeakHeight, so it only
+// has effect when packing into bins that implement BinMetricer (e.g. the 3-D
+// extreme-point bin); for bins that don't report it, every bin scores 0.
+//
+// Wrap with Weighted to trade flatness off against other objectives.
+func MinimizeHeight() Preference {
+	return func(binAgg, _ map[string]float64) float64 { return -binAgg[MetricPeakHeight] }
+}
+
+// MinimizeCG returns a Preference that prefers bins with the lowest current
+// centre-of-gravity height for the given mass scalar (e.g. "weight"), keeping
+// loads bottom-heavy and stable. The CG height is the mass-weighted mean
+// vertical centre of placed items: CGHeightNumeratorKey(massScalar) / massScalar.
+//
+// It only has effect with bins that report these metrics (the 3-D extreme-point
+// bin); empty or mass-less bins score 0. Wrap with Weighted to trade stability
+// off against other objectives.
+func MinimizeCG(massScalar string) Preference {
+	numKey := CGHeightNumeratorKey(massScalar)
+	return func(binAgg, _ map[string]float64) float64 {
+		mass := binAgg[massScalar]
+		if mass == 0 {
+			return 0
+		}
+		return -(binAgg[numKey] / mass)
+	}
+}
+
+// Weighted scales a Preference's score by w. Because PreferenceFit sums all
+// preferences, weights set the relative pull of competing objectives — e.g.
+//
+//	online.PreferenceFit(factory,
+//		pack.Weighted(pack.ColocateLow("weight"), 2),  // balancing weight matters most
+//		pack.ColocateHigh("value"))                    // grouping value is secondary
+//
+// A negative weight inverts a preference (Weighted(ColocateHigh(n), -1) behaves
+// like ColocateLow(n)); a zero weight disables it.
+func Weighted(p Preference, w float64) Preference {
+	return func(binAgg, itemScalars map[string]float64) float64 {
+		return w * p(binAgg, itemScalars)
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
