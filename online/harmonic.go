@@ -1,6 +1,7 @@
 package online
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -57,9 +58,15 @@ func (h *HarmonicK) Pack(item pack.Item) (pack.Placement, error) {
 		if b.Remaining() < item.Volume() {
 			continue
 		}
-		if p, ok := b.TryPlace(item); ok {
+		p, err := b.TryPlace(item)
+		if err == nil {
 			h.result.Placements = append(h.result.Placements, p)
 			return p, nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			h.result.Unplaced = append(h.result.Unplaced, item.ID())
+			h.result.SetPlacementError(item.ID(), err)
+			return nil, pack.ErrItemTooLarge
 		}
 	}
 	if h.factory == nil {
@@ -67,9 +74,12 @@ func (h *HarmonicK) Pack(item pack.Item) (pack.Placement, error) {
 		return nil, pack.ErrNoOpenBin
 	}
 	b := h.factory.Open()
-	p, ok := b.TryPlace(item)
-	if !ok {
+	p, err := b.TryPlace(item)
+	if err != nil {
 		h.result.Unplaced = append(h.result.Unplaced, item.ID())
+		if !errors.Is(err, pack.ErrNoRoom) {
+			h.result.SetPlacementError(item.ID(), err)
+		}
 		return nil, pack.ErrItemTooLarge
 	}
 	h.classBins[cls] = append(h.classBins[cls], b)
@@ -140,40 +150,58 @@ func (r *RefinedHarmonic) harmonicClass(frac float64) int {
 	return r.k - 1
 }
 
-func (r *RefinedHarmonic) packInList(bins *[]pack.Bin, item pack.Item) (pack.Placement, bool) {
+func (r *RefinedHarmonic) packInList(bins *[]pack.Bin, item pack.Item) (pack.Placement, error) {
 	for _, b := range *bins {
 		if b.Remaining() < item.Volume() {
 			continue
 		}
-		if p, ok := b.TryPlace(item); ok {
+		p, err := b.TryPlace(item)
+		if err == nil {
 			r.result.Placements = append(r.result.Placements, p)
-			return p, true
+			return p, nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			r.result.Unplaced = append(r.result.Unplaced, item.ID())
+			r.result.SetPlacementError(item.ID(), err)
+			return nil, pack.ErrItemTooLarge
 		}
 	}
 	if r.factory == nil {
-		return nil, false
+		return nil, pack.ErrNoRoom
 	}
 	b := r.factory.Open()
-	p, ok := b.TryPlace(item)
-	if !ok {
-		return nil, false
+	p, err := b.TryPlace(item)
+	if err != nil {
+		r.result.Unplaced = append(r.result.Unplaced, item.ID())
+		if !errors.Is(err, pack.ErrNoRoom) {
+			r.result.SetPlacementError(item.ID(), err)
+		}
+		return nil, pack.ErrItemTooLarge
 	}
 	*bins = append(*bins, b)
 	r.result.Bins = append(r.result.Bins, b)
 	r.result.Placements = append(r.result.Placements, p)
-	return p, true
+	return p, nil
 }
 
 func (r *RefinedHarmonic) Pack(item pack.Item) (pack.Placement, error) {
 	frac := item.Volume() / r.binCapacity
 	if cls, ok := r.largeClass(frac); ok {
-		if p, ok := r.packInList(&r.largeBins[cls], item); ok {
+		p, err := r.packInList(&r.largeBins[cls], item)
+		if err == nil {
 			return p, nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, err
 		}
 	} else {
 		cls := r.harmonicClass(frac)
-		if p, ok := r.packInList(&r.harmonicBins[cls], item); ok {
+		p, err := r.packInList(&r.harmonicBins[cls], item)
+		if err == nil {
 			return p, nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, err
 		}
 	}
 	r.result.Unplaced = append(r.result.Unplaced, item.ID())

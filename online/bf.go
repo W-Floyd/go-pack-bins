@@ -1,6 +1,7 @@
 package online
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/wfloyd/go-pack-bins/pack"
@@ -11,7 +12,7 @@ import (
 // still accept it (i.e. the bin that will be "tightest" after placement).
 type bfSelector struct{}
 
-func (bfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (bfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	type cand struct {
 		idx  int
 		util float64
@@ -28,11 +29,16 @@ func (bfSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) 
 		return candidates[i].util > candidates[j].util
 	})
 	for _, c := range candidates {
-		if p, ok := bins[c.idx].TryPlace(item); ok {
-			return p, c.idx
+		p, err := bins[c.idx].TryPlace(item)
+		if err == nil {
+			return p, c.idx, nil
 		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err // propagate permanent error
+		}
+		// ErrNoRoom: continue to next bin
 	}
-	return nil, -1
+	return nil, -1, nil
 }
 
 // BestFit returns a Best Fit online packer.

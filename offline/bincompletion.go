@@ -1,6 +1,7 @@
 package offline
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -97,9 +98,12 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 	result := pack.Result{Bins: bins, Placements: make([]pack.Placement, len(items))}
 	for sortedIdx, binIdx := range solver.bestAssign {
 		origIdx := order[sortedIdx]
-		p, ok := bins[binIdx].TryPlace(items[origIdx])
-		if !ok {
+		p, err := bins[binIdx].TryPlace(items[origIdx])
+		if err != nil {
 			result.Unplaced = append(result.Unplaced, items[origIdx].ID())
+			if !errors.Is(err, pack.ErrNoRoom) {
+				result.SetPlacementError(items[origIdx].ID(), err)
+			}
 			continue
 		}
 		result.Placements[origIdx] = p

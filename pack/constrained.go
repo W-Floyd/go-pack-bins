@@ -1,5 +1,10 @@
 package pack
 
+import (
+	"errors"
+	"fmt"
+)
+
 // ConstrainedBin wraps any Bin and enforces scalar Constraints.
 // It accumulates scalar totals for all placed items so constraints and
 // preferences can inspect the bin's current state.
@@ -20,21 +25,36 @@ func NewConstrainedBin(bin Bin, constraints []Constraint) *ConstrainedBin {
 
 // TryPlace checks every constraint before delegating to the wrapped bin.
 // On success it accumulates the item's scalars and applies any stateful constraints.
-func (c *ConstrainedBin) TryPlace(item Item) (Placement, bool) {
+// Returns ErrNoRoom if a constraint fails only because the bin is non-empty.
+// Returns a descriptive error if a constraint would fail even on an empty bin (permanent).
+func (c *ConstrainedBin) TryPlace(item Item) (Placement, error) {
 	itemScalars := ScalarsOf(item)
 	for _, con := range c.constraints {
 		if !con.Check(c.agg, itemScalars) {
-			return nil, false
+			// Check whether this constraint also fails on an empty bin.
+			empty := make(map[string]float64)
+			if !con.Check(empty, itemScalars) {
+				// Permanent failure — item can never fit in any bin of this config.
+				if d, ok := con.(ConstraintDescriber); ok {
+					return nil, fmt.Errorf("pack: item permanently rejected: %s", d.Describe(empty, itemScalars))
+				}
+				return nil, fmt.Errorf("pack: item permanently rejected by constraint")
+			}
+			// Only fails because the bin is non-empty — try another bin.
+			return nil, ErrNoRoom
 		}
 	}
-	p, ok := c.Bin.TryPlace(item)
-	if ok {
+	p, err := c.Bin.TryPlace(item)
+	if err == nil {
 		for k, v := range itemScalars {
 			c.agg[k] += v
 		}
 		ApplyConstraints(c.constraints, c.agg, itemScalars)
 	}
-	return p, ok
+	if err != nil && !errors.Is(err, ErrNoRoom) {
+		return nil, err
+	}
+	return p, err
 }
 
 // Aggregate returns the accumulated total of the named scalar across all placed items.

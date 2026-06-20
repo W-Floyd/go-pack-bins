@@ -1,21 +1,30 @@
 package online
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import (
+	"errors"
+
+	"github.com/wfloyd/go-pack-bins/pack"
+)
 
 // ffSelector implements the First Fit bin selection policy.
 // Scans all open bins in order of opening and uses the first one that fits.
 type ffSelector struct{}
 
-func (ffSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int) {
+func (ffSelector) Select(bins []pack.Bin, item pack.Item) (pack.Placement, int, error) {
 	for i, b := range bins {
 		if b.Remaining() < item.Volume() {
 			continue // fast reject
 		}
-		if p, ok := b.TryPlace(item); ok {
-			return p, i
+		p, err := b.TryPlace(item)
+		if err == nil {
+			return p, i, nil
 		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			return nil, -1, err // propagate permanent error
+		}
+		// ErrNoRoom: continue to next bin
 	}
-	return nil, -1
+	return nil, -1, nil
 }
 
 // FirstFit returns a First Fit online packer.

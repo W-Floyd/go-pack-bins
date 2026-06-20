@@ -1,6 +1,10 @@
 package online
 
-import "github.com/wfloyd/go-pack-bins/pack"
+import (
+	"errors"
+
+	"github.com/wfloyd/go-pack-bins/pack"
+)
 
 // RefinedFirstFit implements the Refined First Fit (RFF) algorithm by Yao (1980).
 // Items are partitioned into 4 size classes based on their size relative to bin capacity:
@@ -52,9 +56,15 @@ func (r *RefinedFirstFit) Pack(item pack.Item) (pack.Placement, error) {
 		if b.Remaining() < item.Volume() {
 			continue
 		}
-		if p, ok := b.TryPlace(item); ok {
+		p, err := b.TryPlace(item)
+		if err == nil {
 			r.result.Placements = append(r.result.Placements, p)
 			return p, nil
+		}
+		if !errors.Is(err, pack.ErrNoRoom) {
+			r.result.Unplaced = append(r.result.Unplaced, item.ID())
+			r.result.SetPlacementError(item.ID(), err)
+			return nil, pack.ErrItemTooLarge
 		}
 	}
 	// No bin in this class can accept the item — open a new one.
@@ -63,9 +73,12 @@ func (r *RefinedFirstFit) Pack(item pack.Item) (pack.Placement, error) {
 		return nil, pack.ErrNoOpenBin
 	}
 	b := r.factory.Open()
-	p, ok := b.TryPlace(item)
-	if !ok {
+	p, err := b.TryPlace(item)
+	if err != nil {
 		r.result.Unplaced = append(r.result.Unplaced, item.ID())
+		if !errors.Is(err, pack.ErrNoRoom) {
+			r.result.SetPlacementError(item.ID(), err)
+		}
 		return nil, pack.ErrItemTooLarge
 	}
 	r.classBins[cls] = append(r.classBins[cls], b)

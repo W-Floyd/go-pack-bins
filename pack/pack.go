@@ -39,8 +39,12 @@ type Bin interface {
 
 	// TryPlace attempts to place item into the bin.
 	// On success it mutates the bin's internal state and returns the placement.
-	// On failure it leaves the bin unchanged and returns (nil, false).
-	TryPlace(item Item) (Placement, bool)
+	// On failure it returns a non-nil error:
+	//   ErrNoRoom      – item doesn't fit in this bin instance (try another bin).
+	//   any other err  – item can never be placed in any bin of this configuration
+	//                    (geometrically too large, or constraint violated even on
+	//                    a completely empty bin). The caller must not open another bin.
+	TryPlace(item Item) (Placement, error)
 
 	// Utilization returns the fraction of total capacity currently occupied,
 	// in [0.0, 1.0]. Used by Best Fit and Worst Fit selectors.
@@ -82,6 +86,19 @@ type Result struct {
 	Placements []Placement
 	// Unplaced holds IDs of items that could not be placed (empty on success).
 	Unplaced []string
+	// PlacementErrors holds the reason an item could not be placed, keyed by item ID.
+	// Only populated when placement failed due to a permanent constraint or size
+	// violation. Items that are unplaced purely due to insufficient space (the bin
+	// was full and no new bin could hold them) are in Unplaced but not here.
+	PlacementErrors map[string]error
+}
+
+// SetPlacementError records a permanent placement failure reason for the given item.
+func (r *Result) SetPlacementError(id string, err error) {
+	if r.PlacementErrors == nil {
+		r.PlacementErrors = make(map[string]error)
+	}
+	r.PlacementErrors[id] = err
 }
 
 // BinsUsed returns the number of bins that were opened.
@@ -89,13 +106,17 @@ func (r Result) BinsUsed() int { return len(r.Bins) }
 
 // BinSelector is the single decision an online algorithm makes: given the
 // current set of open bins, attempt to place item in one of them.
-// Returns the Placement and the bin index on success, or (nil, -1) to
-// signal that a new bin should be opened.
+//
+//   - (p, idx, nil)  – placed in bin at index idx.
+//   - (nil, -1, nil) – no existing bin fit; caller should open a new one.
+//   - (nil, -1, err) – permanent failure; item can never be placed in any bin
+//                      of this factory's configuration. Caller must not open a
+//                      new bin. err is the same kind returned by Bin.TryPlace.
 //
 // Selectors are responsible for calling TryPlace on their chosen bin(s).
-// The Packer calls Open on the factory and retries if Select returns -1.
+// The Packer calls Open on the factory and retries if Select returns -1, nil.
 type BinSelector interface {
-	Select(bins []Bin, item Item) (Placement, int)
+	Select(bins []Bin, item Item) (Placement, int, error)
 }
 
 // OnlinePacker packs items one at a time with no look-ahead.
