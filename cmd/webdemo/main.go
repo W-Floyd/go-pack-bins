@@ -312,7 +312,7 @@ func isStreamable(req PackRequest) bool {
 	switch req.Mode {
 	case "1d":
 		switch req.Algorithm {
-		case "", "ff", "nf", "nkf", "bf", "wf", "awf", "ffd", "bfd", "nfd", "wfd":
+		case "", "ff", "nf", "nkf", "bf", "wf", "awf", "ffd", "bfd", "nfd", "wfd", "mffd":
 			return true
 		}
 	case "2d":
@@ -492,6 +492,9 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 		return wrap(offline.NextFitDecreasing(factory))
 	case "wfd":
 		return wrap(offline.WorstFitDecreasing(factory))
+	case "mffd": // 1-D only; a single First-Fit pass over class-ordered items
+		mp := offline.ModifiedFirstFitDecreasing(req.Bin.Width, factory)
+		return mp, func(items []pack.Item) pack.Result { r, _ := mp.PackAll(items); return r }, true
 	default: // "", "ff", 2-D "maxrects"
 		return online1(online.FirstFit(factory))
 	}
@@ -532,13 +535,13 @@ func autoCandidates(req PackRequest) []candidate {
 	case "1d":
 		cap := req.Bin.Width
 		f := func() pack.BinFactory { return constrainedFactory(d1.NewFactory(cap), req.Constraints) }
+		mffd := offline.ModifiedFirstFitDecreasing(cap, f())
+		mffdItems := items1D(req)
 		return []candidate{
 			wrap("FFD", offline.FirstFitDecreasing(f()), items1D(req)),
 			wrap("BFD", offline.BestFitDecreasing(f()), items1D(req)),
 			wrap("WFD", offline.WorstFitDecreasing(f()), items1D(req)),
-			{label: "MFFD", run: func() (pack.Result, error) {
-				return offline.ModifiedFirstFitDecreasing(cap, f()).PackAll(items1D(req))
-			}},
+			{label: "MFFD", obs: mffd, run: func() (pack.Result, error) { return mffd.PackAll(mffdItems) }},
 			{label: "KK", run: func() (pack.Result, error) {
 				return offline.KarmarkarKarp(items1D(req), cap, d1.NewFactory(cap))
 			}},

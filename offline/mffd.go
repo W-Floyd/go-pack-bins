@@ -26,9 +26,15 @@ func ModifiedFirstFitDecreasing(binCapacity float64, factory pack.BinFactory) *m
 type mffdPacker struct {
 	binCapacity float64
 	factory     pack.BinFactory
+	observer    pack.PlaceObserver
 }
 
 func (m *mffdPacker) Name() string { return "MFFD" }
+
+// Observe registers an observer for the single First-Fit pass MFFD performs over
+// its class-ordered items, so each placement streams as it commits. Pass nil to
+// detach. Survives across PackAll calls.
+func (m *mffdPacker) Observe(fn pack.PlaceObserver) { m.observer = fn }
 
 func (m *mffdPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	large := filterClass(items, m.binCapacity, 0.5, 1.0)
@@ -48,6 +54,9 @@ func (m *mffdPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	ordered = append(ordered, tiny...)
 
 	ff := online.FirstFit(m.factory)
+	if m.observer != nil {
+		ff.Observe(m.observer)
+	}
 	var lastErr error
 	for _, item := range ordered {
 		if _, err := ff.Pack(item); err != nil {
@@ -75,3 +84,4 @@ func sortDesc(items []pack.Item) {
 }
 
 var _ pack.OfflinePacker = (*mffdPacker)(nil)
+var _ pack.Observable = (*mffdPacker)(nil)
