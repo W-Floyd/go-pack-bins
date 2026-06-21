@@ -137,6 +137,57 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }
 
+// Candidate is a feasible placement (one that already passes the support gate),
+// exposed without committing so a joint multi-objective packer can score it. It
+// carries the geometric features such a packer scores on.
+type Candidate struct {
+	X, Y, Z, W, D, H float64
+	Support          float64 // bottom-face support fraction in [0,1]
+	Lateral          float64 // weighted neighbour-contact score (anti-slosh) per the spec's SideX/SideY
+}
+
+// Candidates returns every feasible placement of an item (in any given
+// orientation) at the current extreme points, without committing. Positions that
+// fail the Bottom / NoFloating support gate are excluded — exactly the ones
+// TryInsert would reject — so a caller can rank the rest under its own objective.
+func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
+	pts := ep.extremePoints()
+	var out []Candidate
+	for _, o := range orientations {
+		w, d, h := o[0], o[1], o[2]
+		if w > ep.binW || d > ep.binD || h > ep.binH {
+			continue
+		}
+		for _, p := range pts {
+			x, y, z := p[0], p[1], p[2]
+			if x+w > ep.binW || y+d > ep.binD || z+h > ep.binH {
+				continue
+			}
+			if ep.conflicts(x, y, z, w, d, h) {
+				continue
+			}
+			sf := ep.supportFrac(x, y, z, w, d)
+			if sf < ep.contact.Bottom {
+				continue
+			}
+			if ep.contact.NoFloating && sf <= compactEps {
+				continue
+			}
+			b := box{x, y, z, w, d, h}
+			out = append(out, Candidate{X: x, Y: y, Z: z, W: w, D: d, H: h,
+				Support: sf, Lateral: ep.lateralScore(b)})
+		}
+	}
+	return out
+}
+
+// CommitCandidate places a candidate previously returned by Candidates, updating
+// the strategy's occupied set and volume.
+func (ep *ExtremePoint) CommitCandidate(c Candidate) {
+	ep.placed = append(ep.placed, box{c.X, c.Y, c.Z, c.W, c.D, c.H})
+	ep.usedVol += c.W * c.D * c.H
+}
+
 // extremePoints returns all candidate placement positions.
 // The origin (0,0,0) is always a candidate.
 func (ep *ExtremePoint) extremePoints() [][3]float64 {

@@ -55,6 +55,25 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	return p, nil
 }
 
+// PlaceCandidate commits a Candidate chosen externally (e.g. by a joint
+// multi-objective packer that scored candidates from the strategy), mirroring
+// TryPlace's bookkeeping. The strategy must be the *ExtremePoint that produced
+// the candidate. Returns the recorded placement.
+func (b *Bin3D) PlaceCandidate(item pack.Item, c Candidate) *Placement3D {
+	b.strategy.(*ExtremePoint).CommitCandidate(c)
+	p := &Placement3D{
+		binID: b.id, itemID: item.ID(),
+		X: c.X, Y: c.Y, Z: c.Z,
+		W: c.W, D: c.D, H: c.H,
+	}
+	b.items = append(b.items, item)
+	zCenter := c.Z + c.H/2
+	for k, v := range pack.ScalarsOf(item) {
+		b.cgZNum[k] += v * zCenter
+	}
+	return p
+}
+
 // anyOrientationFits returns true if any of the given (w,d,h) orientations fits
 // within the box defined by w, d, h.
 func anyOrientationFits(orientations [][3]float64, w, d, h float64) bool {

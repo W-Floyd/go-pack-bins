@@ -742,6 +742,7 @@ const ALGOS = {
   '3d': [
     {v:'auto',l:'Auto (best-of)'},
     {v:'ff',  l:'First Fit / Extreme-point'},
+    {v:'joint',l:'Joint (balance + placement, one pass)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
     {v:'nf',  l:'Next Fit'},
     {v:'bf',  l:'Best Fit'},
@@ -793,7 +794,7 @@ function onModeChange() {
 
 // Algorithms that can host balance objectives (see backend isBalanceable).
 // The ⚖ marker in the dropdown flags them.
-function balanceableAlgo(v) { return v === 'bf' || v === 'wf' || v === 'pref' || v === 'auto'; }
+function balanceableAlgo(v) { return v === 'bf' || v === 'wf' || v === 'pref' || v === 'auto' || v === 'joint'; }
 function algoLabel(a) { return balanceableAlgo(a.v) ? a.l + ' ⚖' : a.l; }
 
 function buildAlgorithmSelect(mode) {
