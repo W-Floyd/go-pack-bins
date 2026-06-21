@@ -7,10 +7,10 @@
 //
 //	pack       – core interfaces (this package)
 //	d1         – 1-D items and bins (scalar capacity)
-//	d2         – 2-D rectangular items and bins (MaxRects / Guillotine placement)
-//	d3         – 3-D box items and bins (extreme-point placement); manifold solid items/bins
-//	online     – all online bin-selection algorithms (NF, NkF, FF, BF, WF, AWF, RFF, Harmonic family)
-//	offline    – offline wrappers and exact solvers (FFD, NFD, BFD, MFFD, KK, BinCompletion)
+//	d2         – 2-D rectangular items and bins (MaxRects / Guillotine / Skyline / Shelf placement)
+//	d3         – 3-D box items and bins (extreme-point / deepest-bottom-left-fill); manifold solid items/bins
+//	online     – all online bin-selection algorithms (NF, NkF, FF, BF, WF, AWF, RFF, Harmonic family, Sum-of-Squares)
+//	offline    – offline wrappers and exact solvers (FFD, NFD, BFD, WFD, MFFD, NFDH/FFDH/BFDH shelf, KK, BinCompletion)
 package pack
 
 // Item is the unit of work placed into a bin.
