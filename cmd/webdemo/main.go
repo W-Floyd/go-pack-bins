@@ -322,7 +322,7 @@ func isStreamable(req PackRequest) bool {
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "dblf", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "blf", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -425,14 +425,14 @@ func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, boo
 			items = append(items, it)
 		}
 	case "3d":
-		// DBLF is its own strategy; otherwise extreme-point with placement-time
+		// BLF is its own strategy; otherwise extreme-point with placement-time
 		// gates only (lateral compaction is ruled out by isStreamable), so streamed
 		// positions are final.
 		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
 		})
-		if req.Algorithm == "dblf" {
-			stratFn = d3.NewDeepBottomLeftStrategy
+		if req.Algorithm == "blf" {
+			stratFn = d3.NewBottomLeftFillStrategy
 		}
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
@@ -578,14 +578,14 @@ func autoCandidates(req PackRequest) []candidate {
 			stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
 			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		}
-		dblf := func() pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.NewDeepBottomLeftStrategy), req.Constraints)
+		blf := func() pack.BinFactory {
+			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.NewBottomLeftFillStrategy), req.Constraints)
 		}
 		return []candidate{
 			wrap("FFD", offline.FirstFitDecreasing(f()), items3D(req)),
 			wrap("BFD", offline.BestFitDecreasing(f()), items3D(req)),
 			wrap("NFD", offline.NextFitDecreasing(f()), items3D(req)),
-			wrap("DBLF", offline.FirstFitDecreasing(dblf()), items3D(req)),
+			wrap("BLF", offline.FirstFitDecreasing(blf()), items3D(req)),
 		}
 	}
 	return nil
@@ -1094,8 +1094,8 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
 	})
-	if req.Algorithm == "dblf" {
-		stratFn = d3.NewDeepBottomLeftStrategy
+	if req.Algorithm == "blf" {
+		stratFn = d3.NewBottomLeftFillStrategy
 	}
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
@@ -1161,16 +1161,16 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		}
 		result = p.Result()
 	case "auto":
-		dblfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewDeepBottomLeftStrategy), req.Constraints)
+		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewBottomLeftFillStrategy), req.Constraints)
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
 			offline.BestFitDecreasing(factory),
 			offline.NextFitDecreasing(factory),
-			offline.FirstFitDecreasing(dblfFactory),
+			offline.FirstFitDecreasing(blfFactory),
 		)
 		result, err = p.PackAll(items)
 		bestPacker = p.Winner()
-	default: // ff, dblf
+	default: // ff, blf
 		p := online.FirstFit(factory)
 		for _, it := range items {
 			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {

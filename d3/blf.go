@@ -2,30 +2,31 @@ package d3
 
 import "math"
 
-// DeepBottomLeft implements a deepest-bottom-left-fill 3-D placement strategy.
-// Among feasible corner positions it chooses the one furthest back (min y), then
-// lowest (min z), then left-most (min x), and requires every item to rest on the
-// floor or the top of a placed box (nothing floats). This back-to-front, bottom-up
-// filling produces layered packings that are visibly distinct from the
-// height-first extreme-point strategy — useful as a second 3-D contender so the
-// "auto" race shows genuine spatial variety, not just different bin selection.
-type DeepBottomLeft struct {
+// BottomLeftFill implements the Bottom-Left-Fill 3-D placement strategy. Among
+// feasible corner positions it chooses the lowest (min z, gravity-first), then
+// left-most (min x), then deepest (min y), and requires every item to rest on
+// the floor or the top of a placed box (nothing floats). Filling the floor
+// before stacking — and breaking ties toward the front-left — gives packings
+// distinct from the extreme-point strategy, whose ties resolve toward the back
+// (min y) instead. Useful as a second 3-D contender so the "auto" race shows
+// genuine spatial variety, not just different bin selection.
+type BottomLeftFill struct {
 	binW, binD, binH float64
 	placed           []box
 	usedVol          float64
 }
 
-// NewDeepBottomLeft creates a DBLF strategy for a bin of the given dimensions.
-func NewDeepBottomLeft(w, d, h float64) *DeepBottomLeft {
-	return &DeepBottomLeft{binW: w, binD: d, binH: h}
+// NewBottomLeftFill creates a BLF strategy for a bin of the given dimensions.
+func NewBottomLeftFill(w, d, h float64) *BottomLeftFill {
+	return &BottomLeftFill{binW: w, binD: d, binH: h}
 }
 
-// NewDeepBottomLeftStrategy matches Factory3D's strategy-constructor signature.
-func NewDeepBottomLeftStrategy(w, d, h float64) PlacementStrategy3D {
-	return NewDeepBottomLeft(w, d, h)
+// NewBottomLeftFillStrategy matches Factory3D's strategy-constructor signature.
+func NewBottomLeftFillStrategy(w, d, h float64) PlacementStrategy3D {
+	return NewBottomLeftFill(w, d, h)
 }
 
-func (s *DeepBottomLeft) Utilization() float64 {
+func (s *BottomLeftFill) Utilization() float64 {
 	total := s.binW * s.binD * s.binH
 	if total == 0 {
 		return 1
@@ -33,11 +34,11 @@ func (s *DeepBottomLeft) Utilization() float64 {
 	return s.usedVol / total
 }
 
-func (s *DeepBottomLeft) Remaining() float64 {
+func (s *BottomLeftFill) Remaining() float64 {
 	return s.binW*s.binD*s.binH - s.usedVol
 }
 
-func (s *DeepBottomLeft) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
+func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
 	pts := s.corners()
 	bestSet := false
 	var best box
@@ -71,7 +72,7 @@ func (s *DeepBottomLeft) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 
 // corners returns candidate positions: the origin plus, for each placed box, the
 // points just past its +x, +y and +z faces.
-func (s *DeepBottomLeft) corners() [][3]float64 {
+func (s *BottomLeftFill) corners() [][3]float64 {
 	pts := [][3]float64{{0, 0, 0}}
 	for _, b := range s.placed {
 		pts = append(pts,
@@ -83,18 +84,20 @@ func (s *DeepBottomLeft) corners() [][3]float64 {
 	return pts
 }
 
-// better ranks candidates: deepest (min y), then bottom (min z), then left (min x).
-func (s *DeepBottomLeft) better(a, b box) bool {
-	if a.y != b.y {
-		return a.y < b.y
-	}
+// better ranks candidates bottom-first (gravity): lowest z, then left-most x,
+// then deepest y. With the support requirement this fills the floor before
+// stacking, distinct from extreme-point's bottom-then-back (z, y, x) order.
+func (s *BottomLeftFill) better(a, b box) bool {
 	if a.z != b.z {
 		return a.z < b.z
 	}
-	return a.x < b.x
+	if a.x != b.x {
+		return a.x < b.x
+	}
+	return a.y < b.y
 }
 
-func (s *DeepBottomLeft) conflicts(x, y, z, w, d, h float64) bool {
+func (s *BottomLeftFill) conflicts(x, y, z, w, d, h float64) bool {
 	for _, b := range s.placed {
 		if overlap1D(x, x+w, b.x, b.x+b.w) > compactEps &&
 			overlap1D(y, y+d, b.y, b.y+b.d) > compactEps &&
@@ -106,8 +109,8 @@ func (s *DeepBottomLeft) conflicts(x, y, z, w, d, h float64) bool {
 }
 
 // supported reports whether the box would rest on the floor or the top face of a
-// placed box (positive footprint overlap) — DBLF never leaves a box floating.
-func (s *DeepBottomLeft) supported(x, y, z, w, d float64) bool {
+// placed box (positive footprint overlap) — BLF never leaves a box floating.
+func (s *BottomLeftFill) supported(x, y, z, w, d float64) bool {
 	if z <= compactEps {
 		return true
 	}
@@ -121,4 +124,4 @@ func (s *DeepBottomLeft) supported(x, y, z, w, d float64) bool {
 	return false
 }
 
-var _ PlacementStrategy3D = (*DeepBottomLeft)(nil)
+var _ PlacementStrategy3D = (*BottomLeftFill)(nil)
