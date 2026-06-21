@@ -47,7 +47,8 @@ func handlePack(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(packapi.PackResponse{Error: err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(packapi.Pack(req))
+	// r.Context() is cancelled if the client disconnects, aborting the solve.
+	json.NewEncoder(w).Encode(packapi.PackCtx(r.Context(), req))
 }
 
 func handlePackStream(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +77,7 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 		send(packapi.StreamFrame{Type: "error", Error: err.Error()})
 		return
 	}
-	packapi.StreamPack(req, send)
+	packapi.StreamPack(r.Context(), req, send)
 }
 
 func handleNestedPack(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +94,7 @@ func handleNestedPack(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(packapi.NestedPackResponse{Error: err.Error()})
 		return
 	}
-	resp, err := packapi.PackNested(req)
+	resp, err := packapi.PackNestedCtx(r.Context(), req)
 	if err != nil {
 		json.NewEncoder(w).Encode(packapi.NestedPackResponse{Error: err.Error()})
 		return

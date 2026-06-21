@@ -2,6 +2,7 @@ package offline
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -17,6 +18,12 @@ import (
 // Only 1-D items are supported (Dimensions()==1).
 // Returns ErrItemTooLarge if any item exceeds binCapacity.
 func KarmarkarKarp(items []pack.Item, binCapacity float64, factory pack.BinFactory) (pack.Result, error) {
+	return KarmarkarKarpCtx(context.Background(), items, binCapacity, factory)
+}
+
+// KarmarkarKarpCtx is KarmarkarKarp with cancellation, checked periodically
+// during the heap-differencing phase. Returns ctx.Err() if cancelled.
+func KarmarkarKarpCtx(ctx context.Context, items []pack.Item, binCapacity float64, factory pack.BinFactory) (pack.Result, error) {
 	if len(items) == 0 {
 		return pack.Result{}, nil
 	}
@@ -34,7 +41,15 @@ func KarmarkarKarp(items []pack.Item, binCapacity float64, factory pack.BinFacto
 		})
 	}
 
+	steps := 0
 	for h.Len() > 1 {
+		// ctx is cheap to check but not free; sample every 1024 reductions.
+		if steps&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return pack.Result{}, err
+			}
+		}
+		steps++
 		a := heap.Pop(h).(*kkNode)
 		b := heap.Pop(h).(*kkNode)
 		diff := a.value - b.value
