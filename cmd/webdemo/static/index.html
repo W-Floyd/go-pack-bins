@@ -1466,6 +1466,33 @@ function renderItemList() {
 // ── pack call ─────────────────────────────────────────────────────────────────
 let autoPackTimer = null;
 
+// WASM_MODE is set by the build-injected bootstrap (window.PACK_WASM) when the
+// page is the self-contained static bundle. In that mode the Go solver runs in a
+// Web Worker (pack-worker.js) instead of the server's /api/* endpoints.
+const WASM_MODE = !!window.PACK_WASM;
+let packWorker = null;
+// packFrameHandler is set by the in-flight pack/nested call to receive worker
+// messages for the current request; the worker tags each message with reqId and
+// we drop anything that does not match the current packSeq (stale request).
+let packFrameHandler = null;
+
+// packWorkerRef lazily spins up the single shared worker and routes its messages
+// to the current packFrameHandler (filtered by reqId). The worker processes
+// requests one at a time, so a single handler slot is sufficient.
+function packWorkerRef() {
+  if (!packWorker) {
+    packWorker = new Worker('pack-worker.js');
+    packWorker.onmessage = (e) => {
+      const d = e.data;
+      if (d.kind === 'ready') return;
+      if (d.reqId !== packSeq) return; // stale: a newer request supersedes it
+      if (packFrameHandler) packFrameHandler(d);
+    };
+    packWorker.onerror = (e) => console.error('pack worker error:', e.message || e);
+  }
+  return packWorker;
+}
+
 function scheduleAutoPack() {
   clearTimeout(autoPackTimer);
   autoPackTimer = setTimeout(() => runPack(true), 120);
@@ -1579,6 +1606,57 @@ async function runSinglePack(auto = false) {
     endPackIndicator();
   };
 
+  // onFrame handles one StreamFrame (meta/batch/done/error). The frames arrive
+  // either over the server's NDJSON stream or, in WASM mode, as messages from the
+  // pack worker — the same protocol both ways, so this dispatch is shared.
+  const onFrame = (f) => {
+    if (seq !== packSeq) return; // superseded — ignore stale frames
+    if (f.type === 'error') {
+      if (!auto) showError(f.error);
+      endPackIndicator();
+    } else if (f.type === 'meta') {
+      count = f.count || 0;
+      multi = !!f.multi;
+      if (multi) {
+        document.getElementById('empty-state').style.display = 'none';
+        document.getElementById('stat-bins').textContent = '…';
+        document.getElementById('stat-placed').textContent = '…';
+        document.getElementById('stat-best-wrap').style.display = 'none';
+        buildRaceGrid(f.segments || [], mode, body.bin, count);
+      } else {
+        renderShell(data, mode, body.bin, 0);
+        if (is3D) ctl = beginScene3D(body.bin, 1, count);
+      }
+    } else if (f.type === 'batch') {
+      if (multi) raceDrawBatch(f.seg || 0, f.placements || [], mode, body.bin);
+      else drawBatch(f.placements || []);
+    } else if (f.type === 'done') {
+      if (multi) { finishRace(f, mode, body.bin, auto); }
+      else {
+        data.bins_used = f.bins_used || data.bins_used;
+        data.best_packer = f.best_packer || '';
+        data.free_rects = f.free_rects;
+        data.item_errors = f.item_errors || {};
+        data.unplaced = f.unplaced || [];
+        finish();
+      }
+    }
+  };
+
+  // WASM mode: the Go solver runs in a Web Worker and posts each frame back, so
+  // the main thread renders progressively (genuine streaming, no server). The
+  // worker serialises requests; seq guarding in onFrame discards stale frames.
+  if (WASM_MODE) {
+    packFrameHandler = (msg) => onFrame(msg.frame);
+    try {
+      packWorkerRef().postMessage({ kind: 'pack', reqId: seq, body });
+    } catch (e) {
+      if (!auto) showError(e.message);
+      endPackIndicator();
+    }
+    return;
+  }
+
   try {
     const resp = await fetch('/api/pack/stream', {
       method: 'POST',
@@ -1598,39 +1676,8 @@ async function runSinglePack(auto = false) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        const f = JSON.parse(line);
         if (seq !== packSeq) return; // superseded — abandon this stream
-        if (f.type === 'error') {
-          if (!auto) showError(f.error);
-          endPackIndicator();
-          return;
-        } else if (f.type === 'meta') {
-          count = f.count || 0;
-          multi = !!f.multi;
-          if (multi) {
-            document.getElementById('empty-state').style.display = 'none';
-            document.getElementById('stat-bins').textContent = '…';
-            document.getElementById('stat-placed').textContent = '…';
-            document.getElementById('stat-best-wrap').style.display = 'none';
-            buildRaceGrid(f.segments || [], mode, body.bin, count);
-          } else {
-            renderShell(data, mode, body.bin, 0);
-            if (is3D) ctl = beginScene3D(body.bin, 1, count);
-          }
-        } else if (f.type === 'batch') {
-          if (multi) raceDrawBatch(f.seg || 0, f.placements || [], mode, body.bin);
-          else drawBatch(f.placements || []);
-        } else if (f.type === 'done') {
-          if (multi) { finishRace(f, mode, body.bin, auto); }
-          else {
-            data.bins_used = f.bins_used || data.bins_used;
-            data.best_packer = f.best_packer || '';
-            data.free_rects = f.free_rects;
-            data.item_errors = f.item_errors || {};
-            data.unplaced = f.unplaced || [];
-            finish();
-          }
-        }
+        onFrame(JSON.parse(line));
       }
     }
   } catch(e) {
@@ -1678,12 +1725,24 @@ async function runNestedPack(auto = false) {
   };
 
   try {
-    const resp = await fetch('/api/pack/nested', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
+    let data;
+    if (WASM_MODE) {
+      // Nested is a single (non-streaming) result; the worker posts it back once.
+      data = await new Promise((resolve, reject) => {
+        packFrameHandler = (msg) => {
+          if (msg.result) resolve(msg.result);
+          else if (msg.frame && msg.frame.type === 'error') reject(new Error(msg.frame.error));
+        };
+        packWorkerRef().postMessage({ kind: 'nested', reqId: seq, body });
+      });
+    } else {
+      const resp = await fetch('/api/pack/nested', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      data = await resp.json();
+    }
     if (seq !== packSeq) return; // superseded by a newer request
     if (data.error) { if (!auto) showError(data.error); return; }
     lastResult = { data, mode, nested: true, innerBin: body.levels[0].bin, outerBin: body.levels[1].bin };
