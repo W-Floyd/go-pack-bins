@@ -11,6 +11,7 @@ import (
 	"github.com/W-Floyd/go-pack-bins/d1"
 	"github.com/W-Floyd/go-pack-bins/d2"
 	"github.com/W-Floyd/go-pack-bins/d3"
+	"github.com/W-Floyd/go-pack-bins/joint"
 	"github.com/W-Floyd/go-pack-bins/meta"
 	"github.com/W-Floyd/go-pack-bins/offline"
 	"github.com/W-Floyd/go-pack-bins/online"
@@ -303,6 +304,11 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 //     (bc, kk), the multi-phase mffd, the self-managed harmonic/RFF variants, and
 //     2-D guillotine (its free-rect overlay is only meaningful when complete).
 func isStreamable(req PackRequest) bool {
+	// JointFit commits each placement once, in final position, with no post-pass
+	// (it handles balance and anti-slosh during placement), so it always streams.
+	if req.Mode == "3d" && req.Algorithm == "joint" {
+		return true
+	}
 	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
 		return false
 	}
@@ -489,6 +495,13 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 		return online1(online.NextKFit(3, factory))
 	case "awf":
 		return online1(online.AlmostWorstFit(factory))
+	case "joint": // 3-D joint multi-objective; manages its own bins, ignores factory
+		prefs, weights := buildPreferences(req.Preferences)
+		jf := joint.New(req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.ContactSpec{
+			Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
+			NoFloating: req.Contact.NoFloating,
+		}, prefs, weights, buildConstraints(req.Constraints))
+		return jf, func(items []pack.Item) pack.Result { r, _ := jf.PackAll(items); return r }, true
 	case "ss":
 		return online1(online.SumOfSquares(req.Bin.Width, factory))
 	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
@@ -1120,6 +1133,21 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
 		return resp, nil
+	}
+
+	// Joint multi-objective: bin selection and placement under one score, in a
+	// single pass — no separate compaction (contact is handled at placement).
+	if req.Algorithm == "joint" {
+		prefs, weights := buildPreferences(req.Preferences)
+		jf := joint.New(bw, bd, bh, d3.ContactSpec{
+			Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
+			NoFloating: req.Contact.NoFloating,
+		}, prefs, weights, buildConstraints(req.Constraints))
+		result, jerr := jf.PackAll(items)
+		if jerr != nil && !errors.Is(jerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: jerr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
 	}
 
 	var result pack.Result
