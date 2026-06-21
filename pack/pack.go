@@ -13,6 +13,8 @@
 //	offline    – offline wrappers and exact solvers (FFD, NFD, BFD, WFD, MFFD, NFDH/FFDH/BFDH shelf, KK, BinCompletion)
 package pack
 
+import "context"
+
 // Item is the unit of work placed into a bin.
 // Concrete implementations live in the d1, d2, and d3 sub-packages.
 type Item interface {
@@ -158,4 +160,14 @@ type OfflinePacker interface {
 
 	// Name returns the algorithm identifier string.
 	Name() string
+}
+
+// CtxOfflinePacker is an OfflinePacker that supports cancellation. PackAllCtx
+// behaves like PackAll but returns ctx.Err() promptly if ctx is cancelled
+// mid-solve. Implemented by the offline wrappers, the exact solvers, BestOf, and
+// JointFit; callers holding a context should prefer it. Anything implementing
+// this also implements OfflinePacker (PackAll delegates with context.Background).
+type CtxOfflinePacker interface {
+	OfflinePacker
+	PackAllCtx(ctx context.Context, items []Item) (Result, error)
 }

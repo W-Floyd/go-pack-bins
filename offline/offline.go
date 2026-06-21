@@ -4,6 +4,7 @@
 package offline
 
 import (
+	"context"
 	"sort"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -57,6 +58,12 @@ func New(name string, policy SortPolicy, online pack.OnlinePacker) *Wrapper {
 }
 
 func (w *Wrapper) PackAll(items []pack.Item) (pack.Result, error) {
+	return w.PackAllCtx(context.Background(), items)
+}
+
+// PackAllCtx is PackAll with cancellation: it checks ctx before each item and
+// returns ctx.Err() (with the partial result) if cancelled mid-solve.
+func (w *Wrapper) PackAllCtx(ctx context.Context, items []pack.Item) (pack.Result, error) {
 	// Make a working copy so we don't mutate the caller's slice.
 	sorted := make([]pack.Item, len(items))
 	copy(sorted, items)
@@ -65,6 +72,9 @@ func (w *Wrapper) PackAll(items []pack.Item) (pack.Result, error) {
 	w.online.Reset()
 	var lastErr error
 	for _, item := range sorted {
+		if err := ctx.Err(); err != nil {
+			return w.online.Result(), err
+		}
 		if _, err := w.online.Pack(item); err != nil {
 			lastErr = err
 		}
@@ -84,4 +94,5 @@ func (w *Wrapper) Observe(fn pack.PlaceObserver) {
 }
 
 var _ pack.OfflinePacker = (*Wrapper)(nil)
+var _ pack.CtxOfflinePacker = (*Wrapper)(nil)
 var _ pack.Observable = (*Wrapper)(nil)

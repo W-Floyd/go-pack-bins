@@ -3,6 +3,7 @@
 package joint
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -171,6 +172,12 @@ func (j *JointFit) best(cands []scored, itemScalars map[string]float64) int {
 }
 
 func (j *JointFit) PackAll(items []pack.Item) (pack.Result, error) {
+	return j.PackAllCtx(context.Background(), items)
+}
+
+// PackAllCtx is PackAll with cancellation: it checks ctx before scoring each
+// item and returns ctx.Err() (with the partial result) if cancelled mid-solve.
+func (j *JointFit) PackAllCtx(ctx context.Context, items []pack.Item) (pack.Result, error) {
 	var result pack.Result
 	if len(items) == 0 {
 		return result, nil
@@ -184,6 +191,9 @@ func (j *JointFit) PackAll(items []pack.Item) (pack.Result, error) {
 
 	var lastErr error
 	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		i3, ok := item.(*d3.Item3D)
 		if !ok {
 			result.Unplaced = append(result.Unplaced, item.ID())

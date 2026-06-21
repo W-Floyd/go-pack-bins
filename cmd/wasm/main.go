@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"syscall/js"
 
@@ -84,7 +85,8 @@ func packStreamFn(this js.Value, args []js.Value) any {
 		emit(packapi.StreamFrame{Type: "error", Error: "goPackStream: " + err.Error()})
 		return nil
 	}
-	packapi.StreamPack(req, emit)
+	// No per-call cancellation from JS yet; the worker tears down on supersede.
+	packapi.StreamPack(context.Background(), req, emit)
 	return nil
 }
 

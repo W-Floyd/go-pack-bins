@@ -1,6 +1,7 @@
 package offline
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -19,6 +20,16 @@ import (
 //
 // Only 1-D items are supported. Items larger than binCapacity are rejected.
 func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFactory, constraints ...pack.Constraint) (pack.Result, error) {
+	return BinCompletionCtx(context.Background(), items, binCapacity, factory, constraints...)
+}
+
+// BinCompletionCtx is BinCompletion with cancellation. The branch-and-bound
+// search checks ctx periodically and aborts with ctx.Err() if cancelled — the
+// exact solver can be exponential, so this is the most important place to cancel.
+func BinCompletionCtx(ctx context.Context, items []pack.Item, binCapacity float64, factory pack.BinFactory, constraints ...pack.Constraint) (pack.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return pack.Result{}, err
+	}
 	if len(items) == 0 {
 		return pack.Result{}, nil
 	}
@@ -58,6 +69,7 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 	lowerBound := int(math.Ceil(totalSize / binCapacity))
 
 	solver := &bcSolver{
+		ctx:         ctx,
 		n:           len(items),
 		sizes:       sortedSizes,
 		scalars:     sortedScalars,
@@ -79,6 +91,9 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 		solver.bestAssign = nil
 		if solver.search(assign, remaining, binAgg, 0, k) {
 			break
+		}
+		if solver.canceled {
+			return pack.Result{}, ctx.Err()
 		}
 	}
 
@@ -112,6 +127,9 @@ func BinCompletion(items []pack.Item, binCapacity float64, factory pack.BinFacto
 }
 
 type bcSolver struct {
+	ctx         context.Context
+	canceled    bool
+	steps       int
 	n           int
 	sizes       []float64
 	scalars     []map[string]float64
@@ -124,6 +142,17 @@ type bcSolver struct {
 // search attempts to assign items[itemIdx..] to k bins.
 // binAgg tracks accumulated scalar totals per bin (mutated and restored).
 func (s *bcSolver) search(assign []int, remaining []float64, binAgg []map[string]float64, itemIdx, k int) bool {
+	// Cancellation: once tripped, unwind the whole recursion. Sample ctx every
+	// 4096 node visits to keep the check off the hot path.
+	if s.canceled {
+		return false
+	}
+	s.steps++
+	if s.steps&4095 == 0 && s.ctx.Err() != nil {
+		s.canceled = true
+		return false
+	}
+
 	if itemIdx == s.n {
 		usedBins := 0
 		for _, r := range remaining {

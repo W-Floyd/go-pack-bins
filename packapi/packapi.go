@@ -5,6 +5,7 @@
 package packapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -19,18 +20,23 @@ import (
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
-// Pack runs the (non-streaming) solve for req and returns the response, folding
-// any error into the response's Error field. It is the core of /api/pack.
-func Pack(req PackRequest) PackResponse {
+// Pack runs the (non-streaming) solve for req with no cancellation.
+func Pack(req PackRequest) PackResponse { return PackCtx(context.Background(), req) }
+
+// PackCtx runs the (non-streaming) solve for req and returns the response,
+// folding any error (including ctx cancellation) into the response's Error
+// field. It is the core of /api/pack; the HTTP handler passes the request
+// context so a client disconnect or deadline aborts the solve.
+func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 	var resp PackResponse
 	var err error
 	switch req.Mode {
 	case "1d":
-		resp, err = pack1D(req)
+		resp, err = pack1D(ctx, req)
 	case "2d":
-		resp, err = pack2D(req)
+		resp, err = pack2D(ctx, req)
 	case "3d":
-		resp, err = pack3D(req)
+		resp, err = pack3D(ctx, req)
 	default:
 		resp = PackResponse{Error: "unknown mode: " + req.Mode}
 	}
@@ -40,10 +46,41 @@ func Pack(req PackRequest) PackResponse {
 	return resp
 }
 
-// PackNested runs the two-level nested solve (cartons → pallets). It is the core
-// of /api/pack/nested.
+// PackNested runs the two-level nested solve (cartons → pallets) with no
+// cancellation. It is the core of /api/pack/nested.
 func PackNested(req NestedPackRequest) (NestedPackResponse, error) {
-	return doNestedPack(req)
+	return PackNestedCtx(context.Background(), req)
+}
+
+// PackNestedCtx is PackNested with cancellation threaded into both levels.
+func PackNestedCtx(ctx context.Context, req NestedPackRequest) (NestedPackResponse, error) {
+	return doNestedPack(ctx, req)
+}
+
+// ─── cancellation helpers ──────────────────────────────────────────────────
+
+// runOnline drives an online packer over items, checking ctx before each Pack
+// so a long single-pass solve can be cancelled. ErrItemTooLarge is returned to
+// the caller (which tolerates it); ctx cancellation returns ctx.Err().
+func runOnline(ctx context.Context, p pack.OnlinePacker, items []pack.Item) (pack.Result, error) {
+	for _, it := range items {
+		if err := ctx.Err(); err != nil {
+			return p.Result(), err
+		}
+		if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return p.Result(), e
+		}
+	}
+	return p.Result(), nil
+}
+
+// packAllCtx runs an offline packer with cancellation if it supports it,
+// otherwise falls back to the plain PackAll.
+func packAllCtx(ctx context.Context, p pack.OfflinePacker, items []pack.Item) (pack.Result, error) {
+	if c, ok := p.(pack.CtxOfflinePacker); ok {
+		return c.PackAllCtx(ctx, items)
+	}
+	return p.PackAll(items)
 }
 
 // ─── request / response types ─────────────────────────────────────────────────
@@ -169,7 +206,7 @@ type StreamFrame struct {
 // send is only ever called from the calling goroutine, so it need not be
 // concurrency-safe. The frame protocol leaves room for a genuinely-incremental
 // solver to emit batches mid-solve without any client change.
-func StreamPack(req PackRequest, send func(StreamFrame)) {
+func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	// A buffered emitter coalesces placements into batches so we are not flushing
 	// one tiny frame per box, while still pushing each batch the moment it fills.
 	var buf []PlacementResult
@@ -189,8 +226,8 @@ func StreamPack(req PackRequest, send func(StreamFrame)) {
 	// Auto: race every candidate at once into its own segment, each streaming its
 	// own genuine solve, then collapse to the winner. Skipped when a relocating
 	// post-pass is active (then there is no honest partial state to show).
-	if cands := autoCandidates(req); cands != nil {
-		streamAuto(send, req, cands)
+	if cands := autoCandidates(ctx, req); cands != nil {
+		streamAuto(ctx, send, req, cands)
 		return
 	}
 
@@ -201,7 +238,7 @@ func StreamPack(req PackRequest, send func(StreamFrame)) {
 	// batches leave mid-solve. The solve runs synchronously here; flushing per
 	// batch is what makes the bytes genuinely progressive.
 	if streaming {
-		if resp, ok := streamSolve(req, emit); ok {
+		if resp, ok := streamSolve(ctx, req, emit); ok {
 			flushBatch()
 			send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed,
 				Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
@@ -215,11 +252,11 @@ func StreamPack(req PackRequest, send func(StreamFrame)) {
 	var err error
 	switch req.Mode {
 	case "1d":
-		resp, err = pack1D(req)
+		resp, err = pack1D(ctx, req)
 	case "2d":
-		resp, err = pack2D(req)
+		resp, err = pack2D(ctx, req)
 	case "3d":
-		resp, err = pack3D(req)
+		resp, err = pack3D(ctx, req)
 	default:
 		resp = PackResponse{Error: "unknown mode: " + req.Mode}
 	}
@@ -340,7 +377,7 @@ func (c *placeConv) conv(p pack.Placement) (PlacementResult, bool) {
 // packer commits it, then runs the solve. It returns the final summary and true.
 // Returns ok=false only if the algorithm is not a recognised sequential packer
 // (the caller then falls back to the full solve). Precondition: isStreamable(req).
-func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, bool) {
+func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult)) (PackResponse, bool) {
 	conv := &placeConv{
 		mode: req.Mode, binIdx: map[string]int{}, offsets: map[string]float64{},
 		sizeByID: map[string]float64{}, binW: req.Bin.Width,
@@ -399,7 +436,7 @@ func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, boo
 		return PackResponse{}, false
 	}
 
-	obs, run, ok := buildStreamPacker(req, factory)
+	obs, run, ok := buildStreamPacker(ctx, req, factory)
 	if !ok {
 		return PackResponse{}, false
 	}
@@ -416,10 +453,13 @@ func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, boo
 // and a closure that runs it over the items, returning the final result. Online
 // algorithms loop Pack; the decreasing offline wrappers (sort-then-online) run
 // PackAll — both commit through online.Packer, so the observer fires either way.
-func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observable, func([]pack.Item) pack.Result, bool) {
+func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFactory) (pack.Observable, func([]pack.Item) pack.Result, bool) {
 	online1 := func(op *online.Packer) (pack.Observable, func([]pack.Item) pack.Result, bool) {
 		return op, func(items []pack.Item) pack.Result {
 			for _, it := range items {
+				if ctx.Err() != nil { // cancelled — stop committing further placements
+					break
+				}
 				op.Pack(it) // failures are recorded in the result (unplaced / errors)
 			}
 			return op.Result()
@@ -427,7 +467,7 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 	}
 	wrap := func(w *offline.Wrapper) (pack.Observable, func([]pack.Item) pack.Result, bool) {
 		return w, func(items []pack.Item) pack.Result {
-			r, _ := w.PackAll(items)
+			r, _ := w.PackAllCtx(ctx, items)
 			return r
 		}, true
 	}
@@ -448,7 +488,7 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 			Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 			NoFloating: req.Contact.NoFloating,
 		}, prefs, weights, buildConstraints(req.Constraints))
-		return jf, func(items []pack.Item) pack.Result { r, _ := jf.PackAll(items); return r }, true
+		return jf, func(items []pack.Item) pack.Result { r, _ := jf.PackAllCtx(ctx, items); return r }, true
 	case "ss":
 		return online1(online.SumOfSquares(req.Bin.Width, factory))
 	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
@@ -463,7 +503,7 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 		return wrap(offline.WorstFitDecreasing(factory))
 	case "mffd": // 1-D only; a single First-Fit pass over class-ordered items
 		mp := offline.ModifiedFirstFitDecreasing(req.Bin.Width, factory)
-		return mp, func(items []pack.Item) pack.Result { r, _ := mp.PackAll(items); return r }, true
+		return mp, func(items []pack.Item) pack.Result { r, _ := packAllCtx(ctx, mp, items); return r }, true
 	default: // "", "ff", 2-D "maxrects"
 		return online1(online.FirstFit(factory))
 	}
@@ -486,7 +526,7 @@ type candidate struct {
 // branch of pack1D/2D/3D, or nil if a segmented race does not apply: not "auto",
 // a balancing post-pass is active (auto + preferences → BalancedFit, not BestOf),
 // or lateral compaction would relocate committed items.
-func autoCandidates(req PackRequest) []candidate {
+func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 	if req.Algorithm != "auto" {
 		return nil
 	}
@@ -498,7 +538,7 @@ func autoCandidates(req PackRequest) []candidate {
 	}
 
 	wrap := func(label string, w *offline.Wrapper, items []pack.Item) candidate {
-		return candidate{label: label, obs: w, run: func() (pack.Result, error) { return w.PackAll(items) }}
+		return candidate{label: label, obs: w, run: func() (pack.Result, error) { return w.PackAllCtx(ctx, items) }}
 	}
 	switch req.Mode {
 	case "1d":
@@ -510,9 +550,9 @@ func autoCandidates(req PackRequest) []candidate {
 			wrap("FFD", offline.FirstFitDecreasing(f()), items1D(req)),
 			wrap("BFD", offline.BestFitDecreasing(f()), items1D(req)),
 			wrap("WFD", offline.WorstFitDecreasing(f()), items1D(req)),
-			{label: "MFFD", obs: mffd, run: func() (pack.Result, error) { return mffd.PackAll(mffdItems) }},
+			{label: "MFFD", obs: mffd, run: func() (pack.Result, error) { return packAllCtx(ctx, mffd, mffdItems) }},
 			{label: "KK", run: func() (pack.Result, error) {
-				return offline.KarmarkarKarp(items1D(req), cap, d1.NewFactory(cap))
+				return offline.KarmarkarKarpCtx(ctx, items1D(req), cap, d1.NewFactory(cap))
 			}},
 		}
 	case "2d":
@@ -593,7 +633,8 @@ func items3D(req PackRequest) []pack.Item {
 // per-commit placement streams into per-segment batches, then sends a done frame
 // naming the winning segment (fewest bins, ties by fewest unplaced — matching
 // meta.BestOf). Candidates that cannot stream emit their placements once solved.
-func streamAuto(send func(StreamFrame), req PackRequest, cands []candidate) {
+func streamAuto(ctx context.Context, send func(StreamFrame), req PackRequest, cands []candidate) {
+	_ = ctx // candidates already capture ctx in their run closures (see autoCandidates)
 	labels := make([]string, len(cands))
 	for i, c := range cands {
 		labels[i] = c.label
@@ -686,7 +727,7 @@ func isBetterResult(a, b pack.Result) bool {
 
 // ─── 1-D ─────────────────────────────────────────────────────────────────────
 
-func pack1D(req PackRequest) (PackResponse, error) {
+func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	cap := req.Bin.Width
 	factory := constrainedFactory(d1.NewFactory(cap), req.Constraints)
 
@@ -701,7 +742,7 @@ func pack1D(req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -721,107 +762,89 @@ func pack1D(req PackRequest) (PackResponse, error) {
 	switch req.Algorithm {
 	case "nf":
 		p := online.NextFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "nkf":
 		p := online.NextKFit(3, factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "bf":
 		p := online.BestFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "wf":
 		p := online.WorstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "awf":
 		p := online.AlmostWorstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "rff":
 		p := online.NewRFF(cap, factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "hk":
 		p := online.NewHarmonicK(11, cap, factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "ss":
 		p := online.SumOfSquares(cap, factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "ffd":
 		p := offline.FirstFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "bfd":
 		p := offline.BestFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "nfd":
 		p := offline.NextFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "wfd":
 		p := offline.WorstFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "mffd":
 		p := offline.ModifiedFirstFitDecreasing(cap, factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "kk":
-		result, err = offline.KarmarkarKarp(items, cap, factory)
+		result, err = offline.KarmarkarKarpCtx(ctx, items, cap, factory)
 	case "bc":
-		result, err = offline.BinCompletion(items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
+		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
 	case "auto":
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
 			offline.BestFitDecreasing(factory),
 			offline.WorstFitDecreasing(factory),
 			offline.ModifiedFirstFitDecreasing(cap, factory),
-			meta.NewFunc("kk", func(it []pack.Item) (pack.Result, error) {
-				return offline.KarmarkarKarp(it, cap, d1.NewFactory(cap))
+			meta.NewFuncCtx("kk", func(ctx context.Context, it []pack.Item) (pack.Result, error) {
+				return offline.KarmarkarKarpCtx(ctx, it, cap, d1.NewFactory(cap))
 			}),
 		)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 		bestPacker = p.Winner()
 	default:
 		p := online.FirstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	}
 
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
@@ -893,7 +916,7 @@ func strat2DFor(algo string) func(w, h float64) d2.PlacementStrategy2D {
 // shelfLabel names the decreasing-height shelf algorithms for display.
 var shelfLabel = map[string]string{"nfdh": "NFDH", "ffdh": "FFDH", "bfdh": "BFDH"}
 
-func pack2D(req PackRequest) (PackResponse, error) {
+func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	bw, bh := req.Bin.Width, req.Bin.Height
 	factory := constrainedFactory(d2.NewFactory(bw, bh, strat2DFor(req.Algorithm)), req.Constraints)
 
@@ -908,7 +931,7 @@ func pack2D(req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -927,42 +950,36 @@ func pack2D(req PackRequest) (PackResponse, error) {
 	switch req.Algorithm {
 	case "ffd":
 		p := offline.FirstFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "bfd":
 		p := offline.BestFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "nfd":
 		p := offline.NextFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "nf":
 		p := online.NextFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "bf":
 		p := online.BestFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "wf":
 		p := online.WorstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "nfdh", "ffdh", "bfdh":
 		// Shelf packing: decreasing-height sort + the shelf-fit policy baked into
 		// the factory's strategy (set by strat2DFor).
 		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
@@ -975,16 +992,14 @@ func pack2D(req PackRequest) (PackResponse, error) {
 			offline.BestFitDecreasing(gFactory),
 			offline.FirstFitDecreasing(skyFactory),
 		)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 		bestPacker = p.Winner()
 	default: // ff, maxrects, guillotine, skyline
 		p := online.FirstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	}
 
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
@@ -1045,7 +1060,7 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 // ─── 3-D ─────────────────────────────────────────────────────────────────────
 
-func pack3D(req PackRequest) (PackResponse, error) {
+func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
 	// Deepest-bottom-left-fill is its own placement strategy; everything else uses
 	// extreme-point with the contact spec (Bottom → hard support gate, SideX/SideY
@@ -1070,7 +1085,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -1090,7 +1105,7 @@ func pack3D(req PackRequest) (PackResponse, error) {
 			Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 			NoFloating: req.Contact.NoFloating,
 		}, prefs, weights, buildConstraints(req.Constraints))
-		result, jerr := jf.PackAll(items)
+		result, jerr := jf.PackAllCtx(ctx, items)
 		if jerr != nil && !errors.Is(jerr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: jerr.Error()}, nil
 		}
@@ -1104,37 +1119,31 @@ func pack3D(req PackRequest) (PackResponse, error) {
 	switch req.Algorithm {
 	case "ffd":
 		p := offline.FirstFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "bfd":
 		p := offline.BestFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "nfd":
 		p := offline.NextFitDecreasing(factory)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 	case "nf":
 		p := online.NextFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "bf":
 		p := online.BestFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "wf":
 		p := online.WorstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	case "auto":
 		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewBottomLeftFillStrategy), req.Constraints)
 		p := meta.BestOf(
@@ -1143,16 +1152,14 @@ func pack3D(req PackRequest) (PackResponse, error) {
 			offline.NextFitDecreasing(factory),
 			offline.FirstFitDecreasing(blfFactory),
 		)
-		result, err = p.PackAll(items)
+		result, err = packAllCtx(ctx, p, items)
 		bestPacker = p.Winner()
 	default: // ff, blf
 		p := online.FirstFit(factory)
-		for _, it := range items {
-			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-				return PackResponse{Error: e.Error()}, nil
-			}
+		var e error
+		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+			return PackResponse{Error: e.Error()}, nil
 		}
-		result = p.Result()
 	}
 
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
@@ -1275,17 +1282,20 @@ func isBalanceable(algo string) bool {
 // 1) so the distribution leans full/empty; Auto tries both balanceable flavors
 // and keeps the one using fewer bins, breaking ties on lower imbalance. Returns
 // the winning flavor label (for Auto).
-func runBalanced(algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item) (pack.Result, string, error) {
+func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item) (pack.Result, string, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
 	run := func(fill pack.Preference) (pack.Result, error) {
+		if err := ctx.Err(); err != nil {
+			return pack.Result{}, err
+		}
 		p, w := prefs, weights
 		if fill != nil {
 			p = append([]pack.Preference{fill}, prefs...)
 			w = append([]float64{1}, weights...)
 		}
-		r, err := offline.NewBalancedFitW(factory, p, w).PackAll(items)
+		r, err := packAllCtx(ctx, offline.NewBalancedFitW(factory, p, w), items)
 		// Local-search pass: move/swap items between bins to tighten the balance
 		// (no-op above RefineBalanceMaxItems items).
 		return offline.RefineBalance(factory, r, items), err
@@ -1485,7 +1495,7 @@ type NestedPackResponse struct {
 	Error  string              `json:"error,omitempty"`
 }
 
-func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
+func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackResponse, error) {
 	if len(req.Levels) < 2 {
 		return NestedPackResponse{}, fmt.Errorf("nested packing requires at least 2 levels")
 	}
@@ -1510,7 +1520,7 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 		Preferences: l0spec.Preferences,
 		Contact:     l0Contact,
 	}
-	l0resp, err := packByMode(l0req)
+	l0resp, err := packByMode(ctx, l0req)
 	if err != nil {
 		return NestedPackResponse{}, err
 	}
@@ -1558,7 +1568,7 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 		Preferences: l1spec.Preferences,
 		Contact:     l1spec.Contact,
 	}
-	l1resp, err := packByMode(l1req)
+	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
 		return NestedPackResponse{}, err
 	}
@@ -1572,14 +1582,14 @@ func doNestedPack(req NestedPackRequest) (NestedPackResponse, error) {
 }
 
 // packByMode dispatches to the appropriate dimensioned packer.
-func packByMode(req PackRequest) (PackResponse, error) {
+func packByMode(ctx context.Context, req PackRequest) (PackResponse, error) {
 	switch req.Mode {
 	case "1d":
-		return pack1D(req)
+		return pack1D(ctx, req)
 	case "2d":
-		return pack2D(req)
+		return pack2D(ctx, req)
 	case "3d":
-		return pack3D(req)
+		return pack3D(ctx, req)
 	default:
 		return PackResponse{}, fmt.Errorf("unknown mode: %s", req.Mode)
 	}
