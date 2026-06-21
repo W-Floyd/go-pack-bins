@@ -11,10 +11,13 @@ package d3
 //   - Bottom is a HARD gate: at least this fraction of the −z (bottom) face must
 //     rest on the floor or the tops of placed boxes. Enforced at placement time
 //     because support always comes from below (already-placed) items.
-//   - SideX / SideY are soft TARGETS on the ±x / ±y faces: lateral neighbours
-//     usually arrive later, so these can't be gated. Instead a positive target
-//     makes the strategy prefer positions maximising that axis's contact
-//     (wall-hugging clusters); a compaction pass then closes the remaining gaps.
+//   - SideX / SideY are soft TARGETS on the x / y axes: lateral neighbours
+//     usually arrive later, so these can't be gated. A positive target makes the
+//     strategy prefer positions that press a box flush against existing
+//     NEIGHBOURS, immobilising both and so reducing potential lateral motion
+//     (slosh). Wall contact is deliberately excluded — a wall is not sticky, so a
+//     box flush to one wall still slides toward the open far side and its total
+//     free play is unchanged. A compaction pass then consolidates the gaps.
 //   - NoFloating is a HARD boolean gate: every item must have some support
 //     beneath it (rest on the floor or a box). It's the weaker form of Bottom
 //     (Bottom>0 already implies it) for when you only want "nothing hangs in air".
@@ -194,6 +197,10 @@ func (ep *ExtremePoint) conflicts(x, y, z, w, d, h float64) bool {
 // then lower y (depth), then lower x (width).
 func (ep *ExtremePoint) preferred(c, best box) bool {
 	if ep.contact.maximizesLateral() {
+		// More neighbour contact wins: pressing boxes face-to-face immobilises both,
+		// which is what reduces potential lateral motion. Walls are excluded — a
+		// wall is not sticky, so a box flush to one wall still slides toward the
+		// open side (its total free play is unchanged by hugging the wall).
 		cc, bc := ep.lateralScore(c), ep.lateralScore(best)
 		if d := cc - bc; d > compactEps || d < -compactEps {
 			return cc > bc
@@ -208,14 +215,20 @@ func (ep *ExtremePoint) preferred(c, best box) bool {
 	return c.x < best.x
 }
 
-// lateralScore weights each lateral axis's contact fraction by its target.
+// lateralScore weights each axis's NEIGHBOUR-contact fraction by its target.
+// Only contact with placed boxes counts — walls are excluded. A wall is not
+// sticky: it bounds a box but the box can still slide along or away from it, and
+// the per-box free play is the same wherever it sits in a channel, so wall
+// contact does nothing to reduce slosh. Pressing two boxes face-to-face, by
+// contrast, immobilises both — which is what actually lowers potential lateral
+// motion. Higher score = more boxed-in by neighbours.
 func (ep *ExtremePoint) lateralScore(b box) float64 {
-	return ep.contact.SideX*ep.lateralFrac(b, 0) + ep.contact.SideY*ep.lateralFrac(b, 1)
+	return ep.contact.SideX*ep.neighbourFrac(b, 0) + ep.contact.SideY*ep.neighbourFrac(b, 1)
 }
 
-// lateralFrac returns the fraction of b's two faces on the given axis (0=x, 1=y)
-// that touch a wall or a placed neighbour, in [0,1].
-func (ep *ExtremePoint) lateralFrac(b box, axis int) float64 {
+// neighbourFrac is the fraction of b's two faces on the given axis (0=x, 1=y)
+// pressed flush against placed boxes, in [0,1].
+func (ep *ExtremePoint) neighbourFrac(b box, axis int) float64 {
 	var faceArea float64
 	if axis == 0 {
 		faceArea = b.d * b.h
@@ -225,86 +238,56 @@ func (ep *ExtremePoint) lateralFrac(b box, axis int) float64 {
 	if faceArea == 0 {
 		return 0
 	}
-	return (ep.faceContact(b, axis, false) + ep.faceContact(b, axis, true)) / (2 * faceArea)
+	return (ep.neighbourContact(b, axis, false) + ep.neighbourContact(b, axis, true)) / (2 * faceArea)
 }
 
-// faceContact returns the contacted area of one face of b: axis 0=x, 1=y, 2=z;
-// high=false is the low (−) face, high=true the high (+) face.
-func (ep *ExtremePoint) faceContact(b box, axis int, high bool) float64 {
+// neighbourContact is the area of b's low (high=false) or high (high=true) face
+// on the axis that is flush against a placed box overlapping it in the other two
+// axes. Walls contribute nothing.
+func (ep *ExtremePoint) neighbourContact(b box, axis int, high bool) float64 {
 	near := func(a, c float64) bool { return a-c < compactEps && a-c > -compactEps }
-	var coord, binDim float64
-	switch axis {
-	case 0:
-		coord, binDim = b.x, ep.binW
+	var coord float64
+	if axis == 0 {
+		coord = b.x
 		if high {
 			coord = b.x + b.w
 		}
-	case 1:
-		coord, binDim = b.y, ep.binD
+	} else {
+		coord = b.y
 		if high {
 			coord = b.y + b.d
 		}
-	default:
-		coord, binDim = b.z, ep.binH
-		if high {
-			coord = b.z + b.h
-		}
 	}
-	// Wall contact.
-	if (!high && coord <= compactEps) || (high && near(coord, binDim)) {
-		switch axis {
-		case 0:
-			return b.d * b.h
-		case 1:
-			return b.w * b.h
-		default:
-			return b.w * b.d
-		}
-	}
-	// Neighbour contact: boxes flush against this face, overlapping in the other two axes.
 	area := 0.0
 	for _, q := range ep.placed {
-		var qFace float64
-		if high {
-			qFace = faceLow(q, axis)
-		} else {
+		qFace := faceLow(q, axis)
+		if !high {
 			qFace = faceHigh(q, axis)
 		}
 		if !near(coord, qFace) {
 			continue
 		}
-		switch axis {
-		case 0:
+		if axis == 0 {
 			area += overlap1D(b.y, b.y+b.d, q.y, q.y+q.d) * overlap1D(b.z, b.z+b.h, q.z, q.z+q.h)
-		case 1:
+		} else {
 			area += overlap1D(b.x, b.x+b.w, q.x, q.x+q.w) * overlap1D(b.z, b.z+b.h, q.z, q.z+q.h)
-		default:
-			area += overlap1D(b.x, b.x+b.w, q.x, q.x+q.w) * overlap1D(b.y, b.y+b.d, q.y, q.y+q.d)
 		}
 	}
 	return area
 }
 
 func faceLow(b box, axis int) float64 {
-	switch axis {
-	case 0:
+	if axis == 0 {
 		return b.x
-	case 1:
-		return b.y
-	default:
-		return b.z
 	}
+	return b.y
 }
 
 func faceHigh(b box, axis int) float64 {
-	switch axis {
-	case 0:
+	if axis == 0 {
 		return b.x + b.w
-	case 1:
-		return b.y + b.d
-	default:
-		return b.z + b.h
 	}
+	return b.y + b.d
 }
 
 var _ PlacementStrategy3D = (*ExtremePoint)(nil)

@@ -49,9 +49,10 @@ func TestCompact_PreservesSupport(t *testing.T) {
 	}
 }
 
-func TestContactStrategy_PrefersWallHugging(t *testing.T) {
-	// With a lateral contact target, a small item should be placed touching walls
-	// rather than floating mid-bin. First item always goes to the origin corner.
+func TestContactStrategy_FirstItemToOrigin(t *testing.T) {
+	// In an empty bin a box's lateral free play is the same wherever it sits (the
+	// channel width minus the box), so the anti-slosh objective is indifferent and
+	// the z,y,x tiebreak puts the first item at the origin corner.
 	strat := d3.NewExtremePointStrategyContact(d3.ContactSpec{SideX: 1, SideY: 1})(10, 10, 10)
 	x, y, z, _, _, _, ok := strat.TryInsert([][3]float64{{2, 2, 2}})
 	if !ok {
