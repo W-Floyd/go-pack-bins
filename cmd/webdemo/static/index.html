@@ -643,6 +643,11 @@
     </div>
 
     <div class="sidebar-footer">
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="exportConfig()" title="Download the current setup (items, bin, algorithm, constraints, objectives) as JSON">Export JSON</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="document.getElementById('import-file').click()" title="Load a setup from a previously exported JSON file">Import JSON</button>
+        <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importConfig(this)">
+      </div>
       <button class="btn btn-primary" style="width:100%" id="pack-btn" onclick="runPack()">
         Pack
       </button>
@@ -1434,6 +1439,140 @@ function loadPreset(idx) {
   renderPreferenceLists();
   updateBalanceVisibility();
   scheduleAutoPack();
+}
+
+// ── config import / export ─────────────────────────────────────────────────
+// A round-trippable snapshot of the whole setup. Contact is stored as the raw
+// input percentages (0-100) so it feeds setContact() directly on import — note
+// readContact() returns fractions for the solver, which is a different unit.
+const CONFIG_VERSION = 1;
+
+function readContactPercent() {
+  const num = id => parseFloat(document.getElementById(id)?.value) || 0;
+  return {
+    bottom: num('contact-bottom'),
+    side_x: num('contact-x'),
+    side_y: num('contact-y'),
+    no_floating: document.getElementById('contact-nofloat')?.checked || false,
+  };
+}
+
+function currentConfig() {
+  const mode = document.getElementById('mode').value;
+  const num = (id, d) => { const v = parseFloat(document.getElementById(id)?.value); return isFinite(v) ? v : d; };
+  const cfg = {
+    version: CONFIG_VERSION,
+    mode,
+    algorithm: document.getElementById('algorithm').value,
+    allow_rotate: document.getElementById('allow-rotate')?.checked || false,
+    nested: nestedEnabled,
+    bin: { width: num('bin-w', 10), height: num('bin-h', num('bin-w', 10)), depth: num('bin-d', num('bin-w', 10)) },
+    contact: readContactPercent(),
+    constraints: constraints.map(c => ({ ...c })),
+    preferences: preferences.map(p => ({ ...p })),
+    innerPreferences: innerPreferences.map(p => ({ ...p })),
+    items: items.map(it => ({
+      id: it.id, width: it.width, height: it.height, depth: it.depth,
+      allow_rotate: it.allow_rotate, scalars: it.scalars || {},
+    })),
+  };
+  if (nestedEnabled) {
+    cfg.innerBin = { width: num('inner-w', 5), height: num('inner-h', num('inner-w', 5)), depth: num('inner-d', num('inner-w', 5)) };
+    cfg.innerAlgorithm = document.getElementById('inner-algorithm')?.value || 'ff';
+  }
+  return cfg;
+}
+
+function exportConfig() {
+  if (items.length === 0) { showWarn('Nothing to export yet — add some items first.'); return; }
+  const json = JSON.stringify(currentConfig(), null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `packing-${document.getElementById('mode').value}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// applyState rebuilds the whole UI from a config object. It sets the mode and
+// runs onModeChange() first (which rebuilds mode-specific DOM and clears state),
+// then repopulates everything — mirroring loadPreset.
+function applyState(s) {
+  if (!s || typeof s !== 'object') throw new Error('not a config object');
+  const mode = s.mode;
+  if (!['1d', '2d', '3d'].includes(mode)) throw new Error('missing or invalid "mode"');
+
+  document.getElementById('mode').value = mode;
+  onModeChange(); // rebuild mode DOM; resets items/constraints/preferences
+
+  constraints = (s.constraints || []).map(c => ({ ...c }));
+  preferences = (s.preferences || []).map(p => ({ ...p }));
+  innerPreferences = (s.innerPreferences || []).map(p => ({ ...p }));
+
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+
+  // Nested toggle + inner level
+  const toggleEl = document.getElementById('nested-toggle');
+  if (s.nested) {
+    nestedEnabled = true; toggleEl.checked = true;
+    document.getElementById('nested-inner-section').style.display = '';
+    document.getElementById('outer-bin-label').textContent = 'Outer container (pallet)';
+    buildInnerBinFields(mode); buildInnerAlgorithmSelect(mode);
+    const ib = s.innerBin || {};
+    setVal('inner-w', ib.width); setVal('inner-h', ib.height); setVal('inner-d', ib.depth);
+    setVal('inner-algorithm', s.innerAlgorithm);
+  } else {
+    nestedEnabled = false; toggleEl.checked = false;
+    document.getElementById('nested-inner-section').style.display = 'none';
+    document.getElementById('outer-bin-label').textContent = 'Bin capacity';
+  }
+
+  const b = s.bin || {};
+  setVal('bin-w', b.width); setVal('bin-h', b.height); setVal('bin-d', b.depth);
+  setVal('algorithm', s.algorithm);
+  if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
+  setContact(s.contact); // percentages, matching readContactPercent()
+
+  items = [];
+  itemCounter = 0;
+  for (const it of (s.items || [])) {
+    const id = it.id || ('i' + (items.length + 1));
+    items.push({
+      id,
+      width: it.width || 1,
+      height: it.height || it.width || 1,
+      depth: it.depth || it.width || 1,
+      allow_rotate: it.allow_rotate === undefined ? null : it.allow_rotate,
+      scalars: it.scalars || {},
+      _mode: mode,
+    });
+    const m = /^i(\d+)$/.exec(id); // keep itemCounter ahead of imported ids
+    if (m) itemCounter = Math.max(itemCounter, parseInt(m[1]));
+  }
+
+  renderItemList();
+  renderConstraintList();
+  renderPreferenceLists();
+  updateBalanceVisibility();
+  scheduleAutoPack();
+}
+
+function importConfig(input) {
+  const file = input.files && input.files[0];
+  input.value = ''; // allow re-importing the same file
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      applyState(JSON.parse(reader.result));
+      hideError(); hideWarn();
+    } catch (e) {
+      showError('Could not import config: ' + e.message);
+    }
+  };
+  reader.onerror = () => showError('Could not read file.');
+  reader.readAsText(file);
 }
 
 function renderItemList() {
