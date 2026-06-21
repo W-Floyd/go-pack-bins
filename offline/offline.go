@@ -26,6 +26,23 @@ var IncreasingVolume SortPolicy = func(items []pack.Item) {
 	})
 }
 
+// DecreasingHeight sorts items from tallest to shortest. Combined with a shelf
+// placement strategy (d2.Shelf) it realises the classic NFDH / FFDH / BFDH
+// algorithms. Items that expose PackHeight() are ordered by it; others fall back
+// to Volume.
+var DecreasingHeight SortPolicy = func(items []pack.Item) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return itemHeight(items[i]) > itemHeight(items[j])
+	})
+}
+
+func itemHeight(it pack.Item) float64 {
+	if h, ok := it.(interface{ PackHeight() float64 }); ok {
+		return h.PackHeight()
+	}
+	return it.Volume()
+}
+
 // Wrapper wraps an online packer with a sort policy to create an offline packer.
 type Wrapper struct {
 	name   string

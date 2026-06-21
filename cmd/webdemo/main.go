@@ -312,17 +312,17 @@ func isStreamable(req PackRequest) bool {
 	switch req.Mode {
 	case "1d":
 		switch req.Algorithm {
-		case "", "ff", "nf", "nkf", "bf", "wf", "awf", "ffd", "bfd", "nfd", "wfd", "mffd":
+		case "", "ff", "nf", "nkf", "bf", "wf", "awf", "ss", "ffd", "bfd", "nfd", "wfd", "mffd":
 			return true
 		}
 	case "2d":
 		switch req.Algorithm {
-		case "", "ff", "maxrects", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "maxrects", "skyline", "nf", "bf", "wf", "ffd", "bfd", "nfd", "nfdh", "ffdh", "bfdh":
 			return true
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "dblf", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -414,8 +414,9 @@ func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, boo
 			items = append(items, it)
 		}
 	case "2d":
-		// Guillotine is excluded by isStreamable, so MaxRects is the only strategy here.
-		factory = constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewMaxRectsDefault), req.Constraints)
+		// Strategy follows the algorithm (MaxRects / Skyline / Shelf); Guillotine is
+		// excluded by isStreamable because of its free-rect overlay.
+		factory = constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, strat2DFor(req.Algorithm)), req.Constraints)
 		for _, spec := range req.Items {
 			it := d2.NewItem(spec.ID, spec.Width, spec.Height, spec.AllowRotate)
 			for k, v := range spec.Scalars {
@@ -424,11 +425,15 @@ func streamSolve(req PackRequest, emit func(PlacementResult)) (PackResponse, boo
 			items = append(items, it)
 		}
 	case "3d":
-		// No lateral compaction here (isStreamable rules it out); the Bottom and
-		// NoFloating gates are placement-time, so streamed positions are final.
+		// DBLF is its own strategy; otherwise extreme-point with placement-time
+		// gates only (lateral compaction is ruled out by isStreamable), so streamed
+		// positions are final.
 		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
 		})
+		if req.Algorithm == "dblf" {
+			stratFn = d3.NewDeepBottomLeftStrategy
+		}
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
 			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
@@ -484,6 +489,10 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 		return online1(online.NextKFit(3, factory))
 	case "awf":
 		return online1(online.AlmostWorstFit(factory))
+	case "ss":
+		return online1(online.SumOfSquares(req.Bin.Width, factory))
+	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
+		return wrap(offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory)))
 	case "ffd":
 		return wrap(offline.FirstFitDecreasing(factory))
 	case "bfd":
@@ -553,22 +562,30 @@ func autoCandidates(req PackRequest) []candidate {
 		g := func() pack.BinFactory {
 			return constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewGuillotineDefault), req.Constraints)
 		}
+		sky := func() pack.BinFactory {
+			return constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewSkylineDefault), req.Constraints)
+		}
 		return []candidate{
 			wrap("FFD", offline.FirstFitDecreasing(mr()), items2D(req)),
 			wrap("BFD", offline.BestFitDecreasing(mr()), items2D(req)),
 			wrap("NFD", offline.NextFitDecreasing(mr()), items2D(req)),
 			wrap("FFD·guillotine", offline.FirstFitDecreasing(g()), items2D(req)),
 			wrap("BFD·guillotine", offline.BestFitDecreasing(g()), items2D(req)),
+			wrap("FFD·skyline", offline.FirstFitDecreasing(sky()), items2D(req)),
 		}
 	case "3d":
 		f := func() pack.BinFactory {
 			stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
 			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		}
+		dblf := func() pack.BinFactory {
+			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.NewDeepBottomLeftStrategy), req.Constraints)
+		}
 		return []candidate{
 			wrap("FFD", offline.FirstFitDecreasing(f()), items3D(req)),
 			wrap("BFD", offline.BestFitDecreasing(f()), items3D(req)),
 			wrap("NFD", offline.NextFitDecreasing(f()), items3D(req)),
+			wrap("DBLF", offline.FirstFitDecreasing(dblf()), items3D(req)),
 		}
 	}
 	return nil
@@ -798,6 +815,14 @@ func pack1D(req PackRequest) (PackResponse, error) {
 			}
 		}
 		result = p.Result()
+	case "ss":
+		p := online.SumOfSquares(cap, factory)
+		for _, it := range items {
+			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+				return PackResponse{Error: e.Error()}, nil
+			}
+		}
+		result = p.Result()
 	case "ffd":
 		p := offline.FirstFitDecreasing(factory)
 		result, err = p.PackAll(items)
@@ -885,13 +910,32 @@ func buildResponse1D(result pack.Result, binWidth float64, sizeByID map[string]f
 
 // ─── 2-D ─────────────────────────────────────────────────────────────────────
 
+// strat2DFor maps an algorithm choice to the 2-D placement strategy it uses.
+// MaxRects/Guillotine/Skyline are the standard trio; the shelf policies back the
+// NFDH/FFDH/BFDH algorithms (paired with a decreasing-height sort).
+func strat2DFor(algo string) func(w, h float64) d2.PlacementStrategy2D {
+	switch algo {
+	case "guillotine":
+		return d2.NewGuillotineDefault
+	case "skyline":
+		return d2.NewSkylineDefault
+	case "nfdh":
+		return d2.NewShelfStrategy(d2.ShelfNextFit)
+	case "ffdh":
+		return d2.NewShelfStrategy(d2.ShelfFirstFit)
+	case "bfdh":
+		return d2.NewShelfStrategy(d2.ShelfBestFit)
+	default:
+		return d2.NewMaxRectsDefault
+	}
+}
+
+// shelfLabel names the decreasing-height shelf algorithms for display.
+var shelfLabel = map[string]string{"nfdh": "NFDH", "ffdh": "FFDH", "bfdh": "BFDH"}
+
 func pack2D(req PackRequest) (PackResponse, error) {
 	bw, bh := req.Bin.Width, req.Bin.Height
-	makeStrat := d2.NewMaxRectsDefault
-	if req.Algorithm == "guillotine" {
-		makeStrat = d2.NewGuillotineDefault
-	}
-	factory := constrainedFactory(d2.NewFactory(bw, bh, makeStrat), req.Constraints)
+	factory := constrainedFactory(d2.NewFactory(bw, bh, strat2DFor(req.Algorithm)), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
 	for i, spec := range req.Items {
@@ -954,19 +998,26 @@ func pack2D(req PackRequest) (PackResponse, error) {
 			}
 		}
 		result = p.Result()
+	case "nfdh", "ffdh", "bfdh":
+		// Shelf packing: decreasing-height sort + the shelf-fit policy baked into
+		// the factory's strategy (set by strat2DFor).
+		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
+		result, err = p.PackAll(items)
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
+		skyFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewSkylineDefault), req.Constraints)
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(mrFactory),
 			offline.BestFitDecreasing(mrFactory),
 			offline.NextFitDecreasing(mrFactory),
 			offline.FirstFitDecreasing(gFactory),
 			offline.BestFitDecreasing(gFactory),
+			offline.FirstFitDecreasing(skyFactory),
 		)
 		result, err = p.PackAll(items)
 		bestPacker = p.Winner()
-	default: // ff, maxrects, guillotine
+	default: // ff, maxrects, guillotine, skyline
 		p := online.FirstFit(factory)
 		for _, it := range items {
 			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
@@ -1036,11 +1087,16 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 func pack3D(req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	// Bottom → hard support gate; SideX/SideY → contact-maximizing placement.
+	// Deepest-bottom-left-fill is its own placement strategy; everything else uses
+	// extreme-point with the contact spec (Bottom → hard support gate, SideX/SideY
+	// → contact-maximizing placement).
 	stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
 	})
+	if req.Algorithm == "dblf" {
+		stratFn = d3.NewDeepBottomLeftStrategy
+	}
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
@@ -1105,14 +1161,16 @@ func pack3D(req PackRequest) (PackResponse, error) {
 		}
 		result = p.Result()
 	case "auto":
+		dblfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewDeepBottomLeftStrategy), req.Constraints)
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
 			offline.BestFitDecreasing(factory),
 			offline.NextFitDecreasing(factory),
+			offline.FirstFitDecreasing(dblfFactory),
 		)
 		result, err = p.PackAll(items)
 		bestPacker = p.Winner()
-	default: // ff
+	default: // ff, dblf
 		p := online.FirstFit(factory)
 		for _, it := range items {
 			if _, e := p.Pack(it); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {

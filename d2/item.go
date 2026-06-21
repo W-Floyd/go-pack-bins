@@ -20,6 +20,10 @@ func (i *Item2D) ID() string      { return i.id }
 func (i *Item2D) Volume() float64 { return i.W * i.H }
 func (i *Item2D) Dimensions() int { return 2 }
 
+// PackHeight reports the item's natural height, used by height-ordered offline
+// packers (offline.DecreasingHeight → the shelf NFDH/FFDH/BFDH algorithms).
+func (i *Item2D) PackHeight() float64 { return i.H }
+
 // WithScalar attaches a named scalar value to the item and returns the item
 // for chaining: d2.NewItem("box", 30, 40, false).WithScalar("weight", 2.5)
 func (i *Item2D) WithScalar(name string, value float64) *Item2D {
