@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/W-Floyd/go-pack-bins/d1"
 	"github.com/W-Floyd/go-pack-bins/d2"
@@ -169,6 +170,10 @@ type streamFrame struct {
 	Type       string            `json:"type"`
 	Streaming  bool              `json:"streaming,omitempty"` // meta: genuine mid-solve emission?
 	Count      int               `json:"count,omitempty"`     // meta: item count
+	Multi      bool              `json:"multi,omitempty"`     // meta: segmented multi-candidate race (auto)
+	Segments   []string          `json:"segments,omitempty"`  // meta: candidate labels, one per segment
+	Seg        int               `json:"seg,omitempty"`       // batch: segment this batch belongs to (0 default)
+	WinnerSeg  *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
 	BinsUsed   int               `json:"bins_used,omitempty"` // done
 	BestPacker string            `json:"best_packer,omitempty"`
 	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"`
@@ -231,6 +236,14 @@ func handlePackStream(w http.ResponseWriter, r *http.Request) {
 		if len(buf) >= streamBatch {
 			flushBatch()
 		}
+	}
+
+	// Auto: race every candidate at once into its own segment, each streaming its
+	// own genuine solve, then collapse to the winner. Skipped when a relocating
+	// post-pass is active (then there is no honest partial state to show).
+	if cands := autoCandidates(req); cands != nil {
+		streamAuto(send, req, cands)
+		return
 	}
 
 	streaming := isStreamable(req)
@@ -482,6 +495,213 @@ func buildStreamPacker(req PackRequest, factory pack.BinFactory) (pack.Observabl
 	default: // "", "ff", 2-D "maxrects"
 		return online1(online.FirstFit(factory))
 	}
+}
+
+// ─── auto: segmented multi-candidate race ──────────────────────────────────────
+
+// candidate is one packer in an auto race. obs is non-nil when the packer can
+// stream each placement as it commits (FFD/BFD/NFD/WFD); otherwise (KK, MFFD,
+// guillotine wrappers we treat opaquely) run produces the full result and its
+// placements are emitted at the end. Each candidate owns its factory and a fresh
+// items slice so the candidates can run concurrently with no shared state.
+type candidate struct {
+	label string
+	obs   pack.Observable
+	run   func() (pack.Result, error)
+}
+
+// autoCandidates returns the BestOf candidate set for req, mirroring the auto
+// branch of pack1D/2D/3D, or nil if a segmented race does not apply: not "auto",
+// a balancing post-pass is active (auto + preferences → BalancedFit, not BestOf),
+// or lateral compaction would relocate committed items.
+func autoCandidates(req PackRequest) []candidate {
+	if req.Algorithm != "auto" {
+		return nil
+	}
+	if prefs, _ := buildPreferences(req.Preferences); len(prefs) > 0 {
+		return nil
+	}
+	if _, _, any := req.Contact.lateralAxes(); any {
+		return nil
+	}
+
+	wrap := func(label string, w *offline.Wrapper, items []pack.Item) candidate {
+		return candidate{label: label, obs: w, run: func() (pack.Result, error) { return w.PackAll(items) }}
+	}
+	switch req.Mode {
+	case "1d":
+		cap := req.Bin.Width
+		f := func() pack.BinFactory { return constrainedFactory(d1.NewFactory(cap), req.Constraints) }
+		return []candidate{
+			wrap("FFD", offline.FirstFitDecreasing(f()), items1D(req)),
+			wrap("BFD", offline.BestFitDecreasing(f()), items1D(req)),
+			wrap("WFD", offline.WorstFitDecreasing(f()), items1D(req)),
+			{label: "MFFD", run: func() (pack.Result, error) {
+				return offline.ModifiedFirstFitDecreasing(cap, f()).PackAll(items1D(req))
+			}},
+			{label: "KK", run: func() (pack.Result, error) {
+				return offline.KarmarkarKarp(items1D(req), cap, d1.NewFactory(cap))
+			}},
+		}
+	case "2d":
+		mr := func() pack.BinFactory {
+			return constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewMaxRectsDefault), req.Constraints)
+		}
+		g := func() pack.BinFactory {
+			return constrainedFactory(d2.NewFactory(req.Bin.Width, req.Bin.Height, d2.NewGuillotineDefault), req.Constraints)
+		}
+		return []candidate{
+			wrap("FFD", offline.FirstFitDecreasing(mr()), items2D(req)),
+			wrap("BFD", offline.BestFitDecreasing(mr()), items2D(req)),
+			wrap("NFD", offline.NextFitDecreasing(mr()), items2D(req)),
+			wrap("FFD·guillotine", offline.FirstFitDecreasing(g()), items2D(req)),
+			wrap("BFD·guillotine", offline.BestFitDecreasing(g()), items2D(req)),
+		}
+	case "3d":
+		f := func() pack.BinFactory {
+			stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
+			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
+		}
+		return []candidate{
+			wrap("FFD", offline.FirstFitDecreasing(f()), items3D(req)),
+			wrap("BFD", offline.BestFitDecreasing(f()), items3D(req)),
+			wrap("NFD", offline.NextFitDecreasing(f()), items3D(req)),
+		}
+	}
+	return nil
+}
+
+// items1D/2D/3D build a fresh items slice for one candidate (so concurrent
+// candidates never share an item slice that a packer might sort in place).
+func items1D(req PackRequest) []pack.Item {
+	out := make([]pack.Item, 0, len(req.Items))
+	for _, s := range req.Items {
+		it := d1.NewItem(s.ID, s.Width)
+		for k, v := range s.Scalars {
+			it.WithScalar(k, v)
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+func items2D(req PackRequest) []pack.Item {
+	out := make([]pack.Item, 0, len(req.Items))
+	for _, s := range req.Items {
+		it := d2.NewItem(s.ID, s.Width, s.Height, s.AllowRotate)
+		for k, v := range s.Scalars {
+			it.WithScalar(k, v)
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+func items3D(req PackRequest) []pack.Item {
+	out := make([]pack.Item, 0, len(req.Items))
+	for _, s := range req.Items {
+		it := d3.NewItem(s.ID, s.Width, s.Depth, s.Height, s.AllowRotate)
+		for k, v := range s.Scalars {
+			it.WithScalar(k, v)
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// streamAuto runs every candidate concurrently, interleaving their genuine
+// per-commit placement streams into per-segment batches, then sends a done frame
+// naming the winning segment (fewest bins, ties by fewest unplaced — matching
+// meta.BestOf). Candidates that cannot stream emit their placements once solved.
+func streamAuto(send func(streamFrame), req PackRequest, cands []candidate) {
+	labels := make([]string, len(cands))
+	for i, c := range cands {
+		labels[i] = c.label
+	}
+	send(streamFrame{Type: "meta", Count: len(req.Items), Streaming: true, Multi: true, Segments: labels})
+
+	type segBatch struct {
+		seg int
+		pls []PlacementResult
+	}
+	ch := make(chan segBatch, 64)
+	results := make([]pack.Result, len(cands))
+	errs := make([]error, len(cands))
+
+	var wg sync.WaitGroup
+	for i, c := range cands {
+		wg.Add(1)
+		go func(i int, c candidate) {
+			defer wg.Done()
+			conv := &placeConv{mode: req.Mode, binIdx: map[string]int{}, offsets: map[string]float64{},
+				sizeByID: map[string]float64{}, binW: req.Bin.Width}
+			for _, s := range req.Items {
+				conv.sizeByID[s.ID] = s.Width
+			}
+			var buf []PlacementResult
+			flush := func() {
+				if len(buf) > 0 {
+					ch <- segBatch{seg: i, pls: buf}
+					buf = nil
+				}
+			}
+			emit := func(p pack.Placement) {
+				if pr, ok := conv.conv(p); ok {
+					buf = append(buf, pr)
+					if len(buf) >= streamBatch {
+						flush()
+					}
+				}
+			}
+			if c.obs != nil {
+				c.obs.Observe(emit)
+				results[i], errs[i] = c.run()
+			} else {
+				results[i], errs[i] = c.run()
+				for _, p := range results[i].Placements {
+					if p != nil {
+						emit(p)
+					}
+				}
+			}
+			flush()
+		}(i, c)
+	}
+	go func() { wg.Wait(); close(ch) }()
+
+	for sb := range ch {
+		send(streamFrame{Type: "batch", Seg: sb.seg, Placements: sb.pls})
+	}
+
+	// Winner: fewest bins, ties by fewest unplaced, over candidates that did not
+	// fail with a non-ErrItemTooLarge error (mirrors meta.BestOfPacker.PackAll).
+	winner := -1
+	for i := range cands {
+		if errs[i] != nil && !errors.Is(errs[i], pack.ErrItemTooLarge) {
+			continue
+		}
+		if winner < 0 || isBetterResult(results[i], results[winner]) {
+			winner = i
+		}
+	}
+	done := streamFrame{Type: "done"}
+	if winner >= 0 {
+		w := winner
+		done.WinnerSeg = &w
+		done.BinsUsed = results[winner].BinsUsed()
+		done.BestPacker = cands[winner].label
+		done.Unplaced = results[winner].Unplaced
+		done.ItemErrors = placementErrors(results[winner].PlacementErrors)
+	}
+	send(done)
+}
+
+// isBetterResult is meta.isBetter: fewer bins wins; ties break on fewer unplaced.
+func isBetterResult(a, b pack.Result) bool {
+	if a.BinsUsed() != b.BinsUsed() {
+		return a.BinsUsed() < b.BinsUsed()
+	}
+	return len(a.Unplaced) < len(b.Unplaced)
 }
 
 // ─── 1-D ─────────────────────────────────────────────────────────────────────

@@ -294,6 +294,41 @@
     gap: 8px;
     color: var(--muted);
   }
+  /* ── auto race grid: one segment per candidate ── */
+  #race-grid {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+    box-sizing: border-box;
+  }
+  .race-cell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #2a2d3a;
+    border-radius: 6px;
+    overflow: hidden;
+    min-height: 0;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .race-cell-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 4px 8px;
+    font-size: 11px;
+    background: #14161d;
+    border-bottom: 1px solid #2a2d3a;
+  }
+  .race-cell-head .algo { font-family: var(--mono); color: var(--fg); }
+  .race-cell-head .count { color: var(--muted); }
+  .race-cell canvas { flex: 1; min-height: 0; display: block; width: 100%; }
+  .race-cell.winner { border-color: #4ade80; box-shadow: 0 0 0 1px #4ade80 inset; }
+  .race-cell.winner .race-cell-head { background: #133021; }
+  .race-cell.winner .algo::after { content: ' ✓ best'; color: #4ade80; }
+  .race-cell.dimmed { opacity: 0.45; }
   .empty-state .icon { font-size: 40px; }
   .empty-state p { font-size: 13px; }
   /* ── error / warn toasts ── */
@@ -624,6 +659,7 @@
       <canvas id="canvas-2d"></canvas>
       <canvas id="canvas-3d"></canvas>
       <div id="labels-3d"></div>
+      <div id="race-grid" style="display:none"></div>
       <div class="empty-state" id="empty-state">
         <div class="icon">📦</div>
         <p>Add items and click Pack to visualise</p>
@@ -1495,9 +1531,10 @@ async function runSinglePack(auto = false) {
   // For non-incremental algorithms the whole result arrives at once and draws in
   // one shot. The 3-D scene grows its containers as new bin indices appear, since
   // the final bin count is not known until the solve completes.
+  teardownRaceGrid(); // clear any prior auto-race grid
   const data = { bins_used: 0, placements: [], unplaced: [], item_errors: {}, free_rects: undefined, best_packer: '' };
   const is3D = (mode === '3d');
-  let count = 0, ctl = null, lastStats = 0;
+  let count = 0, ctl = null, lastStats = 0, multi = false;
 
   const liveStats = () => {
     document.getElementById('stat-placed').textContent = data.placements.length;
@@ -1562,17 +1599,30 @@ async function runSinglePack(auto = false) {
           return;
         } else if (f.type === 'meta') {
           count = f.count || 0;
-          renderShell(data, mode, body.bin, 0);
-          if (is3D) ctl = beginScene3D(body.bin, 1, count);
+          multi = !!f.multi;
+          if (multi) {
+            document.getElementById('empty-state').style.display = 'none';
+            document.getElementById('stat-bins').textContent = '…';
+            document.getElementById('stat-placed').textContent = '…';
+            document.getElementById('stat-best-wrap').style.display = 'none';
+            buildRaceGrid(f.segments || [], mode, body.bin, count);
+          } else {
+            renderShell(data, mode, body.bin, 0);
+            if (is3D) ctl = beginScene3D(body.bin, 1, count);
+          }
         } else if (f.type === 'batch') {
-          drawBatch(f.placements || []);
+          if (multi) raceDrawBatch(f.seg || 0, f.placements || [], mode, body.bin);
+          else drawBatch(f.placements || []);
         } else if (f.type === 'done') {
-          data.bins_used = f.bins_used || data.bins_used;
-          data.best_packer = f.best_packer || '';
-          data.free_rects = f.free_rects;
-          data.item_errors = f.item_errors || {};
-          data.unplaced = f.unplaced || [];
-          finish();
+          if (multi) { finishRace(f, mode, body.bin, auto); }
+          else {
+            data.bins_used = f.bins_used || data.bins_used;
+            data.best_packer = f.best_packer || '';
+            data.free_rects = f.free_rects;
+            data.item_errors = f.item_errors || {};
+            data.unplaced = f.unplaced || [];
+            finish();
+          }
         }
       }
     }
@@ -2200,6 +2250,12 @@ function draw2D(data, mode, bin) {
   const parent = canvas.parentElement;
   canvas.width = parent.clientWidth;
   canvas.height = parent.clientHeight;
+  paint2D(canvas, data, mode, bin);
+}
+
+// paint2D draws a 2-D/1-D packing into any sized canvas (the main viewport or a
+// race-grid cell). The caller sizes the canvas first.
+function paint2D(canvas, data, mode, bin) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -2537,8 +2593,159 @@ function draw3D(data, bin) {
   ctl.render();
 }
 
+// ── auto race grid: one mini-view per candidate ───────────────────────────────
+// makePanelScene3D is a self-contained, simplified 3-D renderer for a race-grid
+// cell: its own renderer/scene/camera (no globals), a fixed camera angle, no
+// orbit/labels/occlusion (too costly across many panels). Containers grow as bin
+// indices appear, mirroring the main view.
+function makePanelScene3D(canvas, bin, count) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setClearColor(0x0f1117);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.8); dl.position.set(1, 3, 2); scene.add(dl);
+
+  const toThree = (ax, ay, az) => [ax, az, ay];
+  const gap = bin.width * 0.4, stride = bin.width + gap;
+  const cy = bin.height / 2, cz = bin.depth / 2;
+  let builtBins = 0, cx = bin.width / 2, maxDim = Math.max(bin.width, bin.depth, bin.height);
+
+  function ensureBins(n) {
+    if (n <= builtBins) return;
+    for (let b = builtBins; b < n; b++) {
+      const offX = b * stride;
+      const ln = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(bin.width, bin.height, bin.depth)),
+        new THREE.LineBasicMaterial({ color: 0x2a2d3a }));
+      ln.position.set(offX + bin.width/2, bin.height/2, bin.depth/2);
+      scene.add(ln);
+    }
+    builtBins = n;
+    const totalW = stride * builtBins - gap;
+    cx = totalW / 2;
+    maxDim = Math.max(totalW, bin.depth, bin.height);
+  }
+  function addItems(pls) {
+    let mx = builtBins - 1;
+    for (const p of pls) if (p.bin_index > mx) mx = p.bin_index;
+    ensureBins(mx + 1);
+    for (const p of pls) {
+      const offX = p.bin_index * stride;
+      const idx = items.findIndex(it => it.id === p.item_id);
+      const hex = parseInt(itemColor(idx < 0 ? 0 : idx).replace('#',''), 16);
+      const geo = new THREE.BoxGeometry(p.w - 0.08, p.h - 0.08, p.d - 0.08);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: hex, transparent: true, opacity: 0.85 }));
+      const [tx, ty, tz] = toThree(p.x + p.w/2, p.y + p.d/2, p.z + p.h/2);
+      mesh.position.set(offX + tx, ty, tz);
+      scene.add(mesh);
+    }
+  }
+  function render() {
+    const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    const dist = maxDim * 2.4, phi = 1.0, theta = 0.6;
+    camera.position.set(
+      cx + dist * Math.sin(phi) * Math.cos(theta),
+      cy + dist * Math.cos(phi),
+      cz + dist * Math.sin(phi) * Math.sin(theta));
+    camera.lookAt(cx, cy, cz);
+    renderer.render(scene, camera);
+  }
+  ensureBins(1);
+  return { addItems, render, dispose: () => renderer.dispose(), bins: () => builtBins };
+}
+
+let racePanels = null;
+
+// buildRaceGrid lays out one cell per candidate, hides the main canvases, and
+// returns the per-segment panel state used while the race streams.
+function buildRaceGrid(labels, mode, bin, count) {
+  teardownRaceGrid();
+  const grid = document.getElementById('race-grid');
+  const n = labels.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  grid.style.gridTemplateRows = `repeat(${Math.ceil(n / cols)}, 1fr)`;
+  grid.style.display = 'grid';
+  document.getElementById('canvas-2d').style.display = 'none';
+  document.getElementById('canvas-3d').style.display = 'none';
+  document.getElementById('labels-3d').innerHTML = '';
+  document.getElementById('empty-state').style.display = 'none';
+
+  const is3D = mode === '3d';
+  racePanels = labels.map((label, i) => {
+    const cell = document.createElement('div'); cell.className = 'race-cell';
+    const head = document.createElement('div'); head.className = 'race-cell-head';
+    const a = document.createElement('span'); a.className = 'algo'; a.textContent = label;
+    const c = document.createElement('span'); c.className = 'count'; c.textContent = '0 bins';
+    head.append(a, c); cell.appendChild(head);
+    const cv = document.createElement('canvas'); cell.appendChild(cv);
+    grid.appendChild(cell);
+    return { seg: i, label, cellEl: cell, countEl: c, canvas: cv, ctl: null, is3D,
+             data: { bins_used: 0, placements: [], free_rects: undefined } };
+  });
+  // Renderers are created after the cells are in the DOM so the canvases have a size.
+  if (is3D) for (const p of racePanels) p.ctl = makePanelScene3D(p.canvas, bin, count);
+  return racePanels;
+}
+
+function teardownRaceGrid() {
+  if (racePanels) {
+    for (const p of racePanels) if (p.ctl) p.ctl.dispose();
+    racePanels = null;
+  }
+  const grid = document.getElementById('race-grid');
+  grid.style.display = 'none';
+  grid.innerHTML = '';
+}
+
+// raceDrawBatch renders a freshly-arrived batch into its candidate's cell.
+function raceDrawBatch(seg, placements, mode, bin) {
+  const p = racePanels && racePanels[seg];
+  if (!p || !placements.length) return;
+  for (const pl of placements) p.data.placements.push(pl);
+  let mx = p.data.bins_used - 1;
+  for (const pl of placements) if (pl.bin_index > mx) mx = pl.bin_index;
+  p.data.bins_used = mx + 1;
+  if (p.is3D) {
+    if (p.ctl) { p.ctl.addItems(placements); p.ctl.render(); }
+  } else {
+    p.canvas.width = p.canvas.clientWidth;
+    p.canvas.height = p.canvas.clientHeight;
+    paint2D(p.canvas, p.data, mode, bin);
+  }
+  p.countEl.textContent = `${p.data.bins_used} bins · ${p.data.placements.length}`;
+}
+
+// finishRace collapses the grid to the winning candidate, shown in the main
+// viewport (the "Best:" stat names the winner). winner_seg follows meta.BestOf:
+// fewest bins, ties by fewest unplaced.
+function finishRace(f, mode, bin, auto) {
+  const winner = (f.winner_seg != null) ? f.winner_seg : -1;
+  const wp = (racePanels && winner >= 0) ? racePanels[winner] : null;
+  const data = wp ? wp.data : { bins_used: 0, placements: [], free_rects: undefined };
+  data.bins_used = f.bins_used || data.bins_used;
+  data.best_packer = f.best_packer || '';
+  data.unplaced = f.unplaced || [];
+  data.item_errors = f.item_errors || {};
+  teardownRaceGrid();
+  lastResult = { data, mode, bin };
+  renderResult(lastResult);
+  if (!auto) {
+    const msgs = Object.values(data.item_errors || {});
+    if (msgs.length > 0) showWarn(msgs[0]);
+    else if ((data.unplaced || []).length > 0)
+      showWarn(`${data.unplaced.length} item(s) could not be placed`);
+  }
+  endPackIndicator();
+}
+
 // ── misc ──────────────────────────────────────────────────────────────────────
 function clearViz() {
+  teardownRaceGrid();
   lastResult = null;
   activeBin = 0;
   document.getElementById('stat-bins').textContent = '—';
