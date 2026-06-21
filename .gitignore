@@ -1,3 +1,4 @@
 /webdemo
 *.exe
 cmd/webdemo/webdemo
+/dist/
