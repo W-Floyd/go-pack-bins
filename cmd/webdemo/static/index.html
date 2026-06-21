@@ -410,6 +410,11 @@
     color: var(--accent);
   }
   .stats-table tbody tr:last-child td { border-bottom: none; }
+  /* per-bin table can have more columns than the 270px panel is wide → scroll it
+     horizontally rather than overflowing the panel. */
+  .stats-scroll { overflow-x: auto; }
+  .stats-scroll::-webkit-scrollbar { height: 6px; }
+  .stats-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   /* ── legend ── */
   .legend {
     display: flex;
@@ -1785,7 +1790,20 @@ function fmtStat(x) {
   const r = Math.round(x * 100) / 100;
   return Number.isInteger(r) ? String(r) : r.toFixed(2);
 }
+// metricCols returns the metric columns for the current mode: each has a name
+// and a fn mapping one container (array of item objects) to that metric's total.
+// Shared by the aggregate and per-bin tables so they never drift apart.
+function metricCols(mode) {
+  const cols = [
+    { name: 'items', fn: c => c.length },
+    { name: 'volume', fn: c => c.reduce((s, it) => s + volumeOf(it, mode), 0) },
+  ];
+  for (const k of scalarKeys()) cols.push({ name: k, fn: c => c.reduce((s, it) => s + ((it.scalars || {})[k] || 0), 0) });
+  return cols;
+}
+
 // containers: array of arrays of item objects (one per bin/carton/pallet).
+// Aggregate view: one row per metric, columns sum / avg / σ across containers.
 function statsTableHTML(label, containers, mode, extraRows) {
   const n = containers.length;
   const fromVals = (name, vals) => {
@@ -1794,15 +1812,36 @@ function statsTableHTML(label, containers, mode, extraRows) {
     const variance = n ? vals.reduce((a, v) => a + (v - avg) ** 2, 0) / n : 0;
     return `<tr><td>${name}</td><td>${fmtStat(sum)}</td><td>${fmtStat(avg)}</td><td>${fmtStat(Math.sqrt(variance))}</td></tr>`;
   };
-  const row = (name, valueFn) => fromVals(name, containers.map(c => c.reduce((s, it) => s + valueFn(it), 0)));
-  let body = row('items', () => 1) + row('volume', it => volumeOf(it, mode));
-  for (const k of scalarKeys()) body += row(k, it => (it.scalars || {})[k] || 0);
+  let body = metricCols(mode).map(col => fromVals(col.name, containers.map(col.fn))).join('');
   for (const e of (extraRows || [])) body += fromVals(e.name, e.vals);
   return `<div class="stats-group-label">${label}</div>
     <table class="stats-table">
       <thead><tr><th>metric</th><th>sum</th><th>avg</th><th>σ</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
+}
+
+// Per-bin view: one row per container, one column per metric (plus any extra
+// per-bin values such as slosh). Lets you scan a single metric down the bins to
+// see how evenly it is spread — the same data the aggregate σ summarises.
+function perBinTableHTML(label, containers, mode, extraRows) {
+  const n = containers.length;
+  if (!n) return '';
+  const cols = metricCols(mode);
+  const extras = extraRows || []; // [{ name, vals: number[] (one per bin) }]
+  const head = '<th>bin</th>' + cols.map(c => `<th>${c.name}</th>`).join('') +
+    extras.map(e => `<th>${e.name}</th>`).join('');
+  let rows = '';
+  for (let i = 0; i < n; i++) {
+    rows += `<tr><td>${i}</td>` +
+      cols.map(c => `<td>${fmtStat(c.fn(containers[i]))}</td>`).join('') +
+      extras.map(e => `<td>${fmtStat(e.vals[i])}</td>`).join('') + '</tr>';
+  }
+  return `<div class="stats-group-label">${label} · per bin</div>
+    <div class="stats-scroll"><table class="stats-table">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
 }
 
 // ── slosh: total lateral free play (room to slide in x/y) of a container's
@@ -1847,7 +1886,8 @@ function renderStats(data, mode, bin) {
   }
   const extra = mode === '1d' ? null : [{ name: 'slosh', vals: sloshByBin(data.placements, n, mode, bin) }];
   const el = document.getElementById('stats-body');
-  el.innerHTML = n ? statsTableHTML(`Bins (${n})`, bins, mode, extra)
+  el.innerHTML = n ? statsTableHTML(`Bins (${n})`, bins, mode, extra) +
+                     perBinTableHTML(`Bins (${n})`, bins, mode, extra)
                    : '<p class="stats-empty">No bins.</p>';
 }
 function renderStatsNested(data, mode, innerBin, outerBin) {
@@ -1868,10 +1908,16 @@ function renderStatsNested(data, mode, innerBin, outerBin) {
   }
   const lat = mode !== '1d';
   let html = '';
-  if (nC) html += statsTableHTML(`Cartons (${nC})`, cartons, mode,
-    lat ? [{ name: 'slosh', vals: sloshByBin(l0.placements, nC, mode, innerBin) }] : null);
-  if (nP) html += statsTableHTML(`Pallets (${nP})`, pallets, mode,
-    lat ? [{ name: 'slosh', vals: sloshByBin(l1.placements, nP, mode, outerBin) }] : null);
+  if (nC) {
+    const ex = lat ? [{ name: 'slosh', vals: sloshByBin(l0.placements, nC, mode, innerBin) }] : null;
+    html += statsTableHTML(`Cartons (${nC})`, cartons, mode, ex) +
+            perBinTableHTML(`Cartons (${nC})`, cartons, mode, ex);
+  }
+  if (nP) {
+    const ex = lat ? [{ name: 'slosh', vals: sloshByBin(l1.placements, nP, mode, outerBin) }] : null;
+    html += statsTableHTML(`Pallets (${nP})`, pallets, mode, ex) +
+            perBinTableHTML(`Pallets (${nP})`, pallets, mode, ex);
+  }
   document.getElementById('stats-body').innerHTML = html || '<p class="stats-empty">No containers.</p>';
 }
 
