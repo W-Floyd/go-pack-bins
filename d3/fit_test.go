@@ -36,6 +36,62 @@ func TestFit_TilesPerfectly(t *testing.T) {
 	}
 }
 
+// Gravity: every placed box must rest on the floor or on the top of another
+// box — the contact criterion must never float a box high against a wall or the
+// ceiling. This mix produces overhanging maximal spaces that the old, ungated
+// fitness scoring would climb into.
+func TestFit_RespectsGravity(t *testing.T) {
+	dims := [][3]float64{{6, 4, 4}, {2, 4, 4}, {5, 4, 3}, {2, 3, 5}, {3, 5, 5}, {2, 6, 3}}
+	ps := place3(t, d3.NewFitStrategy(10, 10, 10), 10, 10, 10, false, dims)
+	if len(ps) == 0 {
+		t.Fatal("nothing placed")
+	}
+	const eps = 1e-6
+	for _, p := range ps {
+		if p.Z <= eps {
+			continue // on the floor
+		}
+		supported := false
+		for _, q := range ps {
+			if q == p {
+				continue
+			}
+			if absf(q.Z+q.H-p.Z) > eps {
+				continue // q's top is not at p's bottom
+			}
+			ox := overlap(p.X, p.X+p.W, q.X, q.X+q.W)
+			oy := overlap(p.Y, p.Y+p.D, q.Y, q.Y+q.D)
+			if ox > eps && oy > eps {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			t.Errorf("box at (%v,%v,%v) %vx%vx%v floats: no floor or box beneath it", p.X, p.Y, p.Z, p.W, p.D, p.H)
+		}
+	}
+	assertNoOverlap(t, ps, 10, 10, 10)
+}
+
+func absf(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func overlap(a0, a1, b0, b1 float64) float64 {
+	lo := a0
+	if b0 > lo {
+		lo = b0
+	}
+	hi := a1
+	if b1 < hi {
+		hi = b1
+	}
+	return hi - lo
+}
+
 // The contact criterion should wedge a second equal box flush against the first
 // (sharing a face) rather than leaving a gap.
 func TestFit_WedgesAgainstNeighbour(t *testing.T) {
