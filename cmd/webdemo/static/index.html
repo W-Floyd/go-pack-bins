@@ -935,6 +935,7 @@ const ALGOS = {
     {v:'assemble',l:'Assemble blocks → EMS (streams)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
     {v:'ems', l:'Empty Maximal Space (EMS)'},
+    {v:'fit', l:'Fitness best-fit (max contact)'},
     {v:'heightmap', l:'Heightmap / skyline'},
     {v:'nf',  l:'Next Fit'},
     {v:'bf',  l:'Best Fit'},
@@ -945,6 +946,7 @@ const ALGOS = {
     {v:'brute',l:'Brute-force order (small N)'},
     {v:'beam', l:'Beam search'},
     {v:'rr',   l:'Ruin & recreate'},
+    {v:'arr',  l:'Adaptive ruin & recreate'},
     {v:'grasp',l:'GRASP'},
     {v:'gbpp', l:'GBPP (optional items + profit)'},
     {v:'lex',  l:'Lexicographic objectives'},
@@ -1416,6 +1418,7 @@ const ALGO_TUNABLES = {
   beam:  [ { key: 'beam_width', label: 'Beam width', def: 6 }, { key: 'beam_branch', label: 'Branch', def: 4 }, { key: 'beam_max_items', label: 'Max items', def: 200 } ],
   brute: [ { key: 'brute_max_items', label: 'Max items (n!)', def: 8 } ],
   rr:    [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
+  arr:   [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
   grasp: [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_restarts', label: 'Restarts', def: 16 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
   bf:    REFINE_KNOBS,
   wf:    REFINE_KNOBS,
@@ -1430,19 +1433,43 @@ function algoPanelIds(which) {
     : { field: 'algo-tuning-field', inputs: 'algo-tuning-inputs' };
 }
 
+// The order-search metaheuristics decode item orderings through a 3-D
+// constructive strategy; the decoder bounds their quality (see packapi
+// searchDecoder3D). Exposed only in 3-D for beam/rr/arr/grasp.
+const SEARCH_DECODER_ALGOS = new Set(['beam', 'rr', 'arr', 'grasp']);
+const SEARCH_DECODERS = [
+  { v: '', l: 'EMS (default, tight)' },
+  { v: 'fit', l: 'Fitness best-fit' },
+  { v: 'blf', l: 'Bottom-Left Fill' },
+  { v: 'heightmap', l: 'Heightmap' },
+  { v: 'extreme', l: 'Extreme-point (fast)' },
+];
+
 function renderAlgoTuning(algo, which) {
   const ids = algoPanelIds(which);
   const field = document.getElementById(ids.field);
   const host = document.getElementById(ids.inputs);
   if (!field || !host) return;
   const knobs = ALGO_TUNABLES[algo];
-  if (!knobs) { field.style.display = 'none'; host.innerHTML = ''; return; }
+  // The decoder selector applies to the 3-D outer panel's search algorithms only.
+  const wantDecoder = which !== 'inner' &&
+    document.getElementById('mode')?.value === '3d' && SEARCH_DECODER_ALGOS.has(algo);
+  if (!knobs && !wantDecoder) { field.style.display = 'none'; host.innerHTML = ''; return; }
   field.style.display = '';
-  host.innerHTML = knobs.map(k =>
+  let html = (knobs || []).map(k =>
     `<div class="field" style="max-width:130px">
        <label style="font-size:11px">${k.label}</label>
        <input type="number" class="algo-tune" data-key="${k.key}" min="1" step="1" placeholder="${k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
      </div>`).join('');
+  if (wantDecoder) {
+    html += `<div class="field" style="max-width:160px">
+       <label style="font-size:11px">Decoder (placement)</label>
+       <select id="algo-decoder" style="font-size:12px" onchange="scheduleAutoPack()">
+         ${SEARCH_DECODERS.map(d => `<option value="${d.v}">${d.l}</option>`).join('')}
+       </select>
+     </div>`;
+  }
+  host.innerHTML = html;
 }
 
 // Collect filled-in tuning inputs for a panel into an algorithm_options object
@@ -2404,6 +2431,8 @@ async function runSinglePack(auto = false) {
   if (algo === 'lex') body.lex_objectives = lexObjectives.slice();
   const algoOpts = collectAlgoOptions('outer');
   if (algoOpts) body.algorithm_options = algoOpts;
+  const decoderEl = document.getElementById('algo-decoder');
+  if (decoderEl && decoderEl.value) body.decoder = decoderEl.value;
 
   // Stream the solve as NDJSON and render each batch the moment it arrives. For
   // incremental algorithms the server flushes placements mid-solve, so the pack

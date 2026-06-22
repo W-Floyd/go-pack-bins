@@ -28,6 +28,9 @@ func TestSearchesNoWorseThanFFD(t *testing.T) {
 		"RuinRecreate": func() pack.Result {
 			return offline.RuinRecreate(context.Background(), items, d1.NewFactory(cap), offline.SearchOptions{MaxIters: 300})
 		},
+		"AdaptiveRuinRecreate": func() pack.Result {
+			return offline.AdaptiveRuinRecreate(context.Background(), items, d1.NewFactory(cap), offline.SearchOptions{MaxIters: 300})
+		},
 		"GRASP": func() pack.Result {
 			return offline.GRASP(context.Background(), items, d1.NewFactory(cap), offline.SearchOptions{MaxIters: 300})
 		},

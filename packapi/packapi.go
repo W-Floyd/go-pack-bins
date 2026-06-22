@@ -473,6 +473,11 @@ type PackRequest struct {
 	//   search_max_iters, search_restarts, search_seed   (algorithms "rr", "grasp")
 	//   refine_max_items, refine_eval_budget             (balancing algorithms)
 	AlgorithmOptions map[string]float64 `json:"algorithm_options,omitempty"`
+	// Decoder selects the 3-D placement strategy that the order-search
+	// metaheuristics (beam / rr / grasp) decode candidate orderings through.
+	// Empty defaults to the maximal-space EMS packer; "fit", "blf", "heightmap"
+	// and "extreme" are also accepted. Ignored for other algorithms/modes.
+	Decoder string `json:"decoder,omitempty"`
 }
 
 // Clamp ceilings for AlgorithmOptions. These bound how far a UI knob can push a
@@ -895,7 +900,7 @@ func isStreamable(req PackRequest) bool {
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "blf", "ems", "heightmap", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "blf", "ems", "fit", "heightmap", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -1494,6 +1499,8 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
 	case "rr":
 		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
+	case "arr":
+		result = offline.AdaptiveRuinRecreate(ctx, items, factory, req.searchOptions(ctx))
 	case "grasp":
 		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
 	case "auto":
@@ -1671,6 +1678,8 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
 	case "rr":
 		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
+	case "arr":
+		result = offline.AdaptiveRuinRecreate(ctx, items, factory, req.searchOptions(ctx))
 	case "grasp":
 		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
 	case "auto":
@@ -1766,10 +1775,34 @@ func strat3DFor(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.Place
 		return d3.NewEMSStrategyContact(spec)
 	case "heightmap":
 		return d3.NewHeightmapStrategyContact(spec)
+	case "fit":
+		return d3.NewFitStrategyContact(spec)
 	case "layer":
 		return d3.NewLayerStackStrategy
 	default:
 		return d3.NewExtremePointStrategyContact(spec)
+	}
+}
+
+// searchDecoder3D selects the placement strategy that a 3-D order-search
+// metaheuristic (beam / ruin-recreate / GRASP) decodes each candidate item
+// ordering through. These solvers only search *orderings*, so the decoder's
+// quality bounds theirs: decoding through the maximal-space EMS packer (the
+// default) reaches far tighter packings than the old extreme-point decoder at
+// near-identical search cost. req.Decoder overrides it ("ems", "fit", "blf",
+// "heightmap", "extreme").
+func searchDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
+	switch req.Decoder {
+	case "extreme", "ep":
+		return d3.NewExtremePointStrategyContact(spec)
+	case "blf":
+		return d3.NewBottomLeftFillStrategy
+	case "heightmap":
+		return d3.NewHeightmapStrategyContact(spec)
+	case "fit":
+		return d3.NewFitStrategyContact(spec)
+	default: // "", "ems"
+		return d3.NewEMSStrategyContact(spec)
 	}
 }
 
@@ -1851,15 +1884,25 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return buildResponse3D(result), nil
 	}
 
-	// Order-search metaheuristics (beam / ruin-recreate / GRASP): drop-in over the
-	// extreme-point factory; they manage their own search and ignore contact.
+	// Order-search metaheuristics (beam / ruin-recreate / GRASP): they search item
+	// orderings and decode each through a constructive strategy. Decode through the
+	// strong maximal-space packer (EMS by default, see searchDecoder3D) rather than
+	// the plain extreme-point factory, so the same search reaches tighter packings.
 	switch req.Algorithm {
-	case "beam":
-		return buildResponse3D(offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))), nil
-	case "rr":
-		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))), nil
-	case "grasp":
-		return buildResponse3D(offline.GRASP(ctx, items, factory, req.searchOptions(ctx))), nil
+	case "beam", "rr", "arr", "grasp":
+		dec := constrainedFactory(d3.NewFactory(bw, bd, bh, searchDecoder3D(req, d3.ContactSpec{
+			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
+		})), req.Constraints)
+		switch req.Algorithm {
+		case "beam":
+			return buildResponse3D(offline.BeamSearch(ctx, items, dec, req.beamOptions(ctx))), nil
+		case "rr":
+			return buildResponse3D(offline.RuinRecreate(ctx, items, dec, req.searchOptions(ctx))), nil
+		case "arr":
+			return buildResponse3D(offline.AdaptiveRuinRecreate(ctx, items, dec, req.searchOptions(ctx))), nil
+		case "grasp":
+			return buildResponse3D(offline.GRASP(ctx, items, dec, req.searchOptions(ctx))), nil
+		}
 	}
 
 	// GBPP: optional items (profit scalar) + bin cost, net-cost minimisation.
@@ -1935,16 +1978,28 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		p := offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(factory))
 		result, err = packAllCtx(ctx, p, items)
 	case "auto":
+		// Mirror autoCandidates (the streamed race) so Pack() and StreamPack() pick
+		// the same winner. Corner/maximal-space methods over the constrained factory
+		// honour constraints; the self-managed block/fusion/LAFF packers ignore the
+		// factory, so they only join when no constraints are set.
 		gateSpec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
-		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor("blf", gateSpec)), req.Constraints)
-		emsFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor("ems", gateSpec)), req.Constraints)
-		p := meta.BestOf(
+		stratF := func(algo string) pack.BinFactory {
+			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor(algo, gateSpec)), req.Constraints)
+		}
+		cands := []pack.OfflinePacker{
 			offline.FirstFitDecreasing(factory),
 			offline.BestFitDecreasing(factory),
 			offline.NextFitDecreasing(factory),
-			offline.FirstFitDecreasing(blfFactory),
-			offline.FirstFitDecreasing(emsFactory),
-		)
+			offline.FirstFitDecreasing(stratF("blf")),
+			offline.FirstFitDecreasing(stratF("ems")),
+			offline.FirstFitDecreasing(stratF("fit")),
+			offline.FirstFitDecreasing(stratF("heightmap")),
+			offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(stratF("layer"))),
+		}
+		if len(req.Constraints) == 0 {
+			cands = append(cands, d3.NewBlockPacker(bw, bd, bh), d3.NewAssembler(bw, bd, bh), d3.NewLAFFPacker(bw, bd, bh))
+		}
+		p := meta.BestOf(cands...)
 		result, err = packAllCtx(ctx, p, items)
 		bestPacker = p.Winner()
 	default: // ff, blf

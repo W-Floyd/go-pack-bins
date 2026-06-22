@@ -43,6 +43,9 @@ func (a *Assembler) PackAll(items []pack.Item) (pack.Result, error) {
 	return a.PackAllCtx(context.Background(), items)
 }
 
+// Name satisfies pack.OfflinePacker so the packer can join a meta.BestOf race.
+func (a *Assembler) Name() string { return "Assemble" }
+
 // psub is one real item inside a composite, at offset (dx,dy,dz) with size w×d×h.
 type psub struct {
 	id         string
