@@ -17,6 +17,7 @@ func main() {
 	http.HandleFunc("/api/pack", handlePack)
 	http.HandleFunc("/api/pack/stream", handlePackStream)
 	http.HandleFunc("/api/pack/nested", handleNestedPack)
+	http.HandleFunc("/api/voids", handleVoids)
 	log.Println("Listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }
@@ -100,4 +101,23 @@ func handleNestedPack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleVoids analyses an already-solved packing (bin + placements posted by the
+// client) for internal voids — empty space sealed off from every container wall.
+func handleVoids(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if cors(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req packapi.VoidRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(packapi.VoidResponse{Error: err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(packapi.Voids(req))
 }

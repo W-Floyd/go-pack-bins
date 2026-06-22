@@ -603,6 +603,77 @@ type PackResponse struct {
 	Rejected       []string `json:"rejected,omitempty"`
 }
 
+// ─── internal void inspection ─────────────────────────────────────────────────
+
+// VoidRequest asks for the internal voids of an already-solved packing: the
+// rendered bin dimensions plus the placements to analyse (per bin_index).
+type VoidRequest struct {
+	Bin        BinSpec           `json:"bin"`
+	Placements []PlacementResult `json:"placements"`
+}
+
+// VoidBoxResult is one enclosed empty cuboid, tagged with the bin it belongs to.
+// Coordinates match PlacementResult (X width, Y depth, Z height; W/H/D extents).
+type VoidBoxResult struct {
+	BinIndex int     `json:"bin_index"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Z        float64 `json:"z"`
+	W        float64 `json:"w"`
+	H        float64 `json:"h"`
+	D        float64 `json:"d"`
+}
+
+type VoidResponse struct {
+	Voids      []VoidBoxResult `json:"voids"`
+	VoidVolume float64         `json:"void_volume"` // total enclosed empty volume
+	BinVolume  float64         `json:"bin_volume"`  // bin volume × bins occupied
+	Error      string          `json:"error,omitempty"`
+}
+
+// Voids computes the internal voids (empty space sealed off from every container
+// wall) for each bin of a solved packing, using the exact 3-D analysis in d3.
+// It is transport-independent like the rest of packapi; the HTTP server and WASM
+// bridge call it on demand when the inspector toggle is on.
+func Voids(req VoidRequest) VoidResponse {
+	bin := req.Bin
+	if bin.Width <= 0 || bin.Depth <= 0 || bin.Height <= 0 {
+		return VoidResponse{Error: "void inspection needs a 3-D bin with positive dimensions"}
+	}
+	byBin := map[int][]d3.PlacedBox{}
+	for _, p := range req.Placements {
+		byBin[p.BinIndex] = append(byBin[p.BinIndex], d3.PlacedBox{
+			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
+		})
+	}
+	resp := VoidResponse{Voids: []VoidBoxResult{}}
+	for bi, boxes := range byBin {
+		for _, v := range d3.InternalVoids(bin.Width, bin.Depth, bin.Height, boxes) {
+			resp.Voids = append(resp.Voids, VoidBoxResult{
+				BinIndex: bi, X: v.X, Y: v.Y, Z: v.Z, W: v.W, H: v.H, D: v.D,
+			})
+			resp.VoidVolume += v.W * v.D * v.H
+		}
+	}
+	// Stable order so identical packings yield identical output (map iteration
+	// above is random).
+	sort.Slice(resp.Voids, func(a, b int) bool {
+		va, vb := resp.Voids[a], resp.Voids[b]
+		if va.BinIndex != vb.BinIndex {
+			return va.BinIndex < vb.BinIndex
+		}
+		if va.Z != vb.Z {
+			return va.Z < vb.Z
+		}
+		if va.Y != vb.Y {
+			return va.Y < vb.Y
+		}
+		return va.X < vb.X
+	})
+	resp.BinVolume = bin.Width * bin.Depth * bin.Height * float64(len(byBin))
+	return resp
+}
+
 // ─── streaming ──────────────────────────────────────────────────────────────
 
 // streamBatch is the placement-batch chunk size. Placements are emitted in
@@ -792,9 +863,9 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 //     (bc, kk), the multi-phase mffd, the self-managed harmonic/RFF variants, and
 //     2-D guillotine (its free-rect overlay is only meaningful when complete).
 func isStreamable(req PackRequest) bool {
-	// JointFit and the block packer commit each placement once, in final position,
-	// with no relocating post-pass, so they always stream.
-	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "blocks") {
+	// JointFit, the block packer, and the assembler commit each placement once, in
+	// final position, with no relocating post-pass, so they always stream.
+	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "blocks" || req.Algorithm == "assemble") {
 		return true
 	}
 	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
@@ -993,6 +1064,9 @@ func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFac
 	case "blocks": // 3-D block-building; manages its own bins, ignores factory
 		bp := d3.NewBlockPacker(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
 		return bp, func(items []pack.Item) pack.Result { r, _ := bp.PackAllCtx(ctx, items); return r }, true
+	case "assemble": // 3-D assemble-then-EMS; manages its own bins, ignores factory
+		as := d3.NewAssembler(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
+		return as, func(items []pack.Item) pack.Result { r, _ := as.PackAllCtx(ctx, items); return r }, true
 	case "ss":
 		return online1(online.SumOfSquares(req.Bin.Width, factory))
 	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
@@ -1682,6 +1756,17 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result, berr := bp.PackAllCtx(ctx, items)
 		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: berr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
+	}
+
+	// Assemble: fuse perfectly-fitting items into solid rectangular blocks, then
+	// place those (and leftovers) with EMS. Self-managing geometry; ignores factory.
+	if req.Algorithm == "assemble" {
+		as := d3.NewAssembler(bw, bd, bh)
+		result, aerr := as.PackAllCtx(ctx, items)
+		if aerr != nil && !errors.Is(aerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: aerr.Error()}, nil
 		}
 		return buildResponse3D(result), nil
 	}

@@ -206,35 +206,22 @@ external `boxpacker3`/`bp3d` libraries lives in the separate [`bench/`](bench/) 
 
 _Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better); the best value in each column is **bold** (all ties, unless every row matches). `fill%` = packed volume ÷ (bins × bin volume); higher is tighter. `compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. Time is per solve; absolute numbers vary by machine._
 
-### 3D — 500 mixed boxes (sides 1–6) into a 20×20×20 bin
+### 3D · carton SKUs — 400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12
 
 | Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |
 |-----------|-------:|---------:|------------:|--------:|----------:|
-| ff | **3** | **76.7** | 86.1 | 0 | 243.392ms |
-| ffd | **3** | **76.7** | 88.1 | 0 | 134.328ms |
-| bfd | **3** | **76.7** | 88.1 | 0 | 132.501ms |
-| nfd | **3** | **76.7** | 82.2 | 0 | 115.362ms |
-| blf | **3** | **76.7** | 86.6 | 0 | 215.67ms |
-| ems | **3** | **76.7** | 86.8 | 0 | 18.748ms |
-| heightmap | **3** | **76.7** | 83.2 | 0 | 505.894ms |
-| laff | 4 | 57.5 | 68.7 | 0 | 2.156ms |
-| layer | **3** | **76.7** | 82.1 | 0 | **1.031ms** |
-| blocks | **3** | **76.7** | **88.9** | 0 | 7.822ms |
-| auto | **3** | **76.7** | 88.1 | 0 | 149.298ms |
-
-### 3D · anti-slosh — same 500 boxes with 60% bottom support + 50% side anti-slosh (X & Y)
-
-| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |
-|-----------|-------:|---------:|------------:|--------:|----------:|
-| ff | 3 | 76.7 | 85.7 | 0 | 235.268ms |
-| ffd | 3 | 76.7 | **89.4** | 0 | 166.105ms |
-| bfd | 3 | 76.7 | **89.4** | 0 | 165.991ms |
-| nfd | 3 | 76.7 | 80.6 | 0 | 229.776ms |
-| blf | 3 | 76.7 | 86.6 | 0 | 207.023ms |
-| ems | 3 | 76.7 | 85.2 | 0 | 26.396ms |
-| heightmap | 3 | 76.7 | 86.5 | 0 | 514.043ms |
-| layer | 3 | 76.7 | 82.1 | 0 | **1.799ms** |
-| blocks | 3 | 76.7 | 88.9 | 0 | 7.756ms |
+| ff | 26 | 89.3 | 89.7 | 0 | 4.8ms |
+| ffd | **24** | **96.7** | 97.0 | 0 | 2.552ms |
+| bfd | **24** | **96.7** | 97.0 | 0 | 2.534ms |
+| nfd | 26 | 89.3 | 93.8 | 0 | **677µs** |
+| blf | 26 | 89.3 | 91.4 | 0 | 6.017ms |
+| ems | 26 | 89.3 | 90.2 | 0 | 2.165ms |
+| heightmap | 27 | 86.0 | 87.3 | 0 | 17.834ms |
+| laff | 27 | 86.0 | 89.3 | 0 | 4.264ms |
+| layer | 27 | 86.0 | 87.4 | 0 | 1.527ms |
+| blocks | **24** | **96.7** | 97.6 | 0 | 6.349ms |
+| assemble | 32 | 72.6 | **98.8** | 0 | 834µs |
+| auto | **24** | **96.7** | 97.0 | 0 | 6.5ms |
 
 <!-- BENCH:END -->
 

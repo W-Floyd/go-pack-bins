@@ -228,6 +228,22 @@
     color: var(--muted);
   }
   .viz-toolbar .stat strong { color: var(--text); }
+  .void-toggle {
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+  .void-toggle.active {
+    background: #ff2d55;
+    border-color: #ff2d55;
+    color: #fff;
+  }
+  #void-stat { color: #ff7a93; }
   .bin-tabs {
     display: flex;
     gap: 4px;
@@ -782,6 +798,8 @@
       <div class="stat">Placed: <strong id="stat-placed">—</strong></div>
       <div class="stat">Unplaced: <strong id="stat-unplaced">—</strong></div>
       <div class="stat" id="stat-best-wrap" style="display:none">Best: <strong id="stat-best">—</strong></div>
+      <button id="void-toggle" class="void-toggle" style="display:none" title="Highlight empty space fully enclosed by items">Internal voids</button>
+      <span class="stat" id="void-stat" style="display:none"></span>
       <div style="flex:1"></div>
       <div class="bin-tabs" id="bin-tabs"></div>
     </div>
@@ -895,6 +913,7 @@ const ALGOS = {
     {v:'laff',l:'Largest-Area-Fit-First (layers)'},
     {v:'layer',l:'Layered (flat, sequential — streams)'},
     {v:'blocks',l:'Block-building (fused layers — streams)'},
+    {v:'assemble',l:'Assemble blocks → EMS (streams)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
     {v:'ems', l:'Empty Maximal Space (EMS)'},
     {v:'heightmap', l:'Heightmap / skyline'},
@@ -1572,6 +1591,26 @@ function bigMix(mode, n, seed) {
   return out;
 }
 
+// palletMix generates n cartons drawn from a fixed SKU palette whose footprints and
+// heights divide a 12×12×12 pallet — the repeated, tile-friendly sizes of the
+// palletizing benchmark, where block-building / assembly pays off. Same palette as
+// packapi's benchPallet.
+function palletMix(n, seed) {
+  let s = (seed >>> 0) || 1;
+  const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const skus = [[6,6,6],[6,6,3],[6,6,2],[6,3,3],[4,4,4],[3,3,6],[12,6,2],[6,12,3],[4,4,2],[3,6,4]];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const k = skus[Math.floor(rnd() * skus.length)];
+    out.push({ w: k[0], d: k[1], h: k[2], rot: true });
+  }
+  return out;
+}
+
+// rotatable tags each generated box as rotation-enabled, matching the benchmark
+// instances (which all allow rotation).
+const rotatable = boxes => boxes.map(b => ({ ...b, rot: true }));
+
 const PRESETS = {
   '1d': [
     {
@@ -1651,6 +1690,11 @@ const PRESETS = {
       bin: {w:20}, algo: 'ffd',
       items: bigMix('1d', 80, 11),
     },
+    {
+      label: 'Benchmark: 1-D mixed (1000 items)',
+      bin: {w:10}, algo: 'ffd',
+      items: bigMix('1d', 1000, 11),
+    },
   ],
   '2d': [
     {
@@ -1715,6 +1759,11 @@ const PRESETS = {
       label: 'Stress test (1200 boxes)',
       bin: {w:300, h:300}, algo: 'ffd',
       items: bigMix('2d', 1200, 44),
+    },
+    {
+      label: 'Benchmark: 2-D mixed (400 rects)',
+      bin: {w:300, h:300}, algo: 'ffd',
+      items: bigMix('2d', 400, 22),
     },
   ],
   '3d': [
@@ -1840,6 +1889,31 @@ const PRESETS = {
       // Heavy on the renderer: expect a busy view (and reload the page to stop).
       bin: {w:75, d:75, h:75}, algo: 'nfd',
       items: bigMix('3d', 10000, 99),
+    },
+    {
+      label: 'Benchmark: 3-D mixed (500 boxes)',
+      bin: {w:20, d:20, h:20}, algo: 'auto',
+      items: rotatable(bigMix('3d', 500, 33)),
+    },
+    {
+      label: 'Benchmark: 3-D mixed + anti-slosh (500 boxes)',
+      bin: {w:20, d:20, h:20}, algo: 'ffd',
+      contact: {bottom: 60, side_x: 50, side_y: 50},
+      items: rotatable(bigMix('3d', 500, 33)),
+    },
+    {
+      label: 'Benchmark: carton SKUs (400, single bin)',
+      bin: {w:12, d:12, h:12}, algo: 'blocks',
+      items: palletMix(400, 5),
+    },
+    {
+      label: 'Palletizing: cartons → pallets (nested)',
+      // True palletizing: products are packed into 6×6×6 cartons (inner level,
+      // block-building), then the cartons are loaded onto a 12×12×18 pallet (outer).
+      nested: true,
+      innerBin: {w:6, d:6, h:6}, innerAlgo: 'blocks',
+      bin: {w:12, d:12, h:18}, algo: 'ffd',
+      items: rotatable(bigMix('3d', 240, 5)),
     },
     {
       label: 'Stable + anti-slosh (support 80%, sides 50%)',
@@ -2350,6 +2424,8 @@ async function runSinglePack(auto = false) {
     lastResult = { data, mode, bin: body.bin };
     renderShell(data, mode, body.bin);
     if (is3D) { if (ctl) ctl.render(); } else { draw2D(data, mode, body.bin); }
+    setVoidUI(is3D);
+    if (is3D) applyVoids();
     renderStats(data, mode, body.bin);
     if (!auto) {
       const msgs = Object.values(data.item_errors || {});
@@ -2396,6 +2472,7 @@ async function runSinglePack(auto = false) {
         buildRaceGrid(f.segments || [], mode, body.bin, count);
       } else {
         renderShell(data, mode, body.bin, 0);
+        setVoidUI(false); // re-shown at finish() once the full packing exists
         if (is3D) ctl = beginScene3D(body.bin, 1, count);
       }
     } else if (f.type === 'batch') {
@@ -2805,8 +2882,11 @@ function renderResult({ data, mode, bin }) {
   renderShell(data, mode, bin);
   if (mode === '1d' || mode === '2d') {
     draw2D(data, mode, bin);
+    setVoidUI(false);
   } else {
     draw3D(data, bin);
+    setVoidUI(true);
+    applyVoids();
   }
 }
 
@@ -2860,6 +2940,7 @@ function renderNestedResult({ data, mode, innerBin, outerBin }) {
   }
 
   document.getElementById('empty-state').style.display = 'none';
+  setVoidUI(false); // void inspection is single-level only
   renderStatsNested(data, mode, innerBin, outerBin);
 
   if (mode === '3d') {
@@ -3347,6 +3428,80 @@ let scene3d = null;
 let camera3d = null;
 let orbitState = { active: false, lastX: 0, lastY: 0, phi: 0.7, theta: 0.7, dist: 22 };
 
+// ── internal void inspection ───────────────────────────────────────────────
+// "Internal voids" = empty space inside a bin that is sealed off from every
+// container wall by items — trapped air pockets, the wasted space a packing
+// inspector cares about (as opposed to open gaps that still reach a face). The
+// analysis runs server-side (packapi.Voids → d3.InternalVoids): it is exact (the
+// box faces induce a compressed grid, no voxel sampling) and far cheaper than a
+// fine voxel pass, so we just POST the solved placements and render what comes
+// back. When voids are shown the item meshes are hidden so only the red enclosed
+// cuboids remain visible inside the container wireframe.
+
+let voidsOn = false;
+let voidSeq = 0; // discards a stale void response if the toggle/pack changes
+
+// fetchVoids asks the server (or the WASM worker) for the internal voids of a
+// solved packing, mirroring the dual-mode pack path.
+function fetchVoids(bin, placements) {
+  const body = { bin, placements };
+  if (WASM_MODE) {
+    return new Promise((resolve, reject) => {
+      packFrameHandler = (msg) => {
+        if (msg.result) resolve(msg.result);
+        else if (msg.frame && msg.frame.type === 'error') reject(new Error(msg.frame.error));
+      };
+      packWorkerRef().postMessage({ kind: 'voids', reqId: packSeq, body });
+    });
+  }
+  return fetch('/api/voids', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json());
+}
+
+// setVoidUI shows/hides the toolbar toggle (only meaningful for single-level 3-D).
+function setVoidUI(show) {
+  document.getElementById('void-toggle').style.display = show ? '' : 'none';
+  if (!show) document.getElementById('void-stat').style.display = 'none';
+}
+
+// applyVoids reflects voidsOn onto the live scene: off → show items, no overlay;
+// on → fetch the voids, hide items, and draw only the red enclosed cuboids. The
+// toolbar reports region count + % of bin volume.
+async function applyVoids() {
+  const statEl = document.getElementById('void-stat');
+  if (!scene3dCtl || !scene3dCtl.setVoids) { statEl.style.display = 'none'; return; }
+  const seq = ++voidSeq;
+  if (!voidsOn || !lastResult || !lastResult.data) {
+    scene3dCtl.setVoids(null); // restore items, clear overlay
+    statEl.style.display = 'none';
+    return;
+  }
+  statEl.textContent = 'analysing…';
+  statEl.style.display = '';
+  let resp;
+  try {
+    resp = await fetchVoids(lastResult.bin, lastResult.data.placements || []);
+  } catch (e) {
+    if (seq === voidSeq) { showError('void analysis failed: ' + e.message); voidsOn = false; document.getElementById('void-toggle').classList.remove('active'); statEl.style.display = 'none'; }
+    return;
+  }
+  if (seq !== voidSeq || !voidsOn || !scene3dCtl) return; // superseded
+  if (resp.error) { showError(resp.error); voidsOn = false; document.getElementById('void-toggle').classList.remove('active'); statEl.style.display = 'none'; return; }
+  scene3dCtl.setVoids(resp.voids || []);
+  const n = (resp.voids || []).length;
+  const pct = resp.bin_volume > 0 ? (100 * (resp.void_volume || 0) / resp.bin_volume) : 0;
+  statEl.textContent = n
+    ? `${n} void region${n !== 1 ? 's' : ''} · ${pct.toFixed(1)}% of volume`
+    : 'no internal voids';
+}
+
+document.getElementById('void-toggle').onclick = () => {
+  voidsOn = !voidsOn;
+  document.getElementById('void-toggle').classList.toggle('active', voidsOn);
+  applyVoids();
+};
+
 // beginScene3D builds the renderer, scene, camera, lights, bin wireframes and
 // orbit controls once for `nBins` containers and returns a controller whose
 // addItems() can be called repeatedly — appending meshes to the live scene — so
@@ -3447,6 +3602,45 @@ function beginScene3D(bin, nBins, totalCount) {
   }
   ensureBins(Math.max(nBins || 1, 1));
 
+  // Item meshes + their edge lines, tracked so the void inspector can hide them
+  // (showing only the red enclosed cuboids). Void overlay meshes are tracked
+  // separately so they can be cleared on toggle.
+  const itemObjects = [];
+  const voidMeshes = [];
+  let voidsActive = false;
+
+  function clearVoids() {
+    for (const m of voidMeshes) {
+      scene3d.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) m.material.dispose();
+    }
+    voidMeshes.length = 0;
+  }
+
+  // setVoids draws the red enclosed-void overlay from server-computed boxes and
+  // hides the items so only the voids remain. Pass null to clear the overlay and
+  // restore the items.
+  function setVoids(boxes) {
+    clearVoids();
+    voidsActive = !!boxes;
+    for (const o of itemObjects) o.visible = !voidsActive;
+    if (boxes) {
+      for (const v of boxes) {
+        const offX = (v.bin_index || 0) * stride;
+        const [tx, ty, tz] = toThree(v.x + v.w / 2, v.y + v.d / 2, v.z + v.h / 2);
+        const geo = new THREE.BoxGeometry(v.w, v.h, v.d);
+        const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0xff2d55, transparent: true, opacity: 0.55 }));
+        mesh.position.set(offX + tx, ty, tz);
+        scene3d.add(mesh); voidMeshes.push(mesh);
+        const line = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }));
+        line.position.copy(mesh.position);
+        scene3d.add(line); voidMeshes.push(line);
+      }
+    }
+    render();
+  }
+
   // addItems appends meshes (and labels) for a batch of placements to the live
   // scene. Each placement carries its own bin_index, so batches may span bins.
   function addItems(placements) {
@@ -3462,12 +3656,16 @@ function beginScene3D(bin, nBins, totalCount) {
       const mesh = new THREE.Mesh(geo, mat);
       const [tx, ty, tz] = toThree(p.x + p.w/2, p.y + p.d/2, p.z + p.h/2);
       mesh.position.set(offX + tx, ty, tz);
+      mesh.visible = !voidsActive;
       scene3d.add(mesh);
       occludeMeshes.push(mesh);
+      itemObjects.push(mesh);
       const edges = new THREE.EdgesGeometry(geo);
       const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }));
       line.position.copy(mesh.position);
+      line.visible = !voidsActive;
       scene3d.add(line);
+      itemObjects.push(line);
 
       if (showItemLabels) {
         const lbl = document.createElement('div');
@@ -3508,6 +3706,9 @@ function beginScene3D(bin, nBins, totalCount) {
   function updateLabels() {
     for (const entry of labelEls) {
       const { el, self } = entry;
+      // While voids are shown the items (and their labels) are hidden; keep bin
+      // labels so containers stay identifiable.
+      if (voidsActive && !entry.binLabel) { el.style.display = 'none'; continue; }
       if (entry.binLabel && builtBins <= 1) { el.style.display = 'none'; continue; }
       const candidates = rankFaces(entry);
       let placed = false;
@@ -3559,7 +3760,7 @@ function beginScene3D(bin, nBins, totalCount) {
     render();
   };
 
-  scene3dCtl = { addItems, render, ensureBins, bins: () => builtBins };
+  scene3dCtl = { addItems, render, ensureBins, setVoids, bins: () => builtBins };
   return scene3dCtl;
 }
 
@@ -3733,6 +3934,7 @@ function clearViz() {
   document.getElementById('canvas-3d').style.display = 'none';
   document.getElementById('labels-3d').innerHTML = '';
   document.getElementById('empty-state').style.display = 'flex';
+  setVoidUI(false);
   document.getElementById('stats-body').innerHTML =
     '<p class="stats-empty">Pack to see per-container metric stats.</p>';
 }
