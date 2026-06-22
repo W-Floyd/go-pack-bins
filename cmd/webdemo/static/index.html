@@ -1415,6 +1415,15 @@ const PRESETS = {
       ],
     },
     {
+      label: 'Container catalog: pick the best box',
+      // Eight 5³ cubes: the 8³ box holds one each (8 boxes), the 10³ holds all
+      // eight in one box, the 12³ also fits one box but wastes more — so the
+      // catalog should choose 10×10×10.
+      catalog: [{w:8, d:8, h:8}, {w:10, d:10, h:10}, {w:12, d:12, h:12}],
+      bin: {w:10, d:10, h:10}, algo: 'ffd',
+      items: Array(8).fill({w:5, d:5, h:5}),
+    },
+    {
       label: 'Nested: Goods → Cartons → Pallet',
       nested: true,
       innerBin: {w:8, d:8, h:8}, innerAlgo: 'ffd',
@@ -1477,6 +1486,14 @@ const PRESETS = {
       items: bigMix('3d', 1200, 55),
     },
     {
+      label: 'Catalog stress test (1500 boxes, 3 container sizes)',
+      // Packs 1500 mixed boxes into each candidate container and keeps the best
+      // type — exercises the container catalog at scale (chooses 12×12×12).
+      catalog: [{w:8, d:8, h:8}, {w:10, d:10, h:10}, {w:12, d:12, h:12}],
+      bin: {w:12, d:12, h:12}, algo: 'ffd',
+      items: bigMix('3d', 1500, 77),
+    },
+    {
       label: 'Stable + anti-slosh (support 80%, sides 50%)',
       bin: {w:10, d:10, h:10}, algo: 'ff',
       contact: {bottom: 80, side_x: 50, side_y: 50},
@@ -1533,6 +1550,20 @@ function loadPreset(idx) {
     document.getElementById('nested-inner-section').style.display = 'none';
     document.getElementById('outer-bin-label').textContent = 'Bin capacity';
   }
+
+  // Container catalog
+  if (preset.catalog) {
+    containerCatalog = preset.catalog.map(c => ({ w: c.w || 10, h: c.h || c.w || 10, d: c.d || c.w || 10, maxCount: c.max || 0 }));
+    catalogEnabled = true;
+  } else {
+    containerCatalog = [];
+    catalogEnabled = false;
+  }
+  document.getElementById('catalog-toggle').checked = catalogEnabled;
+  document.getElementById('catalog-section').style.display = catalogEnabled ? '' : 'none';
+  document.getElementById('bin-capacity-block').style.display = catalogEnabled ? 'none' : '';
+  buildCatalogFields(mode);
+  renderContainerList();
 
   // Outer bin dims
   if (document.getElementById('bin-w')) document.getElementById('bin-w').value = preset.bin.w || 10;
@@ -1928,8 +1959,18 @@ async function runSinglePack(auto = false) {
     body.containers = catalogContainers(mode);
     let result;
     try {
-      if (WASM_MODE) result = JSON.parse(goPack(JSON.stringify(body)));
-      else result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+      if (WASM_MODE) {
+        // The solver runs in the worker; request a single (non-streamed) solve.
+        result = await new Promise((resolve, reject) => {
+          packFrameHandler = (msg) => {
+            if (msg.result) resolve(msg.result);
+            else if (msg.frame && msg.frame.type === 'error') reject(new Error(msg.frame.error));
+          };
+          packWorkerRef().postMessage({ kind: 'packOnce', reqId: seq, body });
+        });
+      } else {
+        result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+      }
     } catch (e) {
       if (seq === packSeq) { if (!auto) showError(e.message); endPackIndicator(); }
       return;
@@ -1944,8 +1985,8 @@ async function runSinglePack(auto = false) {
     data.free_rects = result.free_rects;
     data.item_errors = result.item_errors || {};
     data.unplaced = result.unplaced || [];
+    renderShell(data, mode, body.bin, 0);
     if (is3D) ctl = beginScene3D(body.bin, Math.max(1, data.bins_used), body.items.length);
-    else renderShell(data, mode, body.bin, 0);
     drawBatch(result.placements || []);
     finish();
     return;
@@ -2882,6 +2923,10 @@ function beginScene3D(bin, nBins, totalCount) {
     cx = totalW / 2;
     maxDim = Math.max(totalW, bin.depth, bin.height);
     orbitState.dist = Math.max(orbitState.dist || 0, maxDim * 2.2);
+    // Grow the far clipping plane with the scene; otherwise many bins push the
+    // camera past the default far plane (1000) and the whole scene is clipped.
+    camera3d.far = Math.max(1000, maxDim * 6);
+    camera3d.updateProjectionMatrix();
     updateCamera();
   }
   ensureBins(Math.max(nBins || 1, 1));
