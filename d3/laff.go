@@ -21,6 +21,24 @@ import (
 // Rotatable items are laid flat (smallest dimension vertical) to maximise ground
 // coverage, the classic LAFF orientation; the footprint may still rotate in-plane.
 // Items too large for an empty container are returned as unplaced.
+//
+// LAFFPacker adapts LAFF to pack.OfflinePacker (PackAll + Name) so it can join a
+// meta.BestOf race alongside the other offline packers. LAFF solves a whole
+// container at once, so there is no incremental commit point — it does not
+// implement Observe and cannot stream.
+type LAFFPacker struct{ w, d, h float64 }
+
+// NewLAFFPacker creates a LAFF offline packer for a bin of the given dimensions.
+func NewLAFFPacker(w, d, h float64) *LAFFPacker { return &LAFFPacker{w: w, d: d, h: h} }
+
+// PackAll packs all items with the LAFF layered heuristic.
+func (p *LAFFPacker) PackAll(items []pack.Item) (pack.Result, error) {
+	return LAFF(items, p.w, p.d, p.h)
+}
+
+// Name satisfies pack.OfflinePacker.
+func (p *LAFFPacker) Name() string { return "LAFF" }
+
 func LAFF(items []pack.Item, w, depth, h float64) (pack.Result, error) {
 	const eps = 1e-9
 	var result pack.Result

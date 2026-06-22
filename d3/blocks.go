@@ -47,6 +47,9 @@ func (bp *BlockPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	return bp.PackAllCtx(context.Background(), items)
 }
 
+// Name satisfies pack.OfflinePacker so the packer can join a meta.BestOf race.
+func (bp *BlockPacker) Name() string { return "Blocks" }
+
 const blockEps = 1e-9
 
 // orient is one valid orientation of an item: a footprint (fw×fd) and height fh,

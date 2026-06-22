@@ -61,6 +61,7 @@ container-loading heuristics — no code from any repository was used:
 |------|--------|--------------------|
 | Empty-Maximal-Space (EMS): maintain the set of maximal free boxes, place at the back-bottom-left of the snuggest space, then split intruded spaces into maximal slabs (the 3-D analogue of 2-D MaxRects) | Parreño, Alvarez-Valdés, Oliveira & Tamarit, *A maximal-space algorithm for the container loading problem*, INFORMS J. Computing (2008); Lai & Chan (1997) | [`d3/ems.go`](d3/ems.go) |
 | Heightmap / skyline: model the occupied volume as a top surface and land each item on the lowest resting height over its footprint (can bridge gaps) — the standard baseline in the online-3D-BPP literature | Common heuristic; e.g. the EMS/heightmap baselines in Zhao et al., *Online-3D-BPP-PCT* (ICLR 2022) | [`d3/heightmap.go`](d3/heightmap.go) |
+| Fitness best-fit (maximal contact): reuse the EMS free-space machinery but pick, over every (orientation × empty space) candidate, the placement whose box touches the most surface (bin walls + placed-box faces) — the "maximal contact" / fitness-number criterion for high-fill container loading | Common CLP criterion; e.g. He, Wu & Hao, contact-area / fitness-number placement in container-loading heuristics; related to the DFTRC rule of Karabulut & İnceoğlu (2004) | [`d3/fit.go`](d3/fit.go) |
 
 ## Online-3D-BPP-PCT (MIT)
 
@@ -82,6 +83,7 @@ Clean-room implementations of methods/objectives surveyed there (ideas, not code
 |------|----------------------------|--------------------|
 | Generalized Bin Packing objective: optional items + profit, bin cost, rejection (BPRC), net-cost minimisation | Baldi, Crainic, Perboli & Tadei (2012); Hu, Wei & Lim (2018) | [`gbpp/gbpp.go`](gbpp/gbpp.go) |
 | Ruin-and-recreate metaheuristic | Gardeyn & Wauters (2022), 2-D variable-sized BPP | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
+| Adaptive ruin-and-recreate: walk a current ordering with record-to-record-travel acceptance and an adaptive ruin magnitude that grows on stall (intensify→diversify) | Record-to-record travel: Dueck (1993); adaptive large-neighbourhood / adaptive ruin size: Ropke & Pisinger (2006); on the R&R base of Schrimpf et al. (2000) and Gardeyn & Wauters (2022) | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
 | GRASP (greedy randomized adaptive search) | Correcher et al. (2017); Calzavara et al. (2021) | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
 | Beam search (bounded tree search over placement order) | Araya et al. (2020); Parreño et al. (2020) | [`offline/beam.go`](offline/beam.go) |
 | Lexicographic multi-objective selection | Bin packing with lexicographic objectives (2022) | [`meta/lexicographic.go`](meta/lexicographic.go) |

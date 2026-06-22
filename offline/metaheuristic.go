@@ -43,6 +43,16 @@ func (a resultScore) better(b resultScore) bool {
 	return a.fill > b.fill
 }
 
+// withinRecord reports whether score a is acceptable as a lateral/near move under
+// record-to-record travel relative to ref: never worse on (unplaced, bins), and
+// fill no more than dev below ref's fill.
+func (a resultScore) withinRecord(ref resultScore, dev float64) bool {
+	if a.unplaced > ref.unplaced || a.bins > ref.bins {
+		return false
+	}
+	return a.fill >= ref.fill-dev
+}
+
 // packOrdering packs items in the given order with First-Fit through factory and
 // returns the result. A fresh packer is used each call, so callers may evaluate
 // many orderings against the same factory.
@@ -131,10 +141,20 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 func ruin(order []pack.Item, rng *rand.Rand) []pack.Item {
 	n := len(order)
 	k := 1 + rng.Intn(1+n/3) // up to ~a third
+	return ruinK(order, rng, k)
+}
+
+// ruinK removes exactly k random items (clamped to [1,n]) and reinserts them
+// shuffled at the front. Splitting the size out of ruin lets the adaptive search
+// drive the ruin magnitude itself.
+func ruinK(order []pack.Item, rng *rand.Rand, k int) []pack.Item {
+	n := len(order)
+	if k < 1 {
+		k = 1
+	}
 	if k > n {
 		k = n
 	}
-	// Choose k distinct positions to remove.
 	remove := make(map[int]bool, k)
 	for len(remove) < k {
 		remove[rng.Intn(n)] = true
@@ -150,6 +170,86 @@ func ruin(order []pack.Item, rng *rand.Rand) []pack.Item {
 	}
 	rng.Shuffle(len(removed), func(i, j int) { removed[i], removed[j] = removed[j], removed[i] })
 	return append(removed, kept...)
+}
+
+// AdaptiveRuinRecreate is a stronger ruin-and-recreate that, unlike RuinRecreate's
+// greedy hill-climb from the incumbent, walks a *current* ordering and adapts its
+// search to progress:
+//
+//   - Acceptance is record-to-record travel: a perturbed ordering becomes the new
+//     current solution if it is no worse on (unplaced, bins) and its fill is within
+//     a small deviation of the best fill. Accepting these lateral/near moves lets
+//     the walk traverse plateaus that strict hill-climbing gets stuck on.
+//   - The ruin magnitude is adaptive: it starts small (intensify — refine the
+//     current arrangement) and grows after a run of non-improving iterations
+//     (diversify — escape the basin), snapping back to small on any new best and
+//     re-seeding the walk from the incumbent.
+//
+// The decode strategy is whatever `factory` builds (pass the EMS/Fit decoder for
+// 3-D), so this composes with the strong constructive packers. It returns the
+// best packing found and honours ctx as a deadline.
+func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts SearchOptions) pack.Result {
+	n := len(items)
+	if n == 0 {
+		return pack.Result{}
+	}
+	rng := rand.New(rand.NewSource(opts.seed()))
+
+	bestOrder := append([]pack.Item(nil), items...)
+	sort.SliceStable(bestOrder, func(i, j int) bool { return bestOrder[i].Volume() > bestOrder[j].Volume() })
+	best := packOrdering(factory, bestOrder)
+	bestScore := scoreResult(best)
+
+	curOrder := append([]pack.Item(nil), bestOrder...)
+	curScore := bestScore
+
+	// Ruin magnitude in items: from ~5% up to ~50% of the order.
+	minK := 1
+	maxK := n/2 + 1
+	k := minK
+	// Deviation band for record-to-record acceptance: a fraction of the best
+	// fill (fill is summed bin utilization, so it scales with bin count).
+	dev := 0.03 * (bestScore.fill + 1)
+	stall, stallLimit := 0, 8
+
+	maxIters := opts.maxIters()
+	step := maxIters / 100
+	if step < 1 {
+		step = 1
+	}
+	for iter := 0; iter < maxIters; iter++ {
+		if ctx.Err() != nil {
+			break
+		}
+		cand := ruinK(curOrder, rng, k)
+		r := packOrdering(factory, cand)
+		s := scoreResult(r)
+
+		switch {
+		case s.better(bestScore):
+			best, bestScore = r, s
+			curOrder, curScore = cand, s
+			bestOrder = cand
+			k, stall = minK, 0 // new best → intensify, reset the walk's patience
+		case s.withinRecord(bestScore, dev) && !curScore.better(s):
+			curOrder, curScore = cand, s // accept lateral/near move
+			stall++
+		default:
+			stall++
+		}
+		if stall >= stallLimit { // stuck → widen the ruin and restart from incumbent
+			k++
+			if k > maxK {
+				k = minK
+			}
+			curOrder, curScore = bestOrder, bestScore
+			stall = 0
+		}
+		if opts.Progress != nil && (iter+1)%step == 0 {
+			opts.Progress(iter+1, maxIters)
+		}
+	}
+	return best
 }
 
 // GRASP runs a Greedy Randomized Adaptive Search Procedure: each restart builds
