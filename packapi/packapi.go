@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/W-Floyd/go-pack-bins/d1"
@@ -102,9 +103,12 @@ type BinSpec struct {
 
 // ConstraintSpec is a hard constraint on the bin's accumulated scalar totals.
 type ConstraintSpec struct {
-	Scalar string  `json:"scalar"` // name of the scalar
-	Op     string  `json:"op"`     // "max" or "min"
+	Scalar string  `json:"scalar"` // name of the scalar (or category, for "incompatible")
+	Op     string  `json:"op"`     // "max", "min", "allsame", "incompatible"
 	Value  float64 `json:"value"`
+	// Value2 is the second category for op "incompatible": items whose Scalar
+	// equals Value and items whose Scalar equals Value2 may not share a bin.
+	Value2 float64 `json:"value2,omitempty"`
 }
 
 // PreferenceSpec is a soft balancing objective on a scalar. When any are
@@ -827,6 +831,8 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result, err = offline.KarmarkarKarpCtx(ctx, items, cap, factory)
 	case "bc":
 		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
+	case "brute":
+		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey1D})
 	case "auto":
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
@@ -980,6 +986,8 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		// the factory's strategy (set by strat2DFor).
 		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
 		result, err = packAllCtx(ctx, p, items)
+	case "brute":
+		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey2D})
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
@@ -1095,6 +1103,26 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
 		return resp, nil
+	}
+
+	// LAFF (Largest-Area-Fit-First): layered packing; manages its own geometry
+	// and containers, so it ignores the factory/contact settings.
+	if req.Algorithm == "laff" {
+		result, lerr := d3.LAFF(items, bw, bd, bh)
+		if lerr != nil {
+			return PackResponse{Error: lerr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
+	}
+
+	// Brute-force: exhaustive item-order search for small orders (FFD fallback
+	// above the cap). Identical boxes are pruned via a sorted-dimension key.
+	if req.Algorithm == "brute" {
+		result, berr := offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey3D})
+		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: berr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
 	}
 
 	// Joint multi-objective: bin selection and placement under one score, in a
@@ -1432,6 +1460,32 @@ func binID(b pack.Bin) string {
 	return ""
 }
 
+// shapeKey3D/2D/1D map an item to an interchangeability signature for
+// BruteForce: items with the same key pack identically, so permutations that
+// only reorder them are pruned. Sorted dimensions make rotations-equivalent
+// boxes collapse. Unknown item types fall back to the unique ID (no pruning).
+func shapeKey3D(it pack.Item) string {
+	if i, ok := it.(*d3.Item3D); ok {
+		d := []float64{i.W, i.D, i.H}
+		sort.Float64s(d)
+		return fmt.Sprintf("%g,%g,%g", d[0], d[1], d[2])
+	}
+	return it.ID()
+}
+
+func shapeKey2D(it pack.Item) string {
+	if i, ok := it.(*d2.Item2D); ok {
+		d := []float64{i.W, i.H}
+		sort.Float64s(d)
+		return fmt.Sprintf("%g,%g", d[0], d[1])
+	}
+	return it.ID()
+}
+
+func shapeKey1D(it pack.Item) string {
+	return fmt.Sprintf("%g", it.Volume())
+}
+
 // buildConstraints converts ConstraintSpec slice to pack.Constraint slice.
 func buildConstraints(specs []ConstraintSpec) []pack.Constraint {
 	cs := make([]pack.Constraint, 0, len(specs))
@@ -1443,6 +1497,8 @@ func buildConstraints(specs []ConstraintSpec) []pack.Constraint {
 			cs = append(cs, pack.MinAggregate(s.Scalar, s.Value))
 		case "allsame":
 			cs = append(cs, pack.AllSame(s.Scalar))
+		case "incompatible":
+			cs = append(cs, pack.Incompatible(s.Scalar, [2]float64{s.Value, s.Value2}))
 		}
 	}
 	return cs
