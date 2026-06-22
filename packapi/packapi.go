@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/W-Floyd/go-pack-bins/d1"
@@ -97,12 +98,38 @@ func containerLabel(mode string, b BinSpec) string {
 	}
 }
 
-// solveCatalog packs the order into each candidate container type and returns the
-// best single type, ranked by most items placed, then fewest containers, then
-// least wasted volume — the heterogeneous-container model from
-// skjolber/3d-bin-container-packing (see catalog package). MaxCount caps a type:
-// items spilling past the allowed container count are reported unplaced.
+// solveCatalog packs the order against a catalog of container types. It first
+// tries each type on its own and, if one type packs the whole order, returns the
+// best such single type (tightest — the homogeneous, cleanest result). When no
+// single type can place everything (typically because per-type MaxCounts are
+// exhausted), it falls back to a sequential cascade that spills the overflow from
+// one type into the next, mixing sizes to place as many items as possible.
 func solveCatalog(ctx context.Context, req PackRequest) PackResponse {
+	single := solveCatalogSingle(ctx, req)
+	if single.Error == "" && len(single.Unplaced) == 0 {
+		return single // a single type holds the whole order — prefer it
+	}
+	cascade := solveCatalogCascade(ctx, req)
+	if cascade.Error == "" && catalogUnplaced(cascade, req) < catalogUnplaced(single, req) {
+		return cascade // mixing sizes placed more items
+	}
+	return single
+}
+
+// catalogUnplaced counts unplaced items, treating an errored response as if the
+// whole order was unplaced (so a feasible response always compares better).
+func catalogUnplaced(r PackResponse, req PackRequest) int {
+	if r.Error != "" {
+		return len(req.Items) + 1
+	}
+	return len(r.Unplaced)
+}
+
+// solveCatalogSingle packs the order into each candidate type on its own and
+// returns the best single type, ranked by most items placed, then fewest
+// containers, then least wasted volume. MaxCount caps a type; items past the cap
+// are reported unplaced.
+func solveCatalogSingle(ctx context.Context, req PackRequest) PackResponse {
 	volByID := itemVolumes(req)
 
 	var best PackResponse
@@ -131,6 +158,70 @@ func solveCatalog(ctx context.Context, req PackRequest) PackResponse {
 		return PackResponse{Error: "no container type could pack the order"}
 	}
 	return best
+}
+
+// solveCatalogCascade fills each container type (in the order listed) up to its
+// MaxCount, then spills the items that didn't fit into the next type — so an
+// exhausted size hands its overflow to the next available size. Bins from all
+// types are concatenated with global indices, and BinDims records each bin's
+// dimensions so a mix of sizes renders correctly.
+func solveCatalogCascade(ctx context.Context, req PackRequest) PackResponse {
+	remaining := req.Items
+	var out PackResponse
+	var dims []BinSpec
+	var labels []string
+	globalBase := 0
+
+	for _, cs := range req.Containers {
+		if len(remaining) == 0 {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return PackResponse{Error: err.Error()}
+		}
+		sub := req
+		sub.Bin = cs.Bin
+		sub.Items = remaining
+		sub.Containers = nil
+		resp := packOneBin(ctx, sub)
+		if resp.Error != "" {
+			continue // this type failed; try the next
+		}
+		resp = truncateCatalog(resp, cs.MaxCount)
+
+		placed := make(map[string]bool, len(resp.Placements))
+		for _, p := range resp.Placements {
+			p.BinIndex += globalBase // shift local bin index into the global range
+			out.Placements = append(out.Placements, p)
+			placed[p.ItemID] = true
+		}
+		if resp.BinsUsed > 0 {
+			for i := 0; i < resp.BinsUsed; i++ {
+				dims = append(dims, cs.Bin)
+			}
+			globalBase += resp.BinsUsed
+			labels = append(labels, containerLabel(req.Mode, cs.Bin))
+		}
+		// Items this type couldn't place (over cap or too large) cascade onward.
+		var next []ItemSpec
+		for _, it := range remaining {
+			if !placed[it.ID] {
+				next = append(next, it)
+			}
+		}
+		remaining = next
+	}
+
+	if globalBase == 0 {
+		return PackResponse{Error: "no container type could pack the order"}
+	}
+	out.BinsUsed = globalBase
+	out.BinDims = dims
+	out.Container = strings.Join(labels, " + ")
+	for _, it := range remaining {
+		out.Unplaced = append(out.Unplaced, it.ID)
+	}
+	return out
 }
 
 // truncateCatalog enforces a container count cap by dropping placements in bins
@@ -321,6 +412,10 @@ type PackResponse struct {
 	// label and its dimensions (so the client renders with the right box size).
 	Container    string   `json:"container,omitempty"`
 	ContainerBin *BinSpec `json:"container_bin,omitempty"`
+	// BinDims is set when catalog mode mixes container types: one entry per bin
+	// index giving that bin's dimensions, so the client can render bins of
+	// differing sizes. Empty when all bins are the same type (use ContainerBin).
+	BinDims []BinSpec `json:"bin_dims,omitempty"`
 }
 
 // ─── streaming ──────────────────────────────────────────────────────────────
@@ -355,6 +450,7 @@ type StreamFrame struct {
 	Error        string            `json:"error,omitempty"`
 	Container    string            `json:"container,omitempty"`     // done: chosen container (catalog)
 	ContainerBin *BinSpec          `json:"container_bin,omitempty"` // done: chosen container dims (catalog)
+	BinDims      []BinSpec         `json:"bin_dims,omitempty"`      // done: per-bin dims (mixed catalog)
 }
 
 // StreamPack runs the same packing as Pack but delivers the result as a series
@@ -396,7 +492,8 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		}
 		flushBatch()
 		send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, Unplaced: resp.Unplaced,
-			ItemErrors: resp.ItemErrors, Container: resp.Container, ContainerBin: resp.ContainerBin})
+			ItemErrors: resp.ItemErrors, Container: resp.Container, ContainerBin: resp.ContainerBin,
+			BinDims: resp.BinDims})
 		return
 	}
 
@@ -1006,6 +1103,12 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
 	case "brute":
 		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey1D})
+	case "beam":
+		result = offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})
+	case "rr":
+		result = offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})
+	case "grasp":
+		result = offline.GRASP(ctx, items, factory, offline.SearchOptions{})
 	case "auto":
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
@@ -1161,6 +1264,12 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		result, err = packAllCtx(ctx, p, items)
 	case "brute":
 		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey2D})
+	case "beam":
+		result = offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})
+	case "rr":
+		result = offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})
+	case "grasp":
+		result = offline.GRASP(ctx, items, factory, offline.SearchOptions{})
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
@@ -1296,6 +1405,17 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
 		return buildResponse3D(result), nil
+	}
+
+	// Order-search metaheuristics (beam / ruin-recreate / GRASP): drop-in over the
+	// extreme-point factory; they manage their own search and ignore contact.
+	switch req.Algorithm {
+	case "beam":
+		return buildResponse3D(offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})), nil
+	case "rr":
+		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})), nil
+	case "grasp":
+		return buildResponse3D(offline.GRASP(ctx, items, factory, offline.SearchOptions{})), nil
 	}
 
 	// Joint multi-objective: bin selection and placement under one score, in a
