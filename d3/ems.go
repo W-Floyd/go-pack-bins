@@ -125,6 +125,14 @@ func betterEMS(c, best box, spaceVol, bestSpaceVol float64) bool {
 	return spaceVol < bestSpaceVol
 }
 
+// Occupy carves an already-placed box, at a known position, out of the free
+// spaces — as if it had been committed by TryInsert. It reconstructs the free
+// space of a bin from existing placements, so a caller can then probe the
+// remaining maximal spaces (voids) with TryInsert.
+func (e *EmptyMaximalSpace) Occupy(x, y, z, w, d, h float64) {
+	e.commit(box{x, y, z, w, d, h})
+}
+
 // commit records the placed box and rebuilds the empty-space set: every space
 // the box intrudes on is split into its surrounding maximal slabs, then any
 // space contained in another is pruned.

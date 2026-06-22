@@ -1,6 +1,8 @@
 package d3_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/W-Floyd/go-pack-bins/d3"
@@ -120,11 +122,10 @@ func eightTallFourPerLayer() []pack.Item {
 	return its
 }
 
-// While 9-tall items still remain, a bin's 1-tall shallow top must be deferred,
-// not filled with the short 10×10×1 filler — that filler is more useful later.
-// With two bins of tall items and a single filler, the filler must land in the
-// *second* bin's top (built when no taller item is left), and the first bin's
-// shallow top must stay empty rather than steal it.
+// While 9-tall items still remain, a bin's 1-tall shallow top must not be filled
+// with the short 10×10×1 filler during the body phase — the filler is more useful
+// later. It is only placed once the tall items are gone, backfilling a bin's top
+// (z=9), rather than being stolen into a body layer's floor.
 func TestBlockPacker_DefersShallowTopWhileTallItemsRemain(t *testing.T) {
 	bp := d3.NewBlockPacker(10, 10, 10)
 	items := append(eightTallFourPerLayer(), d3.NewItem("S", 10, 10, 1, false))
@@ -139,14 +140,10 @@ func TestBlockPacker_DefersShallowTopWhileTallItemsRemain(t *testing.T) {
 	if res.BinsUsed() != 2 {
 		t.Fatalf("used %d bins, want 2", res.BinsUsed())
 	}
-	if b := by["S"].BinID(); b != "blocks-bin-1" {
-		t.Errorf("filler landed in %s, want blocks-bin-1 (its top, not bin-0's stolen shallow top)", b)
-	}
-	// bin-0's shallow top (z≥9) must be empty — it was deferred, never stolen.
-	for _, p := range ps {
-		if p.BinID() == "blocks-bin-0" && p.Z >= 9-1e-9 {
-			t.Errorf("bin-0 shallow top holds %s at z=%v; should have been deferred", p.ItemID(), p.Z)
-		}
+	// The filler was deferred (never stolen into a tall layer's floor at z=0): it
+	// ends up backfilling a bin's top once the tall items are placed.
+	if by["S"].Z != 9 {
+		t.Errorf("filler at z=%v, want 9 (deferred to a top, not stolen into a body floor)", by["S"].Z)
 	}
 }
 
@@ -175,6 +172,130 @@ func TestBlockPacker_RevisitsDeferredTopWhenShortEnough(t *testing.T) {
 	}
 	if by["S0"].BinID() == by["S1"].BinID() {
 		t.Errorf("both fillers in %s; want one in each bin's top", by["S0"].BinID())
+	}
+}
+
+// On the final layer the packer lays items flat rather than fusing vertical
+// stacks. Three same-footprint items (heights 6, 4, 2) all fit flat on the floor,
+// so none should be stacked — even though 4+2 would fuse into a 6-tall column to
+// match the tallest. (The old build stacked the 4 and 2; flat keeps both at z=0.)
+func TestBlockPacker_FinalLayerPacksFlat(t *testing.T) {
+	bp := d3.NewBlockPacker(8, 8, 10)
+	res, err := bp.PackAll([]pack.Item{
+		d3.NewItem("P", 4, 4, 6, false),
+		d3.NewItem("Q", 4, 4, 4, false),
+		d3.NewItem("R", 4, 4, 2, false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, by := collect3D(t, res)
+	if res.BinsUsed() != 1 || len(ps) != 3 {
+		t.Fatalf("got %d placements in %d bins, want 3 in 1", len(ps), res.BinsUsed())
+	}
+	assertNoOverlap(t, ps, 8, 8, 10)
+	for _, id := range []string{"P", "Q", "R"} {
+		if by[id].Z != 0 {
+			t.Errorf("%s at z=%v, want 0 (final layer laid flat, not stacked)", id, by[id].Z)
+		}
+	}
+}
+
+// When the items do not all fit flat on the floor, stacking is required and still
+// happens: six 4×4×2 plus a 4×4×4 seed (footprint area 7×16 > the 8×8 floor) fuse
+// into 4-tall columns as before.
+func TestBlockPacker_StacksWhenFlatDoesNotFit(t *testing.T) {
+	bp := d3.NewBlockPacker(8, 8, 4)
+	items := []pack.Item{d3.NewItem("seed", 4, 4, 4, false)}
+	for i := 0; i < 6; i++ {
+		items = append(items, d3.NewItem("h"+string(rune('a'+i)), 4, 4, 2, false))
+	}
+	res, err := bp.PackAll(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, _ := collect3D(t, res)
+	if res.BinsUsed() != 1 || len(ps) != 7 {
+		t.Fatalf("got %d placements in %d bins, want 7 in 1 (stacking required)", len(ps), res.BinsUsed())
+	}
+	stacked := false
+	for _, p := range ps {
+		if p.Z > 1e-9 {
+			stacked = true
+		}
+	}
+	if !stacked {
+		t.Error("expected some items stacked above z=0 (flat would not fit)")
+	}
+	assertNoOverlap(t, ps, 8, 8, 4)
+}
+
+// The void-fill pre-pass slots a leftover item into an existing bin's well rather
+// than opening a new bin for it. Two 10×10×8 items each fill a bin's floor leaving
+// a 10×10×2 top well; a 10×10×2 leftover must drop into one of those wells, so the
+// solve uses 2 bins, not 3.
+func TestBlockPacker_VoidFillUsesExistingWells(t *testing.T) {
+	bp := d3.NewBlockPacker(10, 10, 10)
+	res, err := bp.PackAll([]pack.Item{
+		d3.NewItem("A", 10, 10, 8, false),
+		d3.NewItem("C", 10, 10, 8, false),
+		d3.NewItem("D", 10, 10, 2, false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, by := collect3D(t, res)
+	if len(ps) != 3 || len(res.Unplaced) != 0 {
+		t.Fatalf("placed %d (unplaced %d), want 3 / 0", len(ps), len(res.Unplaced))
+	}
+	if res.BinsUsed() != 2 {
+		t.Errorf("used %d bins, want 2 (D should fill an existing well, not a new bin)", res.BinsUsed())
+	}
+	if by["D"].Z != 8 {
+		t.Errorf("D at z=%v, want 8 (dropped into a top well above an 8-tall item)", by["D"].Z)
+	}
+	// Every box rests on the floor or another box — the void-fill must not float.
+	for _, group := range groupByBin(ps) {
+		assertNoOverlap(t, group, 10, 10, 10)
+	}
+}
+
+func groupByBin(ps []*d3.Placement3D) map[string][]*d3.Placement3D {
+	m := map[string][]*d3.Placement3D{}
+	for _, p := range ps {
+		m[p.BinID()] = append(m[p.BinID()], p)
+	}
+	return m
+}
+
+// The packing must be deterministic: identical input yields identical output,
+// regardless of Go's randomized map iteration (block groups are keyed by
+// footprint in a map, so they must be ordered before use).
+func TestBlockPacker_Deterministic(t *testing.T) {
+	sig := func() string {
+		items := make([]pack.Item, 0, 60)
+		for i := 0; i < 60; i++ {
+			w := float64(1 + i%5)
+			d := float64(1 + (i*7)%5)
+			h := float64(1 + (i*3)%5)
+			items = append(items, d3.NewItem("i"+string(rune('a'+i%26)), w, d, h, true))
+		}
+		res, err := d3.NewBlockPacker(9, 9, 9).PackAll(items)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		for _, p := range res.Placements {
+			pl := p.(*d3.Placement3D)
+			fmt.Fprintf(&b, "%s@%g,%g,%g:%g,%g,%g;", pl.ItemID(), pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+		}
+		return b.String()
+	}
+	first := sig()
+	for i := 0; i < 12; i++ {
+		if got := sig(); got != first {
+			t.Fatalf("run %d differs: non-deterministic packing", i)
+		}
 	}
 }
 
