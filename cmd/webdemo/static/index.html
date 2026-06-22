@@ -2497,6 +2497,25 @@ async function runSinglePack(auto = false) {
     } else if (f.type === 'batch') {
       if (multi) raceDrawBatch(f.seg || 0, f.placements || [], mode, body.bin);
       else drawBatch(f.placements || []);
+    } else if (f.type === 'reposition') {
+      // A relocating post-pass (settle / lateral compaction) ran after the live
+      // stream; f.placements is the final position of everything. Replace what we
+      // streamed and rebuild the view at the settled positions.
+      const pls = f.placements || [];
+      data.placements = pls;
+      if (is3D) {
+        let nb = 0;
+        for (const p of pls) if (p.bin_index + 1 > nb) nb = p.bin_index + 1;
+        ctl = beginScene3D(body.bin, Math.max(1, nb), count);
+        ctl.addItems(pls);
+        ctl.render();
+      } else {
+        let mx = 0;
+        for (const p of pls) if (p.bin_index + 1 > mx) mx = p.bin_index + 1;
+        data.bins_used = mx;
+        draw2D(data, mode, body.bin);
+      }
+      liveStats();
     } else if (f.type === 'done') {
       if (multi) { finishRace(f, mode, body.bin, auto); }
       else {

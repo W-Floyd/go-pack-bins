@@ -687,6 +687,9 @@ const streamBatch = 64
 //     or all at once after the solve completes (false, for non-incremental algos).
 //   - "batch": a slice of placements in commit order. For streaming algos these
 //     are flushed as the packer decides them; otherwise sent after the full solve.
+//   - "reposition": sent once after the batches when a relocating post-pass (settle
+//     for the layered packers, lateral compaction) ran; Placements holds the final
+//     position of every item, which the client applies over what it streamed.
 //   - "done":  terminal; carries the authoritative final summary.
 //   - "error": fatal error; terminal.
 type StreamFrame struct {
@@ -812,8 +815,14 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	// batch is what makes the bytes genuinely progressive.
 	if streaming {
 		emitProgress = true
-		if resp, ok := streamSolve(ctx, req, emit); ok {
+		if resp, reposition, ok := streamSolve(ctx, req, emit); ok {
 			flushBatch()
+			// A relocating post-pass (settle / lateral compaction) ran after the live
+			// stream; tell the client the final position of everything so it can apply
+			// the move.
+			if len(reposition) > 0 {
+				send(StreamFrame{Type: "reposition", Placements: reposition})
+			}
 			send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed,
 				Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
 			return
@@ -853,25 +862,24 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected})
 }
 
-// isStreamable reports whether req's solve is a single sequential pass that can
-// honestly emit placements as it commits them. It excludes:
-//   - balancing objectives, which run a post-pass (RefineBalance) that relocates
-//     already-committed items;
-//   - lateral compaction (any side contact target), which slides items after
-//     placement;
+// isStreamable reports whether req's solve streams its placements. The packer's
+// live commits are streamed as batches; a relocating post-pass (settle for the
+// layered packers, lateral compaction) is then delivered as one final "reposition"
+// frame (see streamSolve / StreamPack), so such passes no longer block streaming.
+// It still excludes:
+//   - balancing objectives, whose post-pass (RefineBalance) re-solves rather than
+//     merely repositioning;
 //   - algorithms with no incremental commit point: auto (BestOf), exact solvers
 //     (bc, kk), the multi-phase mffd, the self-managed harmonic/RFF variants, and
 //     2-D guillotine (its free-rect overlay is only meaningful when complete).
 func isStreamable(req PackRequest) bool {
-	// JointFit, the block packer, and the assembler commit each placement once, in
-	// final position, with no relocating post-pass, so they always stream.
-	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "blocks" || req.Algorithm == "assemble") {
+	// These self-managing 3-D packers stream their commits; joint/assemble need no
+	// post-pass, while blocks/layer add a settle reposition frame at the end.
+	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "assemble" ||
+		req.Algorithm == "blocks" || req.Algorithm == "layer") {
 		return true
 	}
 	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		return false
-	}
-	if _, _, any := req.Contact.lateralAxes(); any {
 		return false
 	}
 	switch req.Mode {
@@ -887,7 +895,7 @@ func isStreamable(req PackRequest) bool {
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "blf", "ems", "heightmap", "layer", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "blf", "ems", "heightmap", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -952,7 +960,7 @@ func (c *placeConv) conv(p pack.Placement) (PlacementResult, bool) {
 // packer commits it, then runs the solve. It returns the final summary and true.
 // Returns ok=false only if the algorithm is not a recognised sequential packer
 // (the caller then falls back to the full solve). Precondition: isStreamable(req).
-func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult)) (PackResponse, bool) {
+func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult)) (PackResponse, []PlacementResult, bool) {
 	conv := &placeConv{
 		mode: req.Mode, binIdx: map[string]int{}, offsets: map[string]float64{},
 		sizeByID: map[string]float64{}, binW: req.Bin.Width,
@@ -991,8 +999,9 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 		}
 	case "3d":
 		// The algorithm picks the placement strategy (extreme-point / blf / ems /
-		// heightmap), with placement-time gates only — lateral compaction is ruled
-		// out by isStreamable, so streamed positions are final.
+		// heightmap / layer / blocks). Placement-time gates apply here; any
+		// relocating post-pass (settle, lateral compaction) runs after the live
+		// stream and is delivered as a final reposition frame.
 		stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
 		})
@@ -1005,20 +1014,51 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 			items = append(items, it)
 		}
 	default:
-		return PackResponse{}, false
+		return PackResponse{}, nil, false
 	}
 
 	obs, run, ok := buildStreamPacker(ctx, req, factory)
 	if !ok {
-		return PackResponse{}, false
+		return PackResponse{}, nil, false
 	}
 	obs.Observe(observer)
 	result := run(items)
+
+	// Relocating post-passes run after the live stream; their effect is returned as
+	// a reposition set the caller emits as one final frame ("here's where everything
+	// ends up"). The same conv keeps bin indices/item ids consistent with the
+	// batches already sent.
+	var reposition []PlacementResult
+	moved := false
+	switch req.Mode {
+	case "3d":
+		if req.Algorithm == "layer" || req.Algorithm == "blocks" {
+			settleResult3D(result) // drop items left floating above a short layer cell
+			moved = true
+		}
+		if dx, dy, any := req.Contact.lateralAxes(); any {
+			compactResult3D(result, req.Bin.Width, req.Bin.Depth, req.Bin.Height, dx, dy, req.Contact.Bottom)
+			moved = true
+		}
+	case "2d":
+		if dx, dy, any := req.Contact.lateralAxes(); any {
+			compactResult2D(result, req.Bin.Width, req.Bin.Height, dx, dy)
+			moved = true
+		}
+	}
+	if moved {
+		for _, p := range result.Placements {
+			if pr, ok := conv.conv(p); ok {
+				reposition = append(reposition, pr)
+			}
+		}
+	}
+
 	return PackResponse{
 		BinsUsed:   result.BinsUsed(),
 		Unplaced:   result.Unplaced,
 		ItemErrors: placementErrors(result.PlacementErrors),
-	}, true
+	}, reposition, true
 }
 
 // buildStreamPacker returns the observable packer for req's (streamable) algorithm
@@ -1155,16 +1195,35 @@ func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 		}
 	case "3d":
 		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+		bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
 		strat := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, strat3DFor(algo, spec)), req.Constraints)
+			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor(algo, spec)), req.Constraints)
 		}
-		return []candidate{
+		cands := []candidate{
+			// Corner / maximal-space methods over the constrained factory (honour
+			// weight/category constraints).
 			wrap("FFD", offline.FirstFitDecreasing(strat("")), items3D(req)),
 			wrap("BFD", offline.BestFitDecreasing(strat("")), items3D(req)),
 			wrap("NFD", offline.NextFitDecreasing(strat("")), items3D(req)),
 			wrap("BLF", offline.FirstFitDecreasing(strat("blf")), items3D(req)),
 			wrap("EMS", offline.FirstFitDecreasing(strat("ems")), items3D(req)),
+			wrap("Fit", offline.FirstFitDecreasing(strat("fit")), items3D(req)),
+			wrap("Heightmap", offline.FirstFitDecreasing(strat("heightmap")), items3D(req)),
+			wrap("Layer", offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(strat("layer"))), items3D(req)),
 		}
+		// Block / fusion / LAFF packers manage their own bins and ignore the
+		// factory, so they cannot honour constraints — only race them when none
+		// are set, else they could win with a constraint-violating packing.
+		if len(req.Constraints) == 0 {
+			bp := d3.NewBlockPacker(bw, bd, bh)
+			as := d3.NewAssembler(bw, bd, bh)
+			cands = append(cands,
+				candidate{label: "Blocks", obs: bp, run: func() (pack.Result, error) { return bp.PackAllCtx(ctx, items3D(req)) }},
+				candidate{label: "Assemble", obs: as, run: func() (pack.Result, error) { return as.PackAllCtx(ctx, items3D(req)) }},
+				candidate{label: "LAFF", run: func() (pack.Result, error) { return d3.LAFF(items3D(req), bw, bd, bh) }},
+			)
+		}
+		return cands
 	}
 	return nil
 }
@@ -1757,6 +1816,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
+		settleResult3D(result) // drop any items left floating over a short layer cell
 		return buildResponse3D(result), nil
 	}
 
@@ -1899,6 +1959,9 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return PackResponse{Error: err.Error()}, nil
 	}
 
+	if req.Algorithm == "layer" {
+		settleResult3D(result) // the layered packer can float items above short cells
+	}
 	if dx, dy, any := req.Contact.lateralAxes(); any {
 		compactResult3D(result, bw, bd, bh, dx, dy, req.Contact.Bottom)
 	}
@@ -2141,6 +2204,22 @@ func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support f
 	}
 	for _, ps := range byBin {
 		d3.Compact(ps, bw, bd, bh, doX, doY, support)
+	}
+}
+
+// settleResult3D gravity-drops each bin's items so none float — the final pass for
+// the layered packers, whose layer-ceiling placement can leave an item hanging over
+// a shorter item below. It relocates committed items, so algorithms that use it
+// can't stream (see isStreamable).
+func settleResult3D(r pack.Result) {
+	byBin := map[string][]*d3.Placement3D{}
+	for _, p := range r.Placements {
+		if pl, ok := p.(*d3.Placement3D); ok {
+			byBin[pl.BinID()] = append(byBin[pl.BinID()], pl)
+		}
+	}
+	for _, ps := range byBin {
+		d3.Settle(ps)
 	}
 }
 
