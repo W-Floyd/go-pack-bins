@@ -37,7 +37,11 @@ type benchRow struct {
 	group, algo                  string // group = section heading (e.g. "3D", "3D · anti-slosh")
 	nsPerOp, bins, fill, compact float64
 	unfit                        int
+	dnf                          bool // did not finish within the time budget
 }
+
+// benchTimeout is the per-solve budget; a solve that doesn't finish is reported DNF.
+const benchTimeout = time.Second
 
 var (
 	benchMu    sync.Mutex
@@ -108,6 +112,7 @@ func benchTables() string {
 	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
 	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
 	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
+	b.WriteString("Each solve is timeboxed to 1 s; **DNF** = did not finish in that budget. ")
 	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
 	for _, g := range groups {
 		rows := byGroup[g]
@@ -121,6 +126,10 @@ func benchTables() string {
 		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |\n")
 		b.WriteString("|-----------|-------:|---------:|------------:|--------:|----------:|\n")
 		for i, r := range rows {
+			if r.dnf {
+				fmt.Fprintf(&b, "| %s | — | — | — | — | **DNF** |\n", r.algo)
+				continue
+			}
 			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", r.algo,
 				cell(fmt.Sprintf("%d", int(r.bins)), wBins[i]),
 				cell(fmt.Sprintf("%.1f", r.fill), wFill[i]),
@@ -137,22 +146,29 @@ func benchTables() string {
 // marked — except when every row matches (a uniform column has no winner worth
 // highlighting), in which case none are.
 func winners(rows []benchRow, lowerBetter bool, key func(benchRow) float64) []bool {
-	best := key(rows[0])
-	for _, r := range rows[1:] {
+	out := make([]bool, len(rows))
+	best, nFin := 0.0, 0 // best over finishers only; DNF rows never win
+	for _, r := range rows {
+		if r.dnf {
+			continue
+		}
 		k := key(r)
-		if (lowerBetter && k < best) || (!lowerBetter && k > best) {
+		if nFin == 0 || (lowerBetter && k < best) || (!lowerBetter && k > best) {
 			best = k
 		}
+		nFin++
 	}
-	out := make([]bool, len(rows))
-	n := 0
+	if nFin == 0 {
+		return out
+	}
+	win := 0
 	for i, r := range rows {
-		if key(r) == best {
+		if !r.dnf && key(r) == best {
 			out[i] = true
-			n++
+			win++
 		}
 	}
-	if n == len(rows) {
+	if win == nFin { // every finisher ties — nothing to distinguish
 		for i := range out {
 			out[i] = false
 		}
@@ -241,13 +257,32 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 		volByID[it.ID] = binVolume(sc.mode, BinSpec{Width: it.Width, Height: it.Height, Depth: it.Depth})
 	}
 
+	// Each solve is timeboxed: if it doesn't finish within benchTimeout the context
+	// deadline fires, the solver returns early, and ctx.Err() is set — we mark the
+	// row DNF and stop (no point timing an interrupted solve). Solvers that ignore
+	// the context (e.g. LAFF) simply run to completion; if that overruns the budget
+	// it still counts as DNF.
 	var resp PackResponse
+	dnf := false
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp = PackCtx(context.Background(), req)
+		ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
+		resp = PackCtx(ctx, req)
+		timedOut := ctx.Err() != nil
+		cancel()
+		if timedOut {
+			dnf = true
+			break
+		}
 	}
 	b.StopTimer()
+
+	if dnf {
+		b.ReportMetric(0, "DNF")
+		recordBench(benchRow{group: sc.group, algo: algo, dnf: true})
+		return
+	}
 
 	fill := 0.0
 	if denom := float64(resp.BinsUsed) * binVolume(sc.mode, sc.bin); denom > 0 {
@@ -397,6 +432,21 @@ func BenchmarkAlgos3DCartons(b *testing.B) {
 		desc:  "400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12",
 		bin:   BinSpec{Width: 12, Depth: 12, Height: 12},
 		items: benchCartons(400, 5),
+		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
+	})
+}
+
+// BenchmarkAlgos3DMega is the scalability stress test: 10 000 mixed boxes into a
+// large 75×75×75 bin. With the 1 s timebox, the O(k²)-per-insert placers (extreme-
+// point / EMS / heightmap) DNF on the huge per-bin item counts, while the layered
+// and block packers — which cap per-step work — finish. It's the case that
+// separates "scales" from "doesn't".
+func BenchmarkAlgos3DMega(b *testing.B) {
+	runScenario(b, scenario{
+		group: "3D · mega-stress", mode: "3d",
+		desc:  "10 000 mixed boxes (sides 1–6) into a 75×75×75 bin (each solve timeboxed to 1 s)",
+		bin:   BinSpec{Width: 75, Depth: 75, Height: 75},
+		items: benchMix("3d", 10000, 99),
 		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
 	})
 }
