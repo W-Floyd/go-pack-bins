@@ -28,6 +28,21 @@ import (
 // placed (in some block) it is consumed from all the others. Like d3.LAFF this
 // packer manages its own geometry and bins, but it commits each placement through
 // an observer as the block lands, so a solve streams its progress.
+//
+// Shallow-top deferral (multi-bin): a bin's final layer is often shorter than the
+// tallest item still to be packed — and filling it would "steal" the short items
+// that later bins need to close their own gaps. So a layer is only built when its
+// available height can hold the tallest unpacked item; otherwise the rest of the
+// bin (a shallow top) is *deferred*. Deferred regions are revisited once the
+// remaining items have shrunk to fit them (cap ≥ that height), and are preferred
+// over opening a new bin so the leftover space is reused. Because a too-tall item
+// could never have gone in the shallow top anyway, deferral never costs an extra
+// bin — it just keeps the small items available for the full-height layers that
+// benefit most.
+//
+// The "tallest unpacked item" is measured by each item's *flattest* orientation
+// (its minimum height), so a rotatable long-skinny box — which can lie flat —
+// never triggers a deferral; only items tall in every orientation do.
 type BlockPacker struct {
 	w, d, h  float64
 	observer pack.PlaceObserver
@@ -77,6 +92,14 @@ type block struct {
 	subs   []sub
 }
 
+// region is a free vertical span [base, base+cap) within an already-opened bin
+// awaiting fill — produced when a bin's shallow top is deferred.
+type region struct {
+	binID string
+	base  float64
+	cap   float64
+}
+
 // PackAllCtx packs items into layers of fused blocks, committing each placement
 // through the observer as it lands. It samples ctx between layers and inside the
 // stack search, returning the partial result and ctx.Err() if cancelled.
@@ -109,45 +132,140 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 	consumed := make([]bool, len(its))
 	binIdx := 0
 	var nextID int
+	var deferred []region // shallow tops parked until a short-enough item remains
 
 	for remaining(its, consumed) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		binID := fmt.Sprintf("blocks-bin-%d", binIdx)
-		baseZ := 0.0
-		placedInBin := 0
+		// The decisive height: the largest, over remaining items, of each item's
+		// *flattest* orientation. A region (or fresh bin) may only be filled when its
+		// height can hold this — otherwise filling it is the shallow-top steal we
+		// avoid. Using the flattest orientation means a rotatable long-skinny item
+		// (which can lie flat) never forces a deferral; only items tall in every
+		// orientation do.
+		flat := bp.flattestTallest(its, consumed)
+		if flat <= 0 {
+			break // no remaining item fits any bin (pre-filtered; defensive)
+		}
 
-		for baseZ < bp.h-blockEps {
+		// Prefer reusing a deferred shallow top now tall enough (tightest first, to
+		// reserve roomier regions); else open a fresh bin.
+		if ri := pickDeferred(deferred, flat); ri >= 0 {
+			r := deferred[ri]
+			deferred = append(deferred[:ri], deferred[ri+1:]...)
+			rem, _ := bp.fillRegion(ctx, &result, r, its, consumed, &nextID)
 			if err := ctx.Err(); err != nil {
 				return result, err
 			}
-			H := bp.maxHeight(its, consumed, bp.h-baseZ)
-			if H <= 0 {
-				break // nothing left fits the remaining height — this bin is done
+			if rem != nil {
+				deferred = append(deferred, *rem)
 			}
-			floor := d2.NewBin(binID, bp.w, bp.d, d2.NewMaxRectsDefault(bp.w, bp.d))
-			// First fill the layer with blocks exactly H tall (clean layer lines).
-			n := bp.placeOnFloor(floor, &result, binID, bp.buildBlocks(its, consumed, H), consumed, baseZ, &nextID)
-			// Last resort: drop the tallest blocks that still fit the layer height
-			// into any leftover floor cells, so a gap becomes a short item with a
-			// small void above it rather than a full-height void. The layer top
-			// stays at baseZ+H, so the layer lines are preserved.
-			n += bp.placeOnFloor(floor, &result, binID, bp.buildFallbackBlocks(its, consumed, H), consumed, baseZ, &nextID)
-			if n == 0 {
-				break // safety: no block fit the floor (shouldn't happen at baseZ==0)
-			}
-			placedInBin += n
-			baseZ += H
+			continue
 		}
 
-		if placedInBin == 0 {
-			break // safety against a non-progressing bin
+		binID := fmt.Sprintf("blocks-bin-%d", binIdx)
+		rem, placed := bp.fillRegion(ctx, &result, region{binID: binID, base: 0, cap: bp.h}, its, consumed, &nextID)
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if placed == 0 {
+			break // safety against a non-progressing bin (no empty bin recorded)
 		}
 		result.Bins = append(result.Bins, NewBin(binID, bp.w, bp.d, bp.h, NewExtremePointStrategy(bp.w, bp.d, bp.h)))
 		binIdx++
+		if rem != nil {
+			deferred = append(deferred, *rem)
+		}
+	}
+
+	// Any item still unconsumed (e.g. after a non-progressing safety break) is
+	// reported unplaced rather than silently dropped.
+	for i, it := range its {
+		if !consumed[i] {
+			result.Unplaced = append(result.Unplaced, it.id)
+		}
 	}
 	return result, nil
+}
+
+// fillRegion stacks height-matched layers up region r from its base. A layer is
+// built only while its remaining height can hold the tallest unpacked item; the
+// first time it cannot, the rest of r is returned as a deferred region (a shallow
+// top) instead of being filled with short items. Returns the deferred remainder
+// (nil if the region was filled to its top / exhausted) and items placed.
+func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r region, its []*pitem, consumed []bool, nextID *int) (*region, int) {
+	base := r.base
+	top := r.base + r.cap
+	placed := 0
+	for base < top-blockEps {
+		if err := ctx.Err(); err != nil {
+			return nil, placed
+		}
+		cap := top - base
+		H := bp.maxHeight(its, consumed, cap) // tallest item fitting this span
+		if H <= 0 {
+			break // nothing left fits the remaining height of this region
+		}
+		if cap < bp.flattestTallest(its, consumed)-blockEps {
+			// Shallow top: some remaining item can't fit this span even laid flat.
+			// Defer the rest of the region rather than steal short items for a thin
+			// layer; it will be revisited once the remaining items fit.
+			return &region{binID: r.binID, base: base, cap: cap}, placed
+		}
+		floor := d2.NewBin(r.binID, bp.w, bp.d, d2.NewMaxRectsDefault(bp.w, bp.d))
+		// First fill the layer with blocks exactly H tall (clean layer lines).
+		n := bp.placeOnFloor(floor, result, r.binID, bp.buildBlocks(its, consumed, H), consumed, base, nextID)
+		// Last resort: drop the tallest blocks that still fit the layer height into
+		// any leftover floor cells, so a gap becomes a short item with a small void
+		// above it rather than a full-height void. The layer top stays at base+H, so
+		// the layer lines are preserved.
+		n += bp.placeOnFloor(floor, result, r.binID, bp.buildFallbackBlocks(its, consumed, H), consumed, base, nextID)
+		if n == 0 {
+			break // safety: no block fit the floor (shouldn't happen at the base)
+		}
+		placed += n
+		base += H
+	}
+	return nil, placed
+}
+
+// pickDeferred returns the index of the tightest deferred region whose height can
+// hold an item of the given height, or -1 if none can. Tightest-first reuse keeps
+// the roomier parked regions available for taller items.
+func pickDeferred(deferred []region, tallest float64) int {
+	best := -1
+	for i, r := range deferred {
+		if r.cap >= tallest-blockEps && (best < 0 || r.cap < deferred[best].cap) {
+			best = i
+		}
+	}
+	return best
+}
+
+// flattestTallest is the largest, over the available items, of each item's
+// *flattest* orientation height (the minimum height across its valid
+// orientations). It is the least height a layer must have to accommodate every
+// remaining item when each is laid as flat as it can be — so the deferral test
+// ignores items that are only tall in some orientation (e.g. a rotatable
+// long-skinny box), treating them by their lie-flat height.
+func (bp *BlockPacker) flattestTallest(its []*pitem, consumed []bool) float64 {
+	best := 0.0
+	for i, it := range its {
+		if consumed[i] || len(it.orient) == 0 {
+			continue
+		}
+		min := it.orient[0].fh
+		for _, o := range it.orient[1:] {
+			if o.fh < min {
+				min = o.fh
+			}
+		}
+		if min > best {
+			best = min
+		}
+	}
+	return best
 }
 
 // maxHeight is the tallest item height (over available items' valid orientations)

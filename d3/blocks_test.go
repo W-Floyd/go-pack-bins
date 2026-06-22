@@ -109,6 +109,75 @@ func TestBlockPacker_FallbackFillsLayerGap(t *testing.T) {
 	}
 }
 
+// eightTallFourPerLayer builds 8 items of 5×5×9: four 5×5 footprints tile a 10×10
+// floor, so each bin holds one height-9 layer of four, leaving a 1-tall shallow
+// top (cap 1) that no 9-tall item can use.
+func eightTallFourPerLayer() []pack.Item {
+	its := make([]pack.Item, 0, 8)
+	for i := 0; i < 8; i++ {
+		its = append(its, d3.NewItem("T"+string(rune('a'+i)), 5, 5, 9, false))
+	}
+	return its
+}
+
+// While 9-tall items still remain, a bin's 1-tall shallow top must be deferred,
+// not filled with the short 10×10×1 filler — that filler is more useful later.
+// With two bins of tall items and a single filler, the filler must land in the
+// *second* bin's top (built when no taller item is left), and the first bin's
+// shallow top must stay empty rather than steal it.
+func TestBlockPacker_DefersShallowTopWhileTallItemsRemain(t *testing.T) {
+	bp := d3.NewBlockPacker(10, 10, 10)
+	items := append(eightTallFourPerLayer(), d3.NewItem("S", 10, 10, 1, false))
+	res, err := bp.PackAll(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, by := collect3D(t, res)
+	if len(ps) != 9 || len(res.Unplaced) != 0 {
+		t.Fatalf("placed %d (unplaced %d), want 9 / 0", len(ps), len(res.Unplaced))
+	}
+	if res.BinsUsed() != 2 {
+		t.Fatalf("used %d bins, want 2", res.BinsUsed())
+	}
+	if b := by["S"].BinID(); b != "blocks-bin-1" {
+		t.Errorf("filler landed in %s, want blocks-bin-1 (its top, not bin-0's stolen shallow top)", b)
+	}
+	// bin-0's shallow top (z≥9) must be empty — it was deferred, never stolen.
+	for _, p := range ps {
+		if p.BinID() == "blocks-bin-0" && p.Z >= 9-1e-9 {
+			t.Errorf("bin-0 shallow top holds %s at z=%v; should have been deferred", p.ItemID(), p.Z)
+		}
+	}
+}
+
+// Once only short-enough items remain, the deferred shallow tops are revisited
+// and backfilled: two fillers fill both bins' 1-tall tops (one each).
+func TestBlockPacker_RevisitsDeferredTopWhenShortEnough(t *testing.T) {
+	bp := d3.NewBlockPacker(10, 10, 10)
+	items := append(eightTallFourPerLayer(),
+		d3.NewItem("S0", 10, 10, 1, false),
+		d3.NewItem("S1", 10, 10, 1, false))
+	res, err := bp.PackAll(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, by := collect3D(t, res)
+	if len(ps) != 10 || len(res.Unplaced) != 0 {
+		t.Fatalf("placed %d (unplaced %d), want 10 / 0", len(ps), len(res.Unplaced))
+	}
+	if res.BinsUsed() != 2 {
+		t.Fatalf("used %d bins, want 2", res.BinsUsed())
+	}
+	// Both fillers placed at the top (z=9), one per bin — the deferred tops were
+	// revisited once the tall items were gone.
+	if by["S0"].Z != 9 || by["S1"].Z != 9 {
+		t.Errorf("fillers at z=%v / %v, want both at 9 (deferred tops backfilled)", by["S0"].Z, by["S1"].Z)
+	}
+	if by["S0"].BinID() == by["S1"].BinID() {
+		t.Errorf("both fillers in %s; want one in each bin's top", by["S0"].BinID())
+	}
+}
+
 func TestBlockPacker_StreamsAndNoOverlap(t *testing.T) {
 	bp := d3.NewBlockPacker(10, 10, 10)
 	var streamed int
