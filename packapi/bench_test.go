@@ -3,6 +3,7 @@ package packapi
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,9 +34,9 @@ import (
 // ─── markdown accumulation ──────────────────────────────────────────────────
 
 type benchRow struct {
-	group, algo               string // group = section heading (e.g. "3D", "3D · anti-slosh")
-	nsPerOp, bins, fill, bbox float64
-	unfit                     int
+	group, algo                  string // group = section heading (e.g. "3D", "3D · anti-slosh")
+	nsPerOp, bins, fill, compact float64
+	unfit                        int
 }
 
 var (
@@ -93,22 +94,70 @@ func benchTables() string {
 		byGroup[r.group] = append(byGroup[r.group], r)
 	}
 
+	round1 := func(v float64) float64 { return math.Round(v*10) / 10 }
+	usOf := func(ns float64) float64 { return float64(time.Duration(int64(ns)).Round(time.Microsecond)) }
+	cell := func(s string, win bool) string {
+		if win {
+			return "**" + s + "**"
+		}
+		return s
+	}
+
 	var b strings.Builder
-	b.WriteString("_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better). ")
+	b.WriteString("_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better); the best value in each column is **bold** (all ties, unless every row matches). ")
 	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
-	b.WriteString("`bbox%` = the packed items' bounding box ÷ bin volume, averaged over bins; ")
-	b.WriteString("lower means the items cluster more compactly, leaving contiguous free space. ")
+	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
+	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
 	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
 	for _, g := range groups {
+		rows := byGroup[g]
+		wBins := winners(rows, true, func(r benchRow) float64 { return float64(int(r.bins)) })
+		wFill := winners(rows, false, func(r benchRow) float64 { return round1(r.fill) })
+		wCompact := winners(rows, false, func(r benchRow) float64 { return round1(r.compact) })
+		wUnfit := winners(rows, true, func(r benchRow) float64 { return float64(r.unfit) })
+		wTime := winners(rows, true, func(r benchRow) float64 { return usOf(r.nsPerOp) })
+
 		fmt.Fprintf(&b, "\n### %s — %s\n\n", g, benchMeta[g])
-		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |\n")
-		b.WriteString("|-----------|-------:|---------:|---------:|--------:|----------:|\n")
-		for _, r := range byGroup[g] {
-			fmt.Fprintf(&b, "| %s | %d | %.1f | %.1f | %d | %s |\n",
-				r.algo, int(r.bins), r.fill, r.bbox, r.unfit, fmtDuration(r.nsPerOp))
+		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |\n")
+		b.WriteString("|-----------|-------:|---------:|------------:|--------:|----------:|\n")
+		for i, r := range rows {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", r.algo,
+				cell(fmt.Sprintf("%d", int(r.bins)), wBins[i]),
+				cell(fmt.Sprintf("%.1f", r.fill), wFill[i]),
+				cell(fmt.Sprintf("%.1f", r.compact), wCompact[i]),
+				cell(fmt.Sprintf("%d", r.unfit), wUnfit[i]),
+				cell(fmtDuration(r.nsPerOp), wTime[i]))
 		}
 	}
 	return b.String()
+}
+
+// winners marks which rows hold the best value of a column. key extracts the
+// comparable value; lowerBetter picks the direction. All rows tying for best are
+// marked — except when every row matches (a uniform column has no winner worth
+// highlighting), in which case none are.
+func winners(rows []benchRow, lowerBetter bool, key func(benchRow) float64) []bool {
+	best := key(rows[0])
+	for _, r := range rows[1:] {
+		k := key(r)
+		if (lowerBetter && k < best) || (!lowerBetter && k > best) {
+			best = k
+		}
+	}
+	out := make([]bool, len(rows))
+	n := 0
+	for i, r := range rows {
+		if key(r) == best {
+			out[i] = true
+			n++
+		}
+	}
+	if n == len(rows) {
+		for i := range out {
+			out[i] = false
+		}
+	}
+	return out
 }
 
 // writeBenchMarkdown rewrites the comparison tables in place between the
@@ -204,54 +253,70 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 	if denom := float64(resp.BinsUsed) * binVolume(sc.mode, sc.bin); denom > 0 {
 		fill = 100 * placedVolume(resp, volByID) / denom
 	}
-	bbox := meanBoundingBoxPct(resp, sc.mode, sc.bin)
+	compact := meanCompactnessPct(resp, sc.mode)
 	b.ReportMetric(float64(resp.BinsUsed), "bins")
 	b.ReportMetric(fill, "fill%")
-	b.ReportMetric(bbox, "bbox%")
+	b.ReportMetric(compact, "compact%")
 	if n := len(resp.Unplaced); n > 0 {
 		b.ReportMetric(float64(n), "unfit")
 	}
 	recordBench(benchRow{
 		group: sc.group, algo: algo,
 		nsPerOp: float64(b.Elapsed().Nanoseconds()) / float64(b.N),
-		bins:    float64(resp.BinsUsed), fill: fill, bbox: bbox, unfit: len(resp.Unplaced),
+		bins:    float64(resp.BinsUsed), fill: fill, compact: compact, unfit: len(resp.Unplaced),
 	})
 }
 
-// meanBoundingBoxPct measures compactness: per bin, the axis-aligned bounding box
-// of that bin's placed items as a fraction of the bin volume, averaged over the
-// bins used. A low value means items cluster into one corner (leaving contiguous
-// free space); a value near 100% means the packing's envelope spans the whole bin.
-func meanBoundingBoxPct(resp PackResponse, mode string, bin BinSpec) float64 {
-	type span struct{ minX, minY, minZ, maxX, maxY, maxZ float64 }
-	bins := map[int]*span{}
+// meanCompactnessPct measures how void-free a packing's occupied envelope is:
+// per bin, the placed items' total volume as a fraction of their axis-aligned
+// bounding-box volume, averaged over the bins used. It is deliberately
+// independent of how full the bin is — packed ÷ envelope, not packed ÷ bin — so
+// a chronically underfilled bin does not score well merely for being empty; it
+// scores well only when the items it does hold are clustered with few internal
+// gaps. 100% = the envelope is solid; lower = scattered items with voids between.
+func meanCompactnessPct(resp PackResponse, mode string) float64 {
+	type acc struct{ minX, minY, minZ, maxX, maxY, maxZ, packed float64 }
+	bins := map[int]*acc{}
 	for _, p := range resp.Placements {
-		s := bins[p.BinIndex]
-		if s == nil {
-			s = &span{minX: p.X, minY: p.Y, minZ: p.Z}
-			bins[p.BinIndex] = s
+		a := bins[p.BinIndex]
+		if a == nil {
+			a = &acc{minX: p.X, minY: p.Y, minZ: p.Z}
+			bins[p.BinIndex] = a
 		}
-		s.minX, s.maxX = min(s.minX, p.X), max(s.maxX, p.X+p.W)
-		s.minY, s.maxY = min(s.minY, p.Y), max(s.maxY, p.Y+axisExtentY(mode, p))
-		s.minZ, s.maxZ = min(s.minZ, p.Z), max(s.maxZ, p.Z+p.H)
-	}
-	binVol := binVolume(mode, bin)
-	if len(bins) == 0 || binVol <= 0 {
-		return 0
-	}
-	total := 0.0
-	for _, s := range bins {
-		dx := s.maxX - s.minX
-		vol := dx
+		ey := axisExtentY(mode, p)
+		a.minX, a.maxX = min(a.minX, p.X), max(a.maxX, p.X+p.W)
+		a.minY, a.maxY = min(a.minY, p.Y), max(a.maxY, p.Y+ey)
+		a.minZ, a.maxZ = min(a.minZ, p.Z), max(a.maxZ, p.Z+p.H)
+		v := p.W // placed item volume, from actual (possibly rotated) dimensions
 		if mode != "1d" {
-			vol *= s.maxY - s.minY // y-extent
+			v *= ey
 		}
 		if mode == "3d" {
-			vol *= s.maxZ - s.minZ // z-extent
+			v *= p.H
 		}
-		total += 100 * vol / binVol
+		a.packed += v
 	}
-	return total / float64(len(bins))
+	if len(bins) == 0 {
+		return 0
+	}
+	total, n := 0.0, 0
+	for _, a := range bins {
+		bbox := a.maxX - a.minX
+		if mode != "1d" {
+			bbox *= a.maxY - a.minY
+		}
+		if mode == "3d" {
+			bbox *= a.maxZ - a.minZ
+		}
+		if bbox > 0 {
+			total += 100 * a.packed / bbox
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return total / float64(n)
 }
 
 // axisExtentY returns a placement's extent on the second (depth/height) axis,
