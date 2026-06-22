@@ -19,7 +19,8 @@ go vet ./...
 GOOS=js GOARCH=wasm go build ./cmd/wasm     # wasm build check
 ./scripts/build-wasm.sh            # produces dist/ (static WASM bundle)
 cd cmd/webdemo && go run .         # server at http://localhost:8082
-cd bench && go run .               # benchmark vs boxpacker3 (SEPARATE module)
+cd bench && go run .               # benchmark vs boxpacker3/bp3d (SEPARATE module)
+go test ./packapi/ -bench BenchmarkAlgos -run '^$' -benchmem   # algo-vs-algo: speed + bins/fill%
 ```
 
 CI runs build/vet/`test -race` on Go `stable`. Toolchain is Go ≥1.24 (wasm_exec.js
@@ -83,13 +84,9 @@ lives in `$(go env GOROOT)/lib/wasm/`).
   level 1 via each carton's *actual* chosen dimensions; results carry per-bin dims.
   The UI mirrors the outer (pallet) and inner (carton) controls separately.
 - Run `gofmt -w` on Go files you edit. Prefer the Edit/Write tools over `sed`/`perl`.
-- **Verify UI changes** by driving the running server with headless Chromium over
-  the DevTools protocol (`--use-gl=angle --use-angle=swiftshader` for software
-  WebGL) and screenshotting — JS errors and blank renders don't show up in `go test`.
-  **Kill port 8082 first** (`lsof -ti tcp:8082 | xargs kill -9`): a `go run`/built
-  server silently fails to bind if an old one is still listening, so you'd test
-  stale code. Multi-step CDP scripts can flake on await-chaining — prefer one
-  `Runtime.evaluate` that does the setup and returns a JSON summary.
+- UI changes are verified by the user, who drives the running demo themselves; JS
+  errors and blank renders don't show up in `go test`, so flag UI-affecting changes
+  for them to check rather than asserting the frontend works from Go tests alone.
 
 ## Git
 

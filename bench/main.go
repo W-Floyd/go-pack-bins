@@ -1,17 +1,19 @@
-// Command bench compares go-pack-bins against bavix/boxpacker3 on identical 3-D
-// packing instances, reporting both result quality (bins used, fill rate, items
-// left unplaced) and wall-clock time.
+// Command bench compares go-pack-bins against bavix/boxpacker3 and gedex/bp3d on
+// identical 3-D packing instances, reporting both result quality (bins used,
+// fill rate, items left unplaced) and wall-clock time.
 //
-// It lives in its own module so boxpacker3 is not a dependency of the main
-// (dependency-free) go-pack-bins module. Run it from this directory:
+// It lives in its own module so boxpacker3 and bp3d are not dependencies of the
+// main (dependency-free) go-pack-bins module. Run it from this directory:
 //
 //	cd bench && go run .            # default instances
 //	go run . -items 50,200,800     # custom item counts
 //	go run . -runs 5               # average timing over N runs (min reported)
 //
-// Both libraries are given the same items and the same single box size; each is
-// asked to minimise box count (FFD-equivalent) and, separately, best-fit. The
-// two engines interpret the box axes differently internally, but both consider
+// All three libraries are given the same items and the same single box size.
+// go-pack-bins and boxpacker3 are each asked to minimise box count
+// (FFD-equivalent) and, separately, best-fit; bp3d exposes a single
+// volume-descending first-fit strategy, so it is reported once, on the FFD row.
+// The engines interpret the box axes differently internally, but all consider
 // all six rotations and the same volume, so the comparison is fair on the
 // quantities that matter: how many boxes, how full, how fast.
 package main
@@ -27,6 +29,7 @@ import (
 	"time"
 
 	bp3 "github.com/bavix/boxpacker3"
+	bp3d "github.com/gedex/bp3d"
 
 	"github.com/W-Floyd/go-pack-bins/packapi"
 )
@@ -73,19 +76,28 @@ func main() {
 		{"BFD (best-fit decreasing)", "bfd", bp3.StrategyBestFitDecreasing},
 	}
 
-	fmt.Printf("go-pack-bins vs boxpacker3 — %d runs/solve, seed %d\n", *runs, *seed)
+	fmt.Printf("go-pack-bins vs boxpacker3 vs bp3d — %d runs/solve, seed %d\n", *runs, *seed)
 	for _, inst := range insts {
 		fmt.Printf("\n=== %s · box %g×%g×%g · total item vol %.0f ===\n",
 			inst.name, inst.box.w, inst.box.h, inst.box.d, totalVol(inst.itm))
-		fmt.Printf("%-26s  %-28s  %-28s\n", "strategy", "go-pack-bins", "boxpacker3")
-		fmt.Printf("%-26s  %-28s  %-28s\n", strings.Repeat("-", 26), strings.Repeat("-", 28), strings.Repeat("-", 28))
-		for _, p := range pairs {
+		fmt.Printf("%-26s  %-28s  %-28s  %-28s\n", "strategy", "go-pack-bins", "boxpacker3", "bp3d")
+		div := strings.Repeat("-", 28)
+		fmt.Printf("%-26s  %-28s  %-28s  %-28s\n", strings.Repeat("-", 26), div, div, div)
+		// bp3d has a single (volume-descending first-fit) strategy; run it once
+		// and show it on the FFD row, its natural analog.
+		bp3dStats := runBp3d(inst, *runs)
+		for i, p := range pairs {
 			ours := runOurs(p.ours, inst, *runs)
 			theirs := runBp3(p.bp3, inst, *runs)
-			fmt.Printf("%-26s  %-28s  %-28s\n", p.label, fmtStats(ours), fmtStats(theirs))
+			third := "—"
+			if i == 0 {
+				third = fmtStats(bp3dStats)
+			}
+			fmt.Printf("%-26s  %-28s  %-28s  %-28s\n", p.label, fmtStats(ours), fmtStats(theirs), third)
 		}
 	}
 	fmt.Println("\nfill% = packed item volume ÷ (bins × box volume); higher is tighter.")
+	fmt.Println("bp3d exposes one volume-descending first-fit strategy, shown on the FFD row.")
 }
 
 func fmtStats(s stats) string {
@@ -180,6 +192,49 @@ func runBp3(strategy bp3.PackingStrategy, inst instance, runs int) stats {
 	return makeStats(bins, len(res.UnfitItems), packedVol, inst.box.vol(), best)
 }
 
+// ─── bp3d ────────────────────────────────────────────────────────────────────
+
+func runBp3d(inst instance, runs int) stats {
+	// Like boxpacker3, bp3d packs into a fixed list of bins: give it one
+	// identical candidate bin per item (an upper bound) and a huge maxWeight so
+	// weight never gates a purely geometric run. With equal-volume bins it spills
+	// each full bin into the next, so non-empty bins = boxes used.
+	const bigWeight = 1e18
+	build := func() *bp3d.Packer {
+		p := bp3d.NewPacker()
+		for i := range inst.itm {
+			p.AddBin(bp3d.NewBin("box"+strconv.Itoa(i), inst.box.w, inst.box.h, inst.box.d, bigWeight))
+		}
+		for i, it := range inst.itm {
+			p.AddItem(bp3d.NewItem("i"+strconv.Itoa(i), it.w, it.h, it.d, 0))
+		}
+		return p
+	}
+
+	var p *bp3d.Packer
+	best := time.Duration(1<<63 - 1)
+	for r := 0; r < runs; r++ {
+		p = build() // fresh inputs each run; Pack() mutates bins and item lists
+		t0 := time.Now()
+		_ = p.Pack()
+		if d := time.Since(t0); d < best {
+			best = d
+		}
+	}
+
+	bins, packedVol := 0, 0.0
+	for _, b := range p.Bins {
+		if len(b.Items) == 0 {
+			continue
+		}
+		bins++
+		for _, it := range b.Items {
+			packedVol += it.GetVolume()
+		}
+	}
+	return makeStats(bins, len(p.UnfitItems), packedVol, inst.box.vol(), best)
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 func makeStats(bins, unplaced int, packedVol, boxVol float64, took time.Duration) stats {
@@ -201,7 +256,7 @@ func totalVol(items []dims) float64 {
 // genInstance builds a deterministic instance of n items: a 10×10×10 box and
 // items whose sides are 2..5 (so several fit per box, with non-trivial gaps).
 func genInstance(n int, seed int64) instance {
-	rng := rand.New(rand.NewSource(seed + int64(n))) // vary per size, still reproducible
+	rng := rand.New(rand.NewSource(seed + int64(n)))           // vary per size, still reproducible
 	side := func() float64 { return float64(2 + rng.Intn(4)) } // 2..5
 	items := make([]dims, n)
 	for i := range items {

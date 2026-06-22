@@ -684,11 +684,19 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 
 	// A buffered emitter coalesces placements into batches so we are not flushing
 	// one tiny frame per box, while still pushing each batch the moment it fills.
+	// On the genuine streaming path (emitProgress) each flush also reports how many
+	// items are placed so far, so the UI shows a numeric %% — the same channel the
+	// slow solvers use — alongside the boxes appearing.
 	var buf []PlacementResult
+	placed, total, emitProgress := 0, len(req.Items), false
 	flushBatch := func() {
 		if len(buf) > 0 {
 			send(StreamFrame{Type: "batch", Placements: buf})
+			placed += len(buf)
 			buf = nil
+			if emitProgress {
+				send(StreamFrame{Type: "progress", Done: placed, Total: total})
+			}
 		}
 	}
 	emit := func(pr PlacementResult) {
@@ -732,6 +740,7 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	// batches leave mid-solve. The solve runs synchronously here; flushing per
 	// batch is what makes the bytes genuinely progressive.
 	if streaming {
+		emitProgress = true
 		if resp, ok := streamSolve(ctx, req, emit); ok {
 			flushBatch()
 			send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed,
@@ -807,7 +816,7 @@ func isStreamable(req PackRequest) bool {
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "blf", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "blf", "ems", "heightmap", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -910,15 +919,12 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 			items = append(items, it)
 		}
 	case "3d":
-		// BLF is its own strategy; otherwise extreme-point with placement-time
-		// gates only (lateral compaction is ruled out by isStreamable), so streamed
-		// positions are final.
-		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
+		// The algorithm picks the placement strategy (extreme-point / blf / ems /
+		// heightmap), with placement-time gates only — lateral compaction is ruled
+		// out by isStreamable, so streamed positions are final.
+		stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
 		})
-		if req.Algorithm == "blf" {
-			stratFn = d3.NewBottomLeftFillStrategy
-		}
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
 			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
@@ -1069,18 +1075,16 @@ func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 			wrap("FFD·skyline", offline.FirstFitDecreasing(sky()), items2D(req)),
 		}
 	case "3d":
-		f := func() pack.BinFactory {
-			stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
-			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
-		}
-		blf := func() pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.NewBottomLeftFillStrategy), req.Constraints)
+		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+		strat := func(algo string) pack.BinFactory {
+			return constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, strat3DFor(algo, spec)), req.Constraints)
 		}
 		return []candidate{
-			wrap("FFD", offline.FirstFitDecreasing(f()), items3D(req)),
-			wrap("BFD", offline.BestFitDecreasing(f()), items3D(req)),
-			wrap("NFD", offline.NextFitDecreasing(f()), items3D(req)),
-			wrap("BLF", offline.FirstFitDecreasing(blf()), items3D(req)),
+			wrap("FFD", offline.FirstFitDecreasing(strat("")), items3D(req)),
+			wrap("BFD", offline.BestFitDecreasing(strat("")), items3D(req)),
+			wrap("NFD", offline.NextFitDecreasing(strat("")), items3D(req)),
+			wrap("BLF", offline.FirstFitDecreasing(strat("blf")), items3D(req)),
+			wrap("EMS", offline.FirstFitDecreasing(strat("ems")), items3D(req)),
 		}
 	}
 	return nil
@@ -1611,18 +1615,33 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 
 // ─── 3-D ─────────────────────────────────────────────────────────────────────
 
+// strat3DFor maps a 3-D algorithm name to its within-bin placement-strategy
+// constructor. Extreme-point is the default; blf, ems and heightmap each select
+// their own strategy. All honour the spec's hard support gates (Bottom,
+// NoFloating); only extreme-point also uses the lateral SideX/SideY targets — the
+// others leave anti-slosh to the separate compaction pass.
+func strat3DFor(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
+	switch algo {
+	case "blf":
+		return d3.NewBottomLeftFillStrategy
+	case "ems":
+		return d3.NewEMSStrategyContact(spec)
+	case "heightmap":
+		return d3.NewHeightmapStrategyContact(spec)
+	default:
+		return d3.NewExtremePointStrategyContact(spec)
+	}
+}
+
 func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	// Deepest-bottom-left-fill is its own placement strategy; everything else uses
-	// extreme-point with the contact spec (Bottom → hard support gate, SideX/SideY
-	// → contact-maximizing placement).
-	stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{
+	// The placement strategy follows the algorithm (extreme-point / blf / ems /
+	// heightmap); all read the contact spec (Bottom → hard support gate, SideX/SideY
+	// → contact-maximizing placement, used only by extreme-point).
+	stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
 	})
-	if req.Algorithm == "blf" {
-		stratFn = d3.NewBottomLeftFillStrategy
-	}
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
@@ -1746,12 +1765,15 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: e.Error()}, nil
 		}
 	case "auto":
-		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, d3.NewBottomLeftFillStrategy), req.Constraints)
+		gateSpec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor("blf", gateSpec)), req.Constraints)
+		emsFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor("ems", gateSpec)), req.Constraints)
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
 			offline.BestFitDecreasing(factory),
 			offline.NextFitDecreasing(factory),
 			offline.FirstFitDecreasing(blfFactory),
+			offline.FirstFitDecreasing(emsFactory),
 		)
 		result, err = packAllCtx(ctx, p, items)
 		bestPacker = p.Winner()

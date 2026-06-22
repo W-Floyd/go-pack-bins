@@ -31,13 +31,41 @@ commit, port any improvements, and bump the commit hash above.
 - Used only as a comparison baseline in [`bench/`](bench/) (a separate module);
   no algorithm code is derived from it.
 
+## gedex/bp3d (MIT)
+
+- Repo: https://github.com/gedex/bp3d
+  (commit `0ba3dcda7ab3`; pre-modules, resolved via a synthesized pseudo-version)
+- Used only as a comparison baseline in [`bench/`](bench/) (a separate module);
+  no algorithm code is derived from it.
+- bp3d is a near-line-for-line implementation of the pivot heuristic in Dube &
+  Kanavathy, *Optimizing Three-Dimensional Bin Packing Through Simulation*
+  (IASTED, 2006) — the same paper behind enzoruiz/3dbinpacking and py3dbp. That
+  method is a **restricted, early form of extreme-point packing**: candidate
+  pivots are generated only at the right/front/top corner of each placed item,
+  with **no backtracking** (an item, once placed, is never repacked). The paper's
+  worst-case "analysis" reuses the classic *1-D* bin-packing ratios (FFD ≤ 11/9,
+  FF ≤ 17/10), which do not hold in 3-D. go-pack-bins' [`d3`](d3/) extreme-point
+  packer is the proper, more general descendant of this idea; the benchmark
+  quantifies the gap (bp3d leaves small instances in half-empty bins — the
+  leftover-item pathology the paper itself describes).
+
+## 3-D placement heuristics from the literature (clean-room, ideas only)
+
+Two `d3` placement strategies are clean-room implementations of standard
+container-loading heuristics — no code from any repository was used:
+
+| Idea | Source | Our implementation |
+|------|--------|--------------------|
+| Empty-Maximal-Space (EMS): maintain the set of maximal free boxes, place at the back-bottom-left of the snuggest space, then split intruded spaces into maximal slabs (the 3-D analogue of 2-D MaxRects) | Parreño, Alvarez-Valdés, Oliveira & Tamarit, *A maximal-space algorithm for the container loading problem*, INFORMS J. Computing (2008); Lai & Chan (1997) | [`d3/ems.go`](d3/ems.go) |
+| Heightmap / skyline: model the occupied volume as a top surface and land each item on the lowest resting height over its footprint (can bridge gaps) — the standard baseline in the online-3D-BPP literature | Common heuristic; e.g. the EMS/heightmap baselines in Zhao et al., *Online-3D-BPP-PCT* (ICLR 2022) | [`d3/heightmap.go`](d3/heightmap.go) |
+
 ## Online-3D-BPP-PCT (MIT)
 
 - Repo: https://github.com/alexfrom0815/Online-3D-BPP-PCT (commit `5e7b4238b18310af4529e0f85157d17de605850c`)
 - Investigated (ICLR 2022, Zhao et al.) but **not** adopted: the core method is a
   trained deep-RL policy, impractical for a pure-Go, dependency-free library. Its
-  non-ML heuristic baselines (heightmap-min, EMS scoring) remain a possible
-  future addition.
+  non-ML heuristic baselines (heightmap-min, EMS scoring) are now implemented —
+  see the EMS and heightmap strategies above.
 
 ## Generalized Bin Packing literature (Mantzou & Dimitriadis 2025 SLR)
 
