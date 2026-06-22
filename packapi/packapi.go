@@ -792,9 +792,9 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 //     (bc, kk), the multi-phase mffd, the self-managed harmonic/RFF variants, and
 //     2-D guillotine (its free-rect overlay is only meaningful when complete).
 func isStreamable(req PackRequest) bool {
-	// JointFit commits each placement once, in final position, with no post-pass
-	// (it handles balance and anti-slosh during placement), so it always streams.
-	if req.Mode == "3d" && req.Algorithm == "joint" {
+	// JointFit and the block packer commit each placement once, in final position,
+	// with no relocating post-pass, so they always stream.
+	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "blocks") {
 		return true
 	}
 	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
@@ -990,6 +990,9 @@ func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFac
 			NoFloating: req.Contact.NoFloating,
 		}, prefs, weights, buildConstraints(req.Constraints))
 		return jf, func(items []pack.Item) pack.Result { r, _ := jf.PackAllCtx(ctx, items); return r }, true
+	case "blocks": // 3-D block-building; manages its own bins, ignores factory
+		bp := d3.NewBlockPacker(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
+		return bp, func(items []pack.Item) pack.Result { r, _ := bp.PackAllCtx(ctx, items); return r }, true
 	case "ss":
 		return online1(online.SumOfSquares(req.Bin.Width, factory))
 	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
@@ -1669,6 +1672,18 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
 		return resp, nil
+	}
+
+	// Block-building: layered packing that fuses items into solid layer-height
+	// blocks (direct + same-footprint vertical stacks). Manages its own geometry
+	// and bins, so it ignores the factory/contact settings.
+	if req.Algorithm == "blocks" {
+		bp := d3.NewBlockPacker(bw, bd, bh)
+		result, berr := bp.PackAllCtx(ctx, items)
+		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: berr.Error()}, nil
+		}
+		return buildResponse3D(result), nil
 	}
 
 	// LAFF (Largest-Area-Fit-First): layered packing; manages its own geometry

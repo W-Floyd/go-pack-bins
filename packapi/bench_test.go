@@ -343,7 +343,7 @@ func BenchmarkAlgos3D(b *testing.B) {
 		group: "3D", mode: "3d", desc: "500 mixed boxes (sides 1–6) into a 20×20×20 bin",
 		bin:   BinSpec{Width: 20, Depth: 20, Height: 20},
 		items: benchMix("3d", 500, 33),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "auto"},
+		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "auto"},
 	})
 }
 
@@ -359,7 +359,7 @@ func BenchmarkAlgos3DSlosh(b *testing.B) {
 		bin:     BinSpec{Width: 20, Depth: 20, Height: 20},
 		contact: ContactSpec{Bottom: 0.6, SideX: 0.5, SideY: 0.5},
 		items:   benchMix("3d", 500, 33),
-		algos:   []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer"},
+		algos:   []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks"},
 	})
 }
 
