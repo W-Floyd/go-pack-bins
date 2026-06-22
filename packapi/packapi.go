@@ -15,12 +15,44 @@ import (
 	"github.com/W-Floyd/go-pack-bins/d1"
 	"github.com/W-Floyd/go-pack-bins/d2"
 	"github.com/W-Floyd/go-pack-bins/d3"
+	"github.com/W-Floyd/go-pack-bins/gbpp"
 	"github.com/W-Floyd/go-pack-bins/joint"
 	"github.com/W-Floyd/go-pack-bins/meta"
 	"github.com/W-Floyd/go-pack-bins/offline"
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
+
+// lexMetrics maps the request's lexicographic objective keys (in priority order)
+// to meta.Metrics, defaulting to (unplaced, bins) if none are given.
+func lexMetrics(req PackRequest) []meta.Metric {
+	var ms []meta.Metric
+	for _, o := range req.LexObjectives {
+		switch o {
+		case "unplaced":
+			ms = append(ms, meta.Unplaced)
+		case "bins":
+			ms = append(ms, meta.BinsUsed)
+		case "spread":
+			ms = append(ms, meta.UtilizationSpread())
+		}
+	}
+	if len(ms) == 0 {
+		ms = []meta.Metric{meta.Unplaced, meta.BinsUsed}
+	}
+	return ms
+}
+
+// lexResult runs LexBestOf over a standard FFD/BFD/NFD candidate set on factory,
+// returning the lexicographically best result and the winning packer name.
+func lexResult(ctx context.Context, req PackRequest, factory pack.BinFactory, items []pack.Item) (pack.Result, string, error) {
+	p := meta.LexBestOf(lexMetrics(req),
+		offline.FirstFitDecreasing(factory),
+		offline.BestFitDecreasing(factory),
+		offline.NextFitDecreasing(factory))
+	r, err := p.PackAllCtx(ctx, items)
+	return r, p.Winner(), err
+}
 
 // Pack runs the (non-streaming) solve for req with no cancellation.
 func Pack(req PackRequest) PackResponse { return PackCtx(context.Background(), req) }
@@ -105,6 +137,11 @@ func containerLabel(mode string, b BinSpec) string {
 // exhausted), it falls back to a sequential cascade that spills the overflow from
 // one type into the next, mixing sizes to place as many items as possible.
 func solveCatalog(ctx context.Context, req PackRequest) PackResponse {
+	// GBPP over a catalog optimises the most profitable *mix* of bin types
+	// (cheapest suitable bin per item), rather than exhausting one size first.
+	if req.Algorithm == "gbpp" {
+		return solveCatalogGBPP(ctx, req)
+	}
 	single := solveCatalogSingle(ctx, req)
 	if single.Error == "" && len(single.Unplaced) == 0 {
 		return single // a single type holds the whole order — prefer it
@@ -114,6 +151,62 @@ func solveCatalog(ctx context.Context, req PackRequest) PackResponse {
 		return cascade // mixing sizes placed more items
 	}
 	return single
+}
+
+// containerFactory builds a constrained bin factory for one container size in the
+// request's mode (used to open bins of each catalog type).
+func containerFactory(req PackRequest, bin BinSpec) pack.BinFactory {
+	switch req.Mode {
+	case "1d":
+		return constrainedFactory(d1.NewFactory(bin.Width), req.Constraints)
+	case "2d":
+		return constrainedFactory(d2.NewFactory(bin.Width, bin.Height, strat2DFor(req.Algorithm)), req.Constraints)
+	default:
+		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
+		return constrainedFactory(d3.NewFactory(bin.Width, bin.Depth, bin.Height, stratFn), req.Constraints)
+	}
+}
+
+// solveCatalogGBPP runs the cost-aware Generalized BPP over the catalog: it picks
+// the most profitable combination of bin types (per gbpp.PackCatalog) and reports
+// per-bin dimensions plus the net-cost economics.
+func solveCatalogGBPP(ctx context.Context, req PackRequest) PackResponse {
+	var items []pack.Item
+	var build func(pack.Result) PackResponse
+	switch req.Mode {
+	case "1d":
+		items = items1D(req)
+		sizeByID := make(map[string]float64, len(req.Items))
+		for _, s := range req.Items {
+			sizeByID[s.ID] = s.Width
+		}
+		build = func(r pack.Result) PackResponse { return buildResponse1D(r, req.Bin.Width, sizeByID) }
+	case "2d":
+		items = items2D(req)
+		build = func(r pack.Result) PackResponse { return buildResponse2D(r, false) }
+	case "3d":
+		items = items3D(req)
+		build = func(r pack.Result) PackResponse { return buildResponse3D(r) }
+	default:
+		return PackResponse{Error: "unknown mode: " + req.Mode}
+	}
+
+	types := make([]gbpp.BinType, len(req.Containers))
+	for i, cs := range req.Containers {
+		f := containerFactory(req, cs.Bin)
+		types[i] = gbpp.BinType{
+			Label: containerLabel(req.Mode, cs.Bin), Cost: cs.Cost, MaxCount: cs.MaxCount, Open: f.Open,
+		}
+	}
+
+	g := gbpp.PackCatalog(ctx, items, types, gbpp.Options{ProfitScalar: "profit", OptionalScalar: "profit"})
+	resp := build(g.Result)
+	for _, ti := range g.BinTypeIdx {
+		resp.BinDims = append(resp.BinDims, req.Containers[ti].Bin)
+	}
+	resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
+	resp.Container = "mixed"
+	return resp
 }
 
 // catalogUnplaced counts unplaced items, treating an errored response as if the
@@ -361,13 +454,21 @@ type PackRequest struct {
 	// packed into each candidate container type and the best single type is chosen
 	// (see package catalog). Bin is ignored in this mode.
 	Containers []ContainerSpec `json:"containers,omitempty"`
+	// BinCost is the per-bin cost used by the "gbpp" algorithm (Generalized Bin
+	// Packing): an optional item is rejected if its profit cannot cover a new bin.
+	BinCost float64 `json:"bin_cost,omitempty"`
+	// LexObjectives is the priority-ordered objective list for the "lex" algorithm
+	// (values: "unplaced", "bins", "spread").
+	LexObjectives []string `json:"lex_objectives,omitempty"`
 }
 
-// ContainerSpec is one container type in a catalog: its size and an optional cap
-// on how many of that type may be used (0 = unlimited).
+// ContainerSpec is one container type in a catalog: its size, an optional cap on
+// how many of that type may be used (0 = unlimited), and a per-bin cost used by
+// the GBPP algorithm to choose the most profitable mix of bins.
 type ContainerSpec struct {
 	Bin      BinSpec `json:"bin"`
 	MaxCount int     `json:"max_count,omitempty"`
+	Cost     float64 `json:"cost,omitempty"`
 }
 
 // ContactSpec is the per-face contact requirement (fractions 0-1). Bottom is a
@@ -416,6 +517,12 @@ type PackResponse struct {
 	// index giving that bin's dimensions, so the client can render bins of
 	// differing sizes. Empty when all bins are the same type (use ContainerBin).
 	BinDims []BinSpec `json:"bin_dims,omitempty"`
+	// NetCost / IncludedProfit / Rejected are set by the "gbpp" algorithm:
+	// net cost = bins×cost − included optional profit, and Rejected lists optional
+	// items deliberately left out (not worth a bin).
+	NetCost        float64  `json:"net_cost,omitempty"`
+	IncludedProfit float64  `json:"included_profit,omitempty"`
+	Rejected       []string `json:"rejected,omitempty"`
 }
 
 // ─── streaming ──────────────────────────────────────────────────────────────
@@ -434,23 +541,26 @@ const streamBatch = 64
 //   - "done":  terminal; carries the authoritative final summary.
 //   - "error": fatal error; terminal.
 type StreamFrame struct {
-	Type       string            `json:"type"`
-	Streaming  bool              `json:"streaming,omitempty"` // meta: genuine mid-solve emission?
-	Count      int               `json:"count,omitempty"`     // meta: item count
-	Multi      bool              `json:"multi,omitempty"`     // meta: segmented multi-candidate race (auto)
-	Segments   []string          `json:"segments,omitempty"`  // meta: candidate labels, one per segment
-	Seg        int               `json:"seg,omitempty"`       // batch: segment this batch belongs to (0 default)
-	WinnerSeg  *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
-	BinsUsed   int               `json:"bins_used,omitempty"` // done
-	BestPacker string            `json:"best_packer,omitempty"`
-	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"`
-	ItemErrors map[string]string `json:"item_errors,omitempty"`
-	Unplaced     []string          `json:"unplaced,omitempty"`
-	Placements   []PlacementResult `json:"placements,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Container    string            `json:"container,omitempty"`     // done: chosen container (catalog)
-	ContainerBin *BinSpec          `json:"container_bin,omitempty"` // done: chosen container dims (catalog)
-	BinDims      []BinSpec         `json:"bin_dims,omitempty"`      // done: per-bin dims (mixed catalog)
+	Type           string            `json:"type"`
+	Streaming      bool              `json:"streaming,omitempty"`  // meta: genuine mid-solve emission?
+	Count          int               `json:"count,omitempty"`      // meta: item count
+	Multi          bool              `json:"multi,omitempty"`      // meta: segmented multi-candidate race (auto)
+	Segments       []string          `json:"segments,omitempty"`   // meta: candidate labels, one per segment
+	Seg            int               `json:"seg,omitempty"`        // batch: segment this batch belongs to (0 default)
+	WinnerSeg      *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
+	BinsUsed       int               `json:"bins_used,omitempty"`  // done
+	BestPacker     string            `json:"best_packer,omitempty"`
+	FreeRects      [][]FreeRect      `json:"free_rects,omitempty"`
+	ItemErrors     map[string]string `json:"item_errors,omitempty"`
+	Unplaced       []string          `json:"unplaced,omitempty"`
+	Placements     []PlacementResult `json:"placements,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	Container      string            `json:"container,omitempty"`       // done: chosen container (catalog)
+	ContainerBin   *BinSpec          `json:"container_bin,omitempty"`   // done: chosen container dims (catalog)
+	BinDims        []BinSpec         `json:"bin_dims,omitempty"`        // done: per-bin dims (mixed catalog)
+	NetCost        float64           `json:"net_cost,omitempty"`        // done: GBPP net cost
+	IncludedProfit float64           `json:"included_profit,omitempty"` // done: GBPP profit packed
+	Rejected       []string          `json:"rejected,omitempty"`        // done: GBPP rejected optional items
 }
 
 // StreamPack runs the same packing as Pack but delivers the result as a series
@@ -549,7 +659,8 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		send(StreamFrame{Type: "batch", Placements: resp.Placements[i:j]})
 	}
 	send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, BestPacker: resp.BestPacker,
-		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
+		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors,
+		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected})
 }
 
 // isStreamable reports whether req's solve is a single sequential pass that can
@@ -1029,6 +1140,26 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return resp, nil
 	}
 
+	sizeByID1 := make(map[string]float64, len(req.Items))
+	for _, spec := range req.Items {
+		sizeByID1[spec.ID] = spec.Width
+	}
+	if req.Algorithm == "gbpp" {
+		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
+		resp := buildResponse1D(g.Result, req.Bin.Width, sizeByID1)
+		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
+		return resp, nil
+	}
+	if req.Algorithm == "lex" {
+		r, winner, lerr := lexResult(ctx, req, factory, items)
+		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: lerr.Error()}, nil
+		}
+		resp := buildResponse1D(r, req.Bin.Width, sizeByID1)
+		resp.BestPacker = winner
+		return resp, nil
+	}
+
 	var result pack.Result
 	var err error
 	var bestPacker string
@@ -1225,6 +1356,22 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return resp, nil
 	}
 
+	if req.Algorithm == "gbpp" {
+		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
+		resp := buildResponse2D(g.Result, false)
+		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
+		return resp, nil
+	}
+	if req.Algorithm == "lex" {
+		r, winner, lerr := lexResult(ctx, req, factory, items)
+		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: lerr.Error()}, nil
+		}
+		resp := buildResponse2D(r, false)
+		resp.BestPacker = winner
+		return resp, nil
+	}
+
 	var result pack.Result
 	var err error
 	var bestPacker string
@@ -1416,6 +1563,25 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})), nil
 	case "grasp":
 		return buildResponse3D(offline.GRASP(ctx, items, factory, offline.SearchOptions{})), nil
+	}
+
+	// GBPP: optional items (profit scalar) + bin cost, net-cost minimisation.
+	if req.Algorithm == "gbpp" {
+		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
+		resp := buildResponse3D(g.Result)
+		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
+		return resp, nil
+	}
+
+	// Lexicographic: pick the best of FFD/BFD/NFD under an ordered objective list.
+	if req.Algorithm == "lex" {
+		result, winner, lerr := lexResult(ctx, req, factory, items)
+		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: lerr.Error()}, nil
+		}
+		resp := buildResponse3D(result)
+		resp.BestPacker = winner
+		return resp, nil
 	}
 
 	// Joint multi-objective: bin selection and placement under one score, in a
@@ -1698,7 +1864,7 @@ func binImbalance(r pack.Result, items []pack.Item) float64 {
 		for _, v := range vals {
 			varc += (v - mean) * (v - mean)
 		}
-		return (varc/float64(n)) / (mean * mean) // σ²/mean² — scale-free
+		return (varc / float64(n)) / (mean * mean) // σ²/mean² — scale-free
 	}
 	// item count
 	countVals := make([]float64, 0, n)
