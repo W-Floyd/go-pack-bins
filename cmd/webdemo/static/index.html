@@ -1671,6 +1671,20 @@ const PRESETS = {
       items: Array(8).fill({w:5, d:5, h:5}),
     },
     {
+      label: 'Nested + GBPP: optional extras in cartons',
+      // Carton level uses GBPP (carton cost 5): a 6³ item needs its own 10³ carton.
+      // 3 core items fill 3 cartons; the high-profit extra (50 ≥ 5) earns its
+      // carton; the low-profit extra (1 < 5) is rejected. Cartons → one pallet.
+      nested: true,
+      innerBin: {w:10, d:10, h:10}, innerAlgo: 'gbpp', innerBinCost: 5,
+      bin: {w:30, d:30, h:30}, algo: 'ffd',
+      items: [
+        {w:6, d:6, h:6}, {w:6, d:6, h:6}, {w:6, d:6, h:6},   // compulsory core
+        {w:6, d:6, h:6, s:{profit:50}},                       // optional, worth a carton
+        {w:6, d:6, h:6, s:{profit:1}},                        // optional, not worth a carton
+      ],
+    },
+    {
       label: 'Nested: Goods → Cartons → Pallet',
       nested: true,
       innerBin: {w:8, d:8, h:8}, innerAlgo: 'ffd',
@@ -1819,6 +1833,22 @@ function loadPreset(idx) {
 
   // Algorithm
   document.getElementById('algorithm').value = preset.algo || 'ff';
+
+  // GBPP bin costs / lexicographic objectives / inner carton catalog
+  document.getElementById('bin-cost').value = preset.binCost || 0;
+  if (document.getElementById('inner-bin-cost')) document.getElementById('inner-bin-cost').value = preset.innerBinCost || 0;
+  lexObjectives = preset.lexObjectives ? preset.lexObjectives.slice() : [];
+  renderLexObjectives();
+  innerLexObjectives = preset.innerLexObjectives ? preset.innerLexObjectives.slice() : [];
+  renderInnerLexObjectives();
+  innerCatalog = preset.innerCatalog ? preset.innerCatalog.map(c => ({ w: c.w || 10, h: c.h || c.w || 10, d: c.d || c.w || 10, maxCount: c.max || 0, cost: c.cost || 0 })) : [];
+  innerCatalogEnabled = innerCatalog.length > 0;
+  document.getElementById('inner-catalog-toggle').checked = innerCatalogEnabled;
+  document.getElementById('inner-catalog-section').style.display = innerCatalogEnabled ? '' : 'none';
+  document.getElementById('inner-bin-capacity-block').style.display = innerCatalogEnabled ? 'none' : '';
+  buildInnerCatalogFields(mode);
+  renderInnerContainerList();
+  onAlgorithmChange(); // refresh GBPP/lex panel visibility for outer + inner
 
   // Items
   for (const spec of preset.items) {
