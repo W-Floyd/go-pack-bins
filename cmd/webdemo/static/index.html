@@ -542,11 +542,16 @@
               <option value="max">max ≤</option>
               <option value="min">min ≥</option>
               <option value="allsame">all same</option>
+              <option value="incompatible">incompatible</option>
             </select>
           </div>
           <div class="field" id="con-value-field" style="flex:1; min-width:54px">
-            <label>Value</label>
+            <label id="con-value-label">Value</label>
             <input type="number" id="con-value" placeholder="100" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addConstraint()">
+          </div>
+          <div class="field" id="con-value2-field" style="flex:1; min-width:54px; display:none">
+            <label>Cat B</label>
+            <input type="number" id="con-value2" placeholder="2" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addConstraint()">
           </div>
           <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addConstraint()">+ Add</button>
         </div>
@@ -731,6 +736,7 @@ const ALGOS = {
     {v:'mffd',l:'Modified FFD (MFFD)'},
     {v:'kk',  l:'Karmarkar-Karp (KK)'},
     {v:'bc',  l:'Bin Completion (exact)'},
+    {v:'brute',l:'Brute-force order (small N)'},
     {v:'pref',l:'Preference-Fit'},
   ],
   '2d': [
@@ -747,12 +753,14 @@ const ALGOS = {
     {v:'nfdh',       l:'Shelf NFDH (decreasing height)'},
     {v:'ffdh',       l:'Shelf FFDH (decreasing height)'},
     {v:'bfdh',       l:'Shelf BFDH (decreasing height)'},
+    {v:'brute',      l:'Brute-force order (small N)'},
     {v:'pref',       l:'Preference-Fit'},
   ],
   '3d': [
     {v:'auto',l:'Auto (best-of)'},
     {v:'ff',  l:'First Fit / Extreme-point'},
     {v:'joint',l:'Joint (balance + placement, one pass)'},
+    {v:'laff',l:'Largest-Area-Fit-First (layers)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
     {v:'nf',  l:'Next Fit'},
     {v:'bf',  l:'Best Fit'},
@@ -760,6 +768,7 @@ const ALGOS = {
     {v:'ffd', l:'First Fit Decreasing (FFD)'},
     {v:'bfd', l:'Best Fit Decreasing (BFD)'},
     {v:'nfd', l:'Next Fit Decreasing (NFD)'},
+    {v:'brute',l:'Brute-force order (small N)'},
     {v:'pref',l:'Preference-Fit'},
   ],
 };
@@ -946,22 +955,28 @@ function onConOpChange() {
   const op = document.getElementById('con-op').value;
   const scalarField = document.getElementById('con-scalar').parentElement;
   const valueField = document.getElementById('con-value-field');
-  if (op === 'allsame') {
-    scalarField.style.display = '';
-    valueField.style.display = 'none';
-  } else {
-    scalarField.style.display = '';
-    valueField.style.display = '';
-    document.getElementById('con-value').placeholder = '100';
-  }
+  const value2Field = document.getElementById('con-value2-field');
+  scalarField.style.display = '';
+  // allsame needs no value; incompatible needs two category values.
+  valueField.style.display = (op === 'allsame') ? 'none' : '';
+  value2Field.style.display = (op === 'incompatible') ? '' : 'none';
+  document.getElementById('con-value-label').textContent = (op === 'incompatible') ? 'Cat A' : 'Value';
+  document.getElementById('con-scalar').placeholder = (op === 'incompatible') ? 'category' : 'weight';
+  document.getElementById('con-value').placeholder = (op === 'incompatible') ? '1' : '100';
 }
 
 function addConstraint() {
   const op = document.getElementById('con-op').value;
-  {
-    const scalar = document.getElementById('con-scalar').value.trim();
+  const scalar = document.getElementById('con-scalar').value.trim();
+  if (!scalar) return;
+  if (op === 'incompatible') {
+    const value = parseFloat(document.getElementById('con-value').value);
+    const value2 = parseFloat(document.getElementById('con-value2').value);
+    if (isNaN(value) || isNaN(value2)) return;
+    constraints.push({ scalar, op, value, value2 });
+  } else {
     const value = op === 'allsame' ? 0 : parseFloat(document.getElementById('con-value').value);
-    if (!scalar || (op !== 'allsame' && isNaN(value))) return;
+    if (op !== 'allsame' && isNaN(value)) return;
     constraints.push({ scalar, op, value });
   }
   renderConstraintList();
@@ -1064,10 +1079,13 @@ function renderConstraintList() {
   constraints.forEach((c, idx) => {
     const row = document.createElement('div');
     row.className = 'item-row';
-    const opLabel = c.op === 'max' ? `≤ ${c.value}` : c.op === 'min' ? `≥ ${c.value}` : 'all same';
-    const scalarPart = c.scalar;
+    let label;
+    if (c.op === 'max') label = `${c.scalar} ≤ ${c.value}`;
+    else if (c.op === 'min') label = `${c.scalar} ≥ ${c.value}`;
+    else if (c.op === 'incompatible') label = `${c.scalar}: ${c.value} ✗ ${c.value2}`;
+    else label = `${c.scalar} all same`;
     row.innerHTML = `
-      <span class="item-dims" style="flex:1;font-family:var(--mono)">${scalarPart} ${opLabel}</span>
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${label}</span>
       <button class="remove-btn" onclick="removeConstraint(${idx})">✕</button>`;
     el.appendChild(row);
   });
@@ -1697,7 +1715,7 @@ async function runSinglePack(auto = false) {
       allow_rotate: it.allow_rotate ?? globalRotate,
       scalars: it.scalars || {},
     })),
-    constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
+    constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value, value2: c.value2 })),
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
     contact: readContact(),
   };
@@ -1857,7 +1875,7 @@ async function runNestedPack(auto = false) {
       { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [],
         preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
       { bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
-        constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value })),
+        constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value, value2: c.value2 })),
         preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
         contact: readContact() },
     ],

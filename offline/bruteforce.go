@@ -1,0 +1,123 @@
+package offline
+
+import (
+	"context"
+
+	"github.com/W-Floyd/go-pack-bins/online"
+	"github.com/W-Floyd/go-pack-bins/pack"
+)
+
+// DefaultBruteForceMaxItems is the largest order BruteForce will exhaustively
+// search; above it, BruteForce falls back to a single FFD pass. 8! = 40320
+// orderings is comfortably fast; the factorial growth makes larger orders
+// impractical (the same trade-off as skjolber's brute-force packagers).
+const DefaultBruteForceMaxItems = 8
+
+// BruteForceOptions configures BruteForce.
+type BruteForceOptions struct {
+	// MaxItems caps exhaustive search; 0 uses DefaultBruteForceMaxItems.
+	MaxItems int
+	// Key maps an item to an interchangeability signature: permutations that only
+	// reorder items with equal keys are pruned (they pack identically). Defaults
+	// to item ID, i.e. no pruning — always correct, just slower. Pass a shape key
+	// (e.g. sorted dimensions) so identical boxes collapse and the search shrinks.
+	Key func(pack.Item) string
+}
+
+// BruteForce finds the item ordering that packs best, by exhaustively trying
+// every distinct permutation and packing each with First-Fit through factory,
+// keeping the result with the fewest unplaced items, then fewest bins. Rotation
+// and within-bin position are handled by the factory's bins, so this searches
+// the one lever a greedy packer fixes up front: the order items are offered.
+//
+// It is meant for small orders (see DefaultBruteForceMaxItems); larger ones fall
+// back to First-Fit-Decreasing. The search honours ctx (e.g. a deadline): on
+// cancellation the best ordering found so far is returned with ctx.Err().
+//
+// Inspired by the brute-force packagers in skjolber/3d-bin-container-packing
+// (Apache-2.0; see ATTRIBUTION.md for the pinned commit), including its pruning of permutations over equal items.
+func BruteForce(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts BruteForceOptions) (pack.Result, error) {
+	maxItems := opts.MaxItems
+	if maxItems <= 0 {
+		maxItems = DefaultBruteForceMaxItems
+	}
+	key := opts.Key
+	if key == nil {
+		key = func(it pack.Item) string { return it.ID() }
+	}
+
+	n := len(items)
+	if n == 0 {
+		return pack.Result{}, nil
+	}
+	if n > maxItems {
+		// Too large to brute-force; fall back to FFD (still ctx-aware).
+		return FirstFitDecreasing(factory).PackAllCtx(ctx, items)
+	}
+
+	// pack runs one ordering through a fresh First-Fit packer.
+	packOrder := func(order []pack.Item) pack.Result {
+		p := online.FirstFit(factory)
+		for _, it := range order {
+			p.Pack(it) // failures are recorded as unplaced in the result
+		}
+		return p.Result()
+	}
+
+	var best pack.Result
+	haveBest := false
+	cur := make([]pack.Item, 0, n)
+	used := make([]bool, n)
+
+	var search func() error
+	search = func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(cur) == n {
+			r := packOrder(cur)
+			if !haveBest || betterBrute(r, best) {
+				best = r
+				haveBest = true
+			}
+			return nil
+		}
+		// Pick the next item; skip any whose key was already tried at this depth
+		// (those permutations are identical), so multisets don't blow up to n!.
+		triedKeys := make(map[string]bool)
+		for i := 0; i < n; i++ {
+			if used[i] {
+				continue
+			}
+			k := key(items[i])
+			if triedKeys[k] {
+				continue
+			}
+			triedKeys[k] = true
+			used[i] = true
+			cur = append(cur, items[i])
+			if err := search(); err != nil {
+				return err
+			}
+			cur = cur[:len(cur)-1]
+			used[i] = false
+		}
+		return nil
+	}
+
+	if err := search(); err != nil {
+		if haveBest {
+			return best, err // partial best on cancellation
+		}
+		return pack.Result{}, err
+	}
+	return best, nil
+}
+
+// betterBrute ranks brute-force candidates: fewer unplaced wins, then fewer bins.
+func betterBrute(a, b pack.Result) bool {
+	if len(a.Unplaced) != len(b.Unplaced) {
+		return len(a.Unplaced) < len(b.Unplaced)
+	}
+	return a.BinsUsed() < b.BinsUsed()
+}
