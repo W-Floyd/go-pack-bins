@@ -204,59 +204,59 @@ external `boxpacker3`/`bp3d` libraries lives in the separate [`bench/`](bench/) 
 
 <!-- BENCH:START -->
 
-_`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. Time is per solve; absolute numbers vary by machine._
+_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better). `fill%` = packed volume ÷ (bins × bin volume); higher is tighter. `bbox%` = the packed items' bounding box ÷ bin volume, averaged over bins; lower means the items cluster more compactly, leaving contiguous free space. Time is per solve; absolute numbers vary by machine._
 
 ### 3D — 500 mixed boxes (sides 1–6) into a 20×20×20 bin
 
-| Algorithm | Bins | Fill % | Unfit | Time/op |
-|-----------|-----:|-------:|------:|--------:|
-| ff | 3 | 76.7 | 0 | 183.787ms |
-| ffd | 3 | 76.7 | 0 | 91.367ms |
-| bfd | 3 | 76.7 | 0 | 90.761ms |
-| nfd | 3 | 76.7 | 0 | 83.465ms |
-| blf | 3 | 76.7 | 0 | 187.58ms |
-| ems | 3 | 76.7 | 0 | 17.103ms |
-| heightmap | 3 | 76.7 | 0 | 480.518ms |
-| laff | 4 | 57.5 | 0 | 1.896ms |
-| layer | 3 | 76.7 | 0 | 852µs |
-| auto | 3 | 76.7 | 0 | 119.436ms |
+| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |
+|-----------|-------:|---------:|---------:|--------:|----------:|
+| ff | 3 | 76.7 | 86.7 | 0 | 181.521ms |
+| ffd | 3 | 76.7 | 83.3 | 0 | 88.45ms |
+| bfd | 3 | 76.7 | 83.3 | 0 | 88.652ms |
+| nfd | 3 | 76.7 | 93.3 | 0 | 81.289ms |
+| blf | 3 | 76.7 | 86.7 | 0 | 184.164ms |
+| ems | 3 | 76.7 | 85.0 | 0 | 16.211ms |
+| heightmap | 3 | 76.7 | 90.0 | 0 | 475.721ms |
+| laff | 4 | 57.5 | 81.2 | 0 | 1.869ms |
+| layer | 3 | 76.7 | 93.3 | 0 | 841µs |
+| auto | 3 | 76.7 | 83.3 | 0 | 118.262ms |
 
 ### 3D · anti-slosh — same 500 boxes with 60% bottom support + 50% side anti-slosh (X & Y)
 
-| Algorithm | Bins | Fill % | Unfit | Time/op |
-|-----------|-----:|-------:|------:|--------:|
-| ff | 3 | 76.7 | 0 | 199.311ms |
-| ffd | 3 | 76.7 | 0 | 143.621ms |
-| bfd | 3 | 76.7 | 0 | 142.341ms |
-| nfd | 3 | 76.7 | 0 | 219.184ms |
-| blf | 3 | 76.7 | 0 | 189.875ms |
-| ems | 3 | 76.7 | 0 | 24.135ms |
-| heightmap | 3 | 76.7 | 0 | 491.642ms |
-| layer | 3 | 76.7 | 0 | 1.483ms |
+| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |
+|-----------|-------:|---------:|---------:|--------:|----------:|
+| ff | 3 | 76.7 | 86.7 | 0 | 195.395ms |
+| ffd | 3 | 76.7 | 81.7 | 0 | 138.397ms |
+| bfd | 3 | 76.7 | 81.7 | 0 | 139.715ms |
+| nfd | 3 | 76.7 | 95.0 | 0 | 216.107ms |
+| blf | 3 | 76.7 | 86.7 | 0 | 192.877ms |
+| ems | 3 | 76.7 | 86.7 | 0 | 23.993ms |
+| heightmap | 3 | 76.7 | 86.7 | 0 | 491.948ms |
+| layer | 3 | 76.7 | 93.3 | 0 | 1.516ms |
 
 ### 2D — 400 mixed rectangles (10–50) into a 300×300 bin
 
-| Algorithm | Bins | Fill % | Unfit | Time/op |
-|-----------|-----:|-------:|------:|--------:|
-| ff | 4 | 71.1 | 0 | 1.837ms |
-| ffd | 3 | 94.8 | 0 | 2.254ms |
-| bfd | 3 | 94.8 | 0 | 2.264ms |
-| nfd | 4 | 71.1 | 0 | 1.694ms |
-| skyline | 4 | 71.1 | 0 | 297µs |
-| auto | 3 | 94.8 | 0 | 3.285ms |
+| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |
+|-----------|-------:|---------:|---------:|--------:|----------:|
+| ff | 4 | 71.1 | 75.5 | 0 | 1.799ms |
+| ffd | 3 | 94.8 | 99.8 | 0 | 2.219ms |
+| bfd | 3 | 94.8 | 99.8 | 0 | 2.232ms |
+| nfd | 4 | 71.1 | 78.5 | 0 | 1.715ms |
+| skyline | 4 | 71.1 | 80.8 | 0 | 290µs |
+| auto | 3 | 94.8 | 99.8 | 0 | 3.149ms |
 
 ### 1D — 1000 mixed items (1–8) into capacity-10 bins
 
-| Algorithm | Bins | Fill % | Unfit | Time/op |
-|-----------|-----:|-------:|------:|--------:|
-| ff | 418 | 99.4 | 0 | 1.042ms |
-| bf | 418 | 99.4 | 0 | 1.116ms |
-| wf | 464 | 89.6 | 0 | 1.643ms |
-| ffd | 416 | 99.9 | 0 | 1.165ms |
-| bfd | 416 | 99.9 | 0 | 1.44ms |
-| wfd | 416 | 99.9 | 0 | 1.432ms |
-| mffd | 416 | 99.9 | 0 | 1.091ms |
-| auto | 416 | 99.9 | 0 | 1.942ms |
+| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |
+|-----------|-------:|---------:|---------:|--------:|----------:|
+| ff | 418 | 99.4 | 99.4 | 0 | 992µs |
+| bf | 418 | 99.4 | 99.4 | 0 | 1.048ms |
+| wf | 464 | 89.6 | 89.6 | 0 | 1.639ms |
+| ffd | 416 | 99.9 | 99.9 | 0 | 1.14ms |
+| bfd | 416 | 99.9 | 99.9 | 0 | 1.415ms |
+| wfd | 416 | 99.9 | 99.9 | 0 | 1.388ms |
+| mffd | 416 | 99.9 | 99.9 | 0 | 1.126ms |
+| auto | 416 | 99.9 | 99.9 | 0 | 1.919ms |
 
 <!-- BENCH:END -->
 

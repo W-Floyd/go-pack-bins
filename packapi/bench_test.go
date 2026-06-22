@@ -33,9 +33,9 @@ import (
 // ─── markdown accumulation ──────────────────────────────────────────────────
 
 type benchRow struct {
-	group, algo         string // group = section heading (e.g. "3D", "3D · anti-slosh")
-	nsPerOp, bins, fill float64
-	unfit               int
+	group, algo               string // group = section heading (e.g. "3D", "3D · anti-slosh")
+	nsPerOp, bins, fill, bbox float64
+	unfit                     int
 }
 
 var (
@@ -94,15 +94,18 @@ func benchTables() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("_`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
+	b.WriteString("_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better). ")
+	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
+	b.WriteString("`bbox%` = the packed items' bounding box ÷ bin volume, averaged over bins; ")
+	b.WriteString("lower means the items cluster more compactly, leaving contiguous free space. ")
 	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
 	for _, g := range groups {
 		fmt.Fprintf(&b, "\n### %s — %s\n\n", g, benchMeta[g])
-		b.WriteString("| Algorithm | Bins | Fill % | Unfit | Time/op |\n")
-		b.WriteString("|-----------|-----:|-------:|------:|--------:|\n")
+		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | BBox % ↓ | Unfit ↓ | Time/op ↓ |\n")
+		b.WriteString("|-----------|-------:|---------:|---------:|--------:|----------:|\n")
 		for _, r := range byGroup[g] {
-			fmt.Fprintf(&b, "| %s | %d | %.1f | %d | %s |\n",
-				r.algo, int(r.bins), r.fill, r.unfit, fmtDuration(r.nsPerOp))
+			fmt.Fprintf(&b, "| %s | %d | %.1f | %.1f | %d | %s |\n",
+				r.algo, int(r.bins), r.fill, r.bbox, r.unfit, fmtDuration(r.nsPerOp))
 		}
 	}
 	return b.String()
@@ -201,16 +204,63 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 	if denom := float64(resp.BinsUsed) * binVolume(sc.mode, sc.bin); denom > 0 {
 		fill = 100 * placedVolume(resp, volByID) / denom
 	}
+	bbox := meanBoundingBoxPct(resp, sc.mode, sc.bin)
 	b.ReportMetric(float64(resp.BinsUsed), "bins")
 	b.ReportMetric(fill, "fill%")
+	b.ReportMetric(bbox, "bbox%")
 	if n := len(resp.Unplaced); n > 0 {
 		b.ReportMetric(float64(n), "unfit")
 	}
 	recordBench(benchRow{
 		group: sc.group, algo: algo,
 		nsPerOp: float64(b.Elapsed().Nanoseconds()) / float64(b.N),
-		bins:    float64(resp.BinsUsed), fill: fill, unfit: len(resp.Unplaced),
+		bins:    float64(resp.BinsUsed), fill: fill, bbox: bbox, unfit: len(resp.Unplaced),
 	})
+}
+
+// meanBoundingBoxPct measures compactness: per bin, the axis-aligned bounding box
+// of that bin's placed items as a fraction of the bin volume, averaged over the
+// bins used. A low value means items cluster into one corner (leaving contiguous
+// free space); a value near 100% means the packing's envelope spans the whole bin.
+func meanBoundingBoxPct(resp PackResponse, mode string, bin BinSpec) float64 {
+	type span struct{ minX, minY, minZ, maxX, maxY, maxZ float64 }
+	bins := map[int]*span{}
+	for _, p := range resp.Placements {
+		s := bins[p.BinIndex]
+		if s == nil {
+			s = &span{minX: p.X, minY: p.Y, minZ: p.Z}
+			bins[p.BinIndex] = s
+		}
+		s.minX, s.maxX = min(s.minX, p.X), max(s.maxX, p.X+p.W)
+		s.minY, s.maxY = min(s.minY, p.Y), max(s.maxY, p.Y+axisExtentY(mode, p))
+		s.minZ, s.maxZ = min(s.minZ, p.Z), max(s.maxZ, p.Z+p.H)
+	}
+	binVol := binVolume(mode, bin)
+	if len(bins) == 0 || binVol <= 0 {
+		return 0
+	}
+	total := 0.0
+	for _, s := range bins {
+		dx := s.maxX - s.minX
+		vol := dx
+		if mode != "1d" {
+			vol *= s.maxY - s.minY // y-extent
+		}
+		if mode == "3d" {
+			vol *= s.maxZ - s.minZ // z-extent
+		}
+		total += 100 * vol / binVol
+	}
+	return total / float64(len(bins))
+}
+
+// axisExtentY returns a placement's extent on the second (depth/height) axis,
+// which is carried in different fields per mode (2-D uses H, 3-D uses D).
+func axisExtentY(mode string, p PlacementResult) float64 {
+	if mode == "3d" {
+		return p.D
+	}
+	return p.H // 2-D: the y-axis extent is the height
 }
 
 func runScenario(b *testing.B, sc scenario) {
