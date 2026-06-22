@@ -2176,15 +2176,24 @@ async function runNestedPack(auto = false) {
   const innerAlgo = document.getElementById('inner-algorithm')?.value || 'ff';
   const outerAlgo = document.getElementById('algorithm').value;
 
+  // Outer (pallet) level reuses the main controls: catalog, bin cost (GBPP) and
+  // lexicographic objectives all apply to the pallet level in nested mode.
+  const outer = {
+    bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
+    constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value, value2: c.value2 })),
+    preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
+    contact: readContact(),
+  };
+  if (catalogEnabled && containerCatalog.length) outer.containers = catalogContainers(mode);
+  if (outerAlgo === 'gbpp') outer.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
+  if (outerAlgo === 'lex') outer.lex_objectives = lexObjectives.slice();
+
   const body = {
     mode,
     levels: [
       { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [],
         preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
-      { bin: { width: bw, height: bh, depth: bd }, algorithm: outerAlgo,
-        constraints: constraints.map(c => ({ scalar: c.scalar, op: c.op, value: c.value, value2: c.value2 })),
-        preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
-        contact: readContact() },
+      outer,
     ],
     items: items.map(it => ({
       id: it.id, width: it.width, height: it.height, depth: it.depth,
@@ -2217,11 +2226,11 @@ async function runNestedPack(auto = false) {
     lastResult = { data, mode, nested: true, innerBin: body.levels[0].bin, outerBin: body.levels[1].bin };
     renderNestedResult(lastResult);
     if (!auto) {
-      const errs = data.item_errors || {};
-      const msgs = Object.values(errs);
-      if (msgs.length > 0) showWarn(msgs[0]);
-      else if ((data.unplaced || []).length > 0)
-        showWarn(`${data.unplaced.length} item(s) could not be placed`);
+      const l0 = data.levels[0] || {}, l1 = data.levels[1] || {};
+      const rejected = (l0.rejected || []).length + (l1.rejected || []).length;
+      if (rejected > 0) showWarn(`${rejected} optional item(s) rejected (not worth a bin)`);
+      else if ((l0.unplaced || []).length > 0)
+        showWarn(`${l0.unplaced.length} item(s) could not be placed`);
     }
   } catch(e) {
     if (seq === packSeq && !auto) showError(e.message);
@@ -2437,9 +2446,25 @@ const CARTON_COLORS = [
 ];
 function cartonColor(idx) { return CARTON_COLORS[idx % CARTON_COLORS.length]; }
 
+// effLevelDims returns the size to render a nested level at: per-bin entries from
+// a catalog are collapsed to their max so a mix never clips; else the level's
+// chosen/nominal bin_dims; else the requested fallback.
+function effLevelDims(level, fallback) {
+  const list = level && level.bin_dims_list;
+  if (list && list.length) {
+    return list.reduce((m, d) => ({
+      width: Math.max(m.width, d.width), height: Math.max(m.height, d.height), depth: Math.max(m.depth, d.depth),
+    }), { width: 1, height: 1, depth: 1 });
+  }
+  return (level && level.bin_dims) || fallback;
+}
+
 function renderNestedResult({ data, mode, innerBin, outerBin }) {
   const l0 = data.levels[0];
   const l1 = data.levels[1];
+  // Render at the sizes the solve actually chose (a catalog may pick differently).
+  innerBin = effLevelDims(l0, innerBin);
+  outerBin = effLevelDims(l1, outerBin);
   document.getElementById('stat-bins').textContent =
     `${l0.bins_used} carton${l0.bins_used !== 1 ? 's' : ''} / ${l1.bins_used} pallet${l1.bins_used !== 1 ? 's' : ''}`;
   document.getElementById('stat-placed').textContent = (l0.placements || []).length;
