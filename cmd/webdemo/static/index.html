@@ -475,9 +475,31 @@
       </div>
 
       <!-- bin spec -->
-      <div>
+      <div id="bin-capacity-block">
         <div id="outer-bin-label" class="section-label">Bin capacity</div>
         <div id="bin-fields" class="row"></div>
+      </div>
+
+      <!-- container catalog: choose the best container type for the order -->
+      <div>
+        <div class="section-label" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Container catalog</span>
+          <label class="checkbox-row" style="margin:0">
+            <input type="checkbox" id="catalog-toggle" onchange="onCatalogToggle()"> Enable
+          </label>
+        </div>
+        <div id="catalog-section" style="display:none;margin-top:8px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Packs into each container type and keeps the best one. The bin capacity above is ignored.</div>
+          <div style="display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+            <div id="catalog-fields" class="row" style="flex:3"></div>
+            <div class="field" style="flex:1; min-width:46px">
+              <label>Max</label>
+              <input type="number" id="cat-max" placeholder="∞" min="0" step="1" style="font-size:12px" onkeydown="if(event.key==='Enter')addContainer()">
+            </div>
+            <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addContainer()">+ Add</button>
+          </div>
+          <div class="item-list" id="catalog-list" style="margin-top:6px"></div>
+        </div>
       </div>
 
       <!-- nested containers -->
@@ -715,6 +737,8 @@ let lastResult = null;
 let activeBin = 0;
 let itemCounter = 0;
 let nestedEnabled = false;
+let catalogEnabled = false;
+let containerCatalog = []; // [{ w, h, d, maxCount }] — container types to choose among
 
 // ── algorithm lists ──────────────────────────────────────────────────────────
 const ALGOS = {
@@ -783,6 +807,13 @@ function onModeChange() {
   constraints = [];
   preferences = [];
   innerPreferences = [];
+  containerCatalog = [];
+  catalogEnabled = false;
+  document.getElementById('catalog-toggle').checked = false;
+  document.getElementById('catalog-section').style.display = 'none';
+  document.getElementById('bin-capacity-block').style.display = '';
+  buildCatalogFields(mode);
+  renderContainerList();
   renderItemList();
   renderConstraintList();
   renderPreferenceLists();
@@ -841,6 +872,79 @@ function buildBinFields(mode) {
       <div class="field"><label>Depth</label><input type="number" id="bin-d" value="10" min="1" step="any" ${oninput}></div>
       <div class="field"><label>Height</label><input type="number" id="bin-h" value="10" min="1" step="any" ${oninput}></div>`;
   }
+}
+
+// ── container catalog ──────────────────────────────────────────────────────
+function onCatalogToggle() {
+  catalogEnabled = document.getElementById('catalog-toggle').checked;
+  document.getElementById('catalog-section').style.display = catalogEnabled ? '' : 'none';
+  // The single Bin capacity is unused in catalog mode (each container type carries
+  // its own size), so hide it to avoid confusion.
+  document.getElementById('bin-capacity-block').style.display = catalogEnabled ? 'none' : '';
+  scheduleAutoPack();
+}
+
+// buildCatalogFields renders the add-container dimension inputs for the mode.
+function buildCatalogFields(mode) {
+  const el = document.getElementById('catalog-fields');
+  if (!el) return;
+  const enter = `onkeydown="if(event.key==='Enter')addContainer()"`;
+  if (mode === '1d') {
+    el.innerHTML = `<div class="field"><label>Width</label><input type="number" id="cat-w" value="10" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  } else if (mode === '2d') {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="cat-w" value="100" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>H</label><input type="number" id="cat-h" value="100" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  } else {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="cat-w" value="10" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>D</label><input type="number" id="cat-d" value="10" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>H</label><input type="number" id="cat-h" value="10" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  }
+}
+
+function addContainer() {
+  const mode = document.getElementById('mode').value;
+  const num = id => parseFloat(document.getElementById(id)?.value);
+  const w = num('cat-w') || 10;
+  const h = mode === '1d' ? w : (num('cat-h') || w);
+  const d = (mode === '3d') ? (num('cat-d') || w) : w;
+  const maxRaw = parseInt(document.getElementById('cat-max')?.value);
+  const maxCount = isNaN(maxRaw) || maxRaw <= 0 ? 0 : maxRaw;
+  containerCatalog.push({ w, h, d, maxCount });
+  renderContainerList();
+  scheduleAutoPack();
+}
+
+function removeContainer(idx) {
+  containerCatalog.splice(idx, 1);
+  renderContainerList();
+  scheduleAutoPack();
+}
+
+function renderContainerList() {
+  const el = document.getElementById('catalog-list');
+  if (!el) return;
+  const mode = document.getElementById('mode').value;
+  el.innerHTML = '';
+  containerCatalog.forEach((c, idx) => {
+    const dims = mode === '1d' ? `${c.w}` : mode === '2d' ? `${c.w}×${c.h}` : `${c.w}×${c.d}×${c.h}`;
+    const cap = c.maxCount > 0 ? ` (max ${c.maxCount})` : '';
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${dims}${cap}</span>
+      <button class="remove-btn" onclick="removeContainer(${idx})">✕</button>`;
+    el.appendChild(row);
+  });
+}
+
+// catalogContainers maps the UI catalog to request ContainerSpecs for the mode.
+function catalogContainers(mode) {
+  return containerCatalog.map(c => ({
+    bin: { width: c.w, height: (mode === '1d' ? c.w : c.h), depth: (mode === '3d' ? c.d : c.w) },
+    max_count: c.maxCount,
+  }));
 }
 
 function buildItemForm(mode) {
@@ -1498,6 +1602,10 @@ function currentConfig() {
     cfg.innerBin = { width: num('inner-w', 5), height: num('inner-h', num('inner-w', 5)), depth: num('inner-d', num('inner-w', 5)) };
     cfg.innerAlgorithm = document.getElementById('inner-algorithm')?.value || 'ff';
   }
+  if (catalogEnabled && containerCatalog.length) {
+    cfg.catalog = true;
+    cfg.containerCatalog = containerCatalog.map(c => ({ ...c }));
+  }
   return cfg;
 }
 
@@ -1551,6 +1659,14 @@ function applyState(s) {
   setVal('algorithm', s.algorithm);
   if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
   setContact(s.contact); // percentages, matching readContactPercent()
+
+  // Container catalog
+  containerCatalog = (s.containerCatalog || []).map(c => ({ ...c }));
+  catalogEnabled = !!s.catalog && containerCatalog.length > 0;
+  document.getElementById('catalog-toggle').checked = catalogEnabled;
+  document.getElementById('catalog-section').style.display = catalogEnabled ? '' : 'none';
+  document.getElementById('bin-capacity-block').style.display = catalogEnabled ? 'none' : '';
+  renderContainerList();
 
   items = [];
   itemCounter = 0;
@@ -1804,6 +1920,36 @@ async function runSinglePack(auto = false) {
       }
     }
   };
+
+  // Container catalog: pick the best container type. A full solve runs per type,
+  // so this is not streamed — do a one-shot request and render the result with
+  // the chosen container's dimensions.
+  if (catalogEnabled && containerCatalog.length > 0) {
+    body.containers = catalogContainers(mode);
+    let result;
+    try {
+      if (WASM_MODE) result = JSON.parse(goPack(JSON.stringify(body)));
+      else result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+    } catch (e) {
+      if (seq === packSeq) { if (!auto) showError(e.message); endPackIndicator(); }
+      return;
+    }
+    if (seq !== packSeq) return;
+    if (result.error) { if (!auto) showError(result.error); endPackIndicator(); return; }
+    if (result.container_bin) {
+      body.bin = { width: result.container_bin.width, height: result.container_bin.height, depth: result.container_bin.depth };
+    }
+    data.bins_used = result.bins_used || 0;
+    data.best_packer = result.container ? ('container ' + result.container) : (result.best_packer || '');
+    data.free_rects = result.free_rects;
+    data.item_errors = result.item_errors || {};
+    data.unplaced = result.unplaced || [];
+    if (is3D) ctl = beginScene3D(body.bin, Math.max(1, data.bins_used), body.items.length);
+    else renderShell(data, mode, body.bin, 0);
+    drawBatch(result.placements || []);
+    finish();
+    return;
+  }
 
   // WASM mode: the Go solver runs in a Web Worker and posts each frame back, so
   // the main thread renders progressively (genuine streaming, no server). The
