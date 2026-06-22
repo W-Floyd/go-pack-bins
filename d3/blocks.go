@@ -1,0 +1,404 @@
+package d3
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"sort"
+
+	"github.com/W-Floyd/go-pack-bins/d2"
+	"github.com/W-Floyd/go-pack-bins/pack"
+)
+
+// BlockPacker is a layered "block-building" 3-D packer. It packs the container in
+// horizontal layers from the floor up; each layer has a target height H (the
+// tallest item that still fits the remaining height) and is filled with solid,
+// waste-free rectangular *blocks* of exactly that height, whose footprints are
+// then tiled into the layer floor with 2-D MaxRects.
+//
+// Blocks are built in tiers (this is the bounded tier-1/tier-2 version; tile-and-
+// join tiers are a planned extension):
+//
+//  1. Direct — an item already H tall (laid flat), used as a one-item block.
+//  2. Vertical stack — several items that share a footprint and whose heights sum
+//     to exactly H (e.g. an 8×8×6 under an 8×8×2), fused into one 8×8×H column.
+//
+// Each item is considered in every orientation whose footprint fits the bin, so a
+// rotatable item can contribute at up to three different heights; once an item is
+// placed (in some block) it is consumed from all the others. Like d3.LAFF this
+// packer manages its own geometry and bins, but it commits each placement through
+// an observer as the block lands, so a solve streams its progress.
+type BlockPacker struct {
+	w, d, h  float64
+	observer pack.PlaceObserver
+	maxStack int // cap on items fused into one vertical stack (bounds the search)
+}
+
+// NewBlockPacker creates a block-building packer for a bin of the given dimensions.
+func NewBlockPacker(w, d, h float64) *BlockPacker {
+	return &BlockPacker{w: w, d: d, h: h, maxStack: 6}
+}
+
+// Observe registers a per-placement callback (pack.Observable), enabling streaming.
+func (bp *BlockPacker) Observe(fn pack.PlaceObserver) { bp.observer = fn }
+
+// PackAll runs the solve with no cancellation.
+func (bp *BlockPacker) PackAll(items []pack.Item) (pack.Result, error) {
+	return bp.PackAllCtx(context.Background(), items)
+}
+
+const blockEps = 1e-9
+
+// orient is one valid orientation of an item: a footprint (fw×fd) and height fh,
+// kept only when the footprint fits the bin floor and fh fits the bin.
+type orient struct{ fw, fd, fh float64 }
+
+// pitem is a placeable item with its distinct valid orientations.
+type pitem struct {
+	id     string
+	orient []orient
+}
+
+// sub is one real item inside a block, at z-offset dz above the block's base,
+// occupying the block footprint (fw×fd) for height fh.
+type sub struct {
+	id     string
+	dz, fh float64
+}
+
+// block is a solid layer-height column: a footprint, the item indices it consumes,
+// and the stacked sub-items that realise it.
+type block struct {
+	fw, fd float64
+	idxs   []int
+	subs   []sub
+}
+
+// PackAllCtx packs items into layers of fused blocks, committing each placement
+// through the observer as it lands. It samples ctx between layers and inside the
+// stack search, returning the partial result and ctx.Err() if cancelled.
+func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.Result, error) {
+	var result pack.Result
+
+	// Collect placeable items and their valid orientations; anything that fits no
+	// orientation is immediately unplaced (as LAFF does).
+	its := make([]*pitem, 0, len(items))
+	for _, raw := range items {
+		i3, ok := raw.(*Item3D)
+		if !ok {
+			result.Unplaced = append(result.Unplaced, raw.ID())
+			continue
+		}
+		var os []orient
+		for _, o := range i3.Orientations() {
+			fw, fd, fh := o[0], o[1], o[2]
+			if fh <= bp.h+blockEps && fw <= bp.w+blockEps && fd <= bp.d+blockEps {
+				os = append(os, orient{fw, fd, fh})
+			}
+		}
+		if len(os) == 0 {
+			result.Unplaced = append(result.Unplaced, i3.ID())
+			continue
+		}
+		its = append(its, &pitem{id: i3.ID(), orient: os})
+	}
+
+	consumed := make([]bool, len(its))
+	binIdx := 0
+	var nextID int
+
+	for remaining(its, consumed) {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		binID := fmt.Sprintf("blocks-bin-%d", binIdx)
+		baseZ := 0.0
+		placedInBin := 0
+
+		for baseZ < bp.h-blockEps {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			H := bp.maxHeight(its, consumed, bp.h-baseZ)
+			if H <= 0 {
+				break // nothing left fits the remaining height — this bin is done
+			}
+			floor := d2.NewBin(binID, bp.w, bp.d, d2.NewMaxRectsDefault(bp.w, bp.d))
+			// First fill the layer with blocks exactly H tall (clean layer lines).
+			n := bp.placeOnFloor(floor, &result, binID, bp.buildBlocks(its, consumed, H), consumed, baseZ, &nextID)
+			// Last resort: drop the tallest blocks that still fit the layer height
+			// into any leftover floor cells, so a gap becomes a short item with a
+			// small void above it rather than a full-height void. The layer top
+			// stays at baseZ+H, so the layer lines are preserved.
+			n += bp.placeOnFloor(floor, &result, binID, bp.buildFallbackBlocks(its, consumed, H), consumed, baseZ, &nextID)
+			if n == 0 {
+				break // safety: no block fit the floor (shouldn't happen at baseZ==0)
+			}
+			placedInBin += n
+			baseZ += H
+		}
+
+		if placedInBin == 0 {
+			break // safety against a non-progressing bin
+		}
+		result.Bins = append(result.Bins, NewBin(binID, bp.w, bp.d, bp.h, NewExtremePointStrategy(bp.w, bp.d, bp.h)))
+		binIdx++
+	}
+	return result, nil
+}
+
+// maxHeight is the tallest item height (over available items' valid orientations)
+// that fits within cap — the height of the next layer.
+func (bp *BlockPacker) maxHeight(its []*pitem, consumed []bool, cap float64) float64 {
+	best := 0.0
+	for i, it := range its {
+		if consumed[i] {
+			continue
+		}
+		for _, o := range it.orient {
+			if o.fh <= cap+blockEps && o.fh > best+blockEps {
+				best = o.fh
+			}
+		}
+	}
+	return best
+}
+
+// buildBlocks proposes height-H blocks from the available items: tier 1 (items that
+// are H tall) and tier 2 (same-footprint stacks whose heights sum to H). Candidate
+// blocks may share items; placeLayer resolves that by skipping any block whose
+// items were already consumed. Blocks are returned largest-footprint-first so the
+// layer floor seeds with big blocks (as LAFF does).
+func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []block {
+	var blocks []block
+
+	// Tier 1: an item already H tall.
+	for i, it := range its {
+		if consumed[i] {
+			continue
+		}
+		for _, o := range it.orient {
+			if math.Abs(o.fh-H) <= blockEps {
+				blocks = append(blocks, block{
+					fw: o.fw, fd: o.fd, idxs: []int{i},
+					subs: []sub{{id: it.id, dz: 0, fh: o.fh}},
+				})
+				break
+			}
+		}
+	}
+
+	// Tier 2: group shorter items by footprint, then carve exact height-sum stacks.
+	type ent struct {
+		idx int
+		fh  float64
+	}
+	groups := map[[2]float64][]ent{}
+	for i, it := range its {
+		if consumed[i] {
+			continue
+		}
+		seen := map[[2]float64]bool{} // one (idx, height) per footprint key per item
+		for _, o := range it.orient {
+			if o.fh >= H-blockEps {
+				continue // H-tall handled by tier 1; taller can't go in this layer
+			}
+			key := [2]float64{math.Min(o.fw, o.fd), math.Max(o.fw, o.fd)}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			groups[key] = append(groups[key], ent{i, o.fh})
+		}
+	}
+	for key, es := range groups {
+		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first prunes the search
+		used := make([]bool, len(es))
+		for {
+			heights := make([]float64, 0, len(es))
+			pos := make([]int, 0, len(es))
+			for j, e := range es {
+				if !used[j] {
+					heights = append(heights, e.fh)
+					pos = append(pos, j)
+				}
+			}
+			pick := findStack(heights, H, bp.maxStack)
+			if pick == nil {
+				break
+			}
+			var blk block
+			blk.fw, blk.fd = key[0], key[1]
+			dz := 0.0
+			for _, p := range pick {
+				e := es[pos[p]]
+				used[pos[p]] = true
+				blk.idxs = append(blk.idxs, e.idx)
+				blk.subs = append(blk.subs, sub{id: its[e.idx].id, dz: dz, fh: e.fh})
+				dz += e.fh
+			}
+			blocks = append(blocks, blk)
+		}
+	}
+
+	sort.SliceStable(blocks, func(a, b int) bool { return blocks[a].fw*blocks[a].fd > blocks[b].fw*blocks[b].fd })
+	return blocks
+}
+
+// placeOnFloor tiles candidate blocks into the given layer floor (2-D MaxRects) at
+// height baseZ, committing each placed block's sub-items and consuming them. A
+// block referencing an already-consumed item is skipped. Called once for the
+// exact-height blocks and again for the fallback blocks, so both share the floor's
+// remaining free space. Returns items placed.
+func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID string, blocks []block, consumed []bool, baseZ float64, nextID *int) int {
+	placed := 0
+	for _, blk := range blocks {
+		if anyConsumed(blk.idxs, consumed) {
+			continue
+		}
+		*nextID++
+		p, err := floor.TryPlace(d2.NewItem(fmt.Sprintf("blk-%d", *nextID), blk.fw, blk.fd, true))
+		if err != nil {
+			continue // footprint doesn't fit the remaining floor — leave for a later layer
+		}
+		pl, ok := p.(*d2.Placement2D)
+		if !ok {
+			continue
+		}
+		for _, s := range blk.subs {
+			pl3 := &Placement3D{
+				binID: binID, itemID: s.id,
+				X: pl.X, Y: pl.Y, Z: baseZ + s.dz,
+				W: pl.W, D: pl.H, H: s.fh, // pl.W/H are the (possibly rotated) footprint extents
+			}
+			result.Placements = append(result.Placements, pl3)
+			if bp.observer != nil {
+				bp.observer(pl3)
+			}
+			placed++
+		}
+		for _, idx := range blk.idxs {
+			consumed[idx] = true
+		}
+	}
+	return placed
+}
+
+// buildFallbackBlocks is the last-resort tier: from the items still available
+// after the exact-height pass, it builds blocks no taller than H — the tallest
+// that fit — so leftover floor cells can be filled. Per footprint it greedily
+// fuses the tallest items whose heights sum to ≤ H (a short stack), then orders
+// the blocks tallest-first so the void left under the layer line is minimised.
+func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, consumed []bool, H float64) []block {
+	type ent struct {
+		idx int
+		fh  float64
+	}
+	groups := map[[2]float64][]ent{}
+	for i, it := range its {
+		if consumed[i] {
+			continue
+		}
+		seen := map[[2]float64]bool{}
+		for _, o := range it.orient {
+			if o.fh > H+blockEps {
+				continue // can't fit this layer's height
+			}
+			key := [2]float64{math.Min(o.fw, o.fd), math.Max(o.fw, o.fd)}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			groups[key] = append(groups[key], ent{i, o.fh})
+		}
+	}
+	var blocks []block
+	for key, es := range groups {
+		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first
+		used := make([]bool, len(es))
+		for {
+			var blk block
+			blk.fw, blk.fd = key[0], key[1]
+			dz := 0.0
+			for j := range es { // greedily stack tallest-first up to H
+				if used[j] || len(blk.subs) >= bp.maxStack || dz+es[j].fh > H+blockEps {
+					continue
+				}
+				used[j] = true
+				blk.idxs = append(blk.idxs, es[j].idx)
+				blk.subs = append(blk.subs, sub{id: its[es[j].idx].id, dz: dz, fh: es[j].fh})
+				dz += es[j].fh
+			}
+			if len(blk.subs) == 0 {
+				break
+			}
+			blocks = append(blocks, blk)
+		}
+	}
+	sort.SliceStable(blocks, func(a, b int) bool {
+		if ha, hb := blockHeight(blocks[a]), blockHeight(blocks[b]); math.Abs(ha-hb) > blockEps {
+			return ha > hb // tallest block first — least wasted height under the line
+		}
+		return blocks[a].fw*blocks[a].fd > blocks[b].fw*blocks[b].fd
+	})
+	return blocks
+}
+
+// blockHeight is the total stacked height of a block.
+func blockHeight(b block) float64 {
+	h := 0.0
+	for _, s := range b.subs {
+		h += s.fh
+	}
+	return h
+}
+
+// findStack returns indices into heights of a subset summing to target (within
+// eps), using at most maxStack items, or nil. heights must be sorted descending so
+// the sum>target cutoff prunes; a node budget bounds the worst case.
+func findStack(heights []float64, target float64, maxStack int) []int {
+	budget := 20000
+	var found []int
+	var dfs func(start int, sum float64, pick []int) bool
+	dfs = func(start int, sum float64, pick []int) bool {
+		if budget <= 0 {
+			return false
+		}
+		budget--
+		if math.Abs(sum-target) <= blockEps {
+			found = append([]int(nil), pick...)
+			return true
+		}
+		if sum > target+blockEps || len(pick) >= maxStack {
+			return false
+		}
+		for i := start; i < len(heights); i++ {
+			if dfs(i+1, sum+heights[i], append(pick, i)) {
+				return true
+			}
+		}
+		return false
+	}
+	dfs(0, 0, nil)
+	return found
+}
+
+func remaining(its []*pitem, consumed []bool) bool {
+	for i := range its {
+		if !consumed[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func anyConsumed(idxs []int, consumed []bool) bool {
+	for _, i := range idxs {
+		if consumed[i] {
+			return true
+		}
+	}
+	return false
+}
+
+var _ pack.Observable = (*BlockPacker)(nil)

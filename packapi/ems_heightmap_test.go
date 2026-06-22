@@ -41,7 +41,7 @@ func assertValid3D(t *testing.T, resp PackResponse, bw, bd, bh float64) {
 // bin with no leftovers, no overlaps, and full utilisation — exercising the
 // packapi wiring.
 func TestPackEMSAndHeightmapTilePerfectly(t *testing.T) {
-	for _, algo := range []string{"ems", "heightmap", "layer"} {
+	for _, algo := range []string{"ems", "heightmap", "layer", "blocks"} {
 		resp := Pack(PackRequest{
 			Mode: "3d", Algorithm: algo,
 			Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
@@ -66,7 +66,7 @@ func TestPackEMSAndHeightmapMixedNoOverlap(t *testing.T) {
 		w := float64(2 + i%4) // 2..5
 		items = append(items, ItemSpec{ID: itoa(i), Width: w, Height: w, Depth: w, AllowRotate: true})
 	}
-	for _, algo := range []string{"ems", "heightmap", "layer"} {
+	for _, algo := range []string{"ems", "heightmap", "layer", "blocks"} {
 		resp := Pack(PackRequest{
 			Mode: "3d", Algorithm: algo,
 			Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
