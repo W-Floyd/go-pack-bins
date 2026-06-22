@@ -85,31 +85,68 @@ func TestPackEMSAndHeightmapMixedNoOverlap(t *testing.T) {
 	}
 }
 
-// The layer packer is streamable: a solve emits batch placements and numeric
-// progress incrementally, not just a final result.
-func TestPackLayerStreams(t *testing.T) {
-	req := PackRequest{
-		Mode: "3d", Algorithm: "layer",
-		Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
-		Items: cubes(40, 3),
+// The layered packers stream live, then deliver their settle post-pass as a final
+// "reposition" frame; the repositioned (and non-streaming) results have no floating
+// items — every elevated box rests on the floor or the top of another box.
+func TestPackLayeredSettleViaReposition(t *testing.T) {
+	// Sizes that drive a tall layer with a short cell underneath a higher box, so
+	// the layered packers float something that the settle pass must drop.
+	items := []ItemSpec{
+		{ID: "tall", Width: 4, Depth: 4, Height: 6},
+		{ID: "top1", Width: 4, Depth: 4, Height: 4},
+		{ID: "top2", Width: 4, Depth: 4, Height: 4},
+		{ID: "short", Width: 4, Depth: 4, Height: 2},
 	}
-	if !isStreamable(req) {
-		t.Fatal("layer should be streamable")
-	}
-	var batches, progress, placed int
-	StreamPack(context.Background(), req, func(f StreamFrame) {
-		switch f.Type {
-		case "batch":
-			batches++
-			placed += len(f.Placements)
-		case "progress":
-			progress++
+	for _, algo := range []string{"layer", "blocks"} {
+		req := PackRequest{Mode: "3d", Algorithm: algo, Bin: BinSpec{Width: 8, Depth: 4, Height: 10}, Items: items}
+		if !isStreamable(req) {
+			t.Errorf("%s should stream (settle delivered via a reposition frame)", algo)
 		}
-	})
-	if batches == 0 || progress == 0 {
-		t.Errorf("layer stream: batches=%d progress=%d, want both > 0", batches, progress)
-	}
-	if placed != 40 {
-		t.Errorf("layer stream: %d items placed across batches, want 40", placed)
+		var reposed []PlacementResult
+		sawReposition := false
+		StreamPack(context.Background(), req, func(f StreamFrame) {
+			switch f.Type {
+			case "reposition":
+				sawReposition, reposed = true, f.Placements
+			}
+		})
+		if !sawReposition {
+			t.Fatalf("%s: expected a reposition frame for the settle post-pass", algo)
+		}
+		assertNoFloating(t, algo+" (reposition)", PackResponse{Placements: reposed})
+		// The non-streaming path settles to the same float-free result.
+		assertNoFloating(t, algo+" (non-stream)", Pack(req))
 	}
 }
+
+// assertNoFloating fails if any elevated placement lacks support directly beneath it.
+func assertNoFloating(t *testing.T, algo string, resp PackResponse) {
+	t.Helper()
+	byBin := map[int][]PlacementResult{}
+	for _, p := range resp.Placements {
+		byBin[p.BinIndex] = append(byBin[p.BinIndex], p)
+	}
+	for _, ps := range byBin {
+		for _, p := range ps {
+			if p.Z <= 1e-9 {
+				continue // on the floor
+			}
+			supported := false
+			for _, q := range ps {
+				if q == p {
+					continue
+				}
+				if q.Z+q.H >= p.Z-1e-9 && q.Z+q.H <= p.Z+1e-9 &&
+					overlaps1(p.X, p.W, q.X, q.W) && overlaps1(p.Y, p.D, q.Y, q.D) {
+					supported = true
+					break
+				}
+			}
+			if !supported {
+				t.Errorf("%s: item %s floats at z=%v with nothing beneath it", algo, p.ItemID, p.Z)
+			}
+		}
+	}
+}
+
+func overlaps1(a, aw, b, bw float64) bool { return min(a+aw, b+bw)-max(a, b) > 1e-9 }

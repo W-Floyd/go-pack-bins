@@ -19,6 +19,32 @@ func overlap1D(a0, a1, b0, b1 float64) float64 {
 	return 0
 }
 
+// Settle applies a gravity drop to one bin's placements: in increasing-z order,
+// each box is lowered until it rests on the floor or the highest top face beneath
+// its footprint. This removes the floating gaps a layered packer can leave when a
+// short item under a layer ceiling lets the next layer hang above empty space.
+// Placements are mutated in place and must be non-overlapping (as the packers
+// produce them); processing bottom-up keeps them non-overlapping — a box only ever
+// drops onto a box that was already below it.
+func Settle(ps []*Placement3D) {
+	order := make([]*Placement3D, len(ps))
+	copy(order, ps)
+	sort.SliceStable(order, func(i, j int) bool { return order[i].Z < order[j].Z })
+	for i, b := range order {
+		rest := 0.0
+		for j := 0; j < i; j++ {
+			a := order[j]
+			if overlap1D(b.X, b.X+b.W, a.X, a.X+a.W) > compactEps &&
+				overlap1D(b.Y, b.Y+b.D, a.Y, a.Y+a.D) > compactEps {
+				if top := a.Z + a.H; top > rest && top <= b.Z+compactEps {
+					rest = top // a sits below b and overlaps its footprint
+				}
+			}
+		}
+		b.Z = rest
+	}
+}
+
 // Compact slides each placement toward the x=0 and/or y=0 walls (the lateral
 // axes selected by doX/doY, leaving z untouched) until it contacts a neighbor or
 // the wall, collapsing the gaps that let packed items "slosh". It is
