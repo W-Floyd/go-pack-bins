@@ -21,6 +21,16 @@ func (i *Item3D) ID() string      { return i.id }
 func (i *Item3D) Volume() float64 { return i.W * i.D * i.H }
 func (i *Item3D) Dimensions() int { return 3 }
 
+// LayerHeight is the item's height when laid flat for layered packing: its
+// smallest dimension if it may rotate, else its natural height. Used by
+// offline.DecreasingLayerHeight to order items for the d3.LayerStack packer.
+func (i *Item3D) LayerHeight() float64 {
+	if !i.AllowRotate {
+		return i.H
+	}
+	return min(i.W, i.D, i.H)
+}
+
 // Orientations returns the distinct (w, d, h) triplets obtainable by rotating
 // the item around axis-aligned axes. Returns 1 if AllowRotate is false, else up to 6.
 func (i *Item3D) Orientations() [][3]float64 {

@@ -816,7 +816,7 @@ func isStreamable(req PackRequest) bool {
 		}
 	case "3d":
 		switch req.Algorithm {
-		case "", "ff", "blf", "ems", "heightmap", "nf", "bf", "wf", "ffd", "bfd", "nfd":
+		case "", "ff", "blf", "ems", "heightmap", "layer", "nf", "bf", "wf", "ffd", "bfd", "nfd":
 			return true
 		}
 	}
@@ -1000,6 +1000,8 @@ func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFac
 		return wrap(offline.BestFitDecreasing(factory))
 	case "nfd":
 		return wrap(offline.NextFitDecreasing(factory))
+	case "layer": // 3-D layered packing: sort tallest-flat-first, fill layers in turn
+		return wrap(offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(factory)))
 	case "wfd":
 		return wrap(offline.WorstFitDecreasing(factory))
 	case "mffd": // 1-D only; a single First-Fit pass over class-ordered items
@@ -1628,6 +1630,8 @@ func strat3DFor(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.Place
 		return d3.NewEMSStrategyContact(spec)
 	case "heightmap":
 		return d3.NewHeightmapStrategyContact(spec)
+	case "layer":
+		return d3.NewLayerStackStrategy
 	default:
 		return d3.NewExtremePointStrategyContact(spec)
 	}
@@ -1764,6 +1768,12 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
 			return PackResponse{Error: e.Error()}, nil
 		}
+	case "layer":
+		// Layered packing: lay items flat and sort tallest-flat-first; the factory
+		// carries the LayerStack strategy (via strat3DFor) that fills one layer at a
+		// time. Commits per item, so it streams its progress.
+		p := offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(factory))
+		result, err = packAllCtx(ctx, p, items)
 	case "auto":
 		gateSpec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
 		blfFactory := constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor("blf", gateSpec)), req.Constraints)

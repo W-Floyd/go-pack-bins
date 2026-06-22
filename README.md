@@ -37,7 +37,9 @@ a small variation on it.
   a lexicographic ordering of objectives.
 - **`d1` / `d2` / `d3`** — dimensioned bins, items, and placement geometry.
   2-D: MaxRects, Guillotine, Skyline, Shelf. 3-D: extreme-point (with support /
-  anti-slosh), Bottom-Left-Fill, and **LAFF** (largest-area-fit-first layers).
+  anti-slosh), Bottom-Left-Fill, **EMS** (empty-maximal-space), **Heightmap**,
+  **LAFF** (largest-area-fit-first layers), and **LayerStack** (flat, sequential
+  layers that stream their progress).
 - **`joint`** — a 3-D packer that decides bin selection *and* placement position
   together under one multi-objective score (balance + anti-slosh, single pass).
 - **`catalog`** — picks the best container type for an order from a catalog of
@@ -51,7 +53,8 @@ a small variation on it.
 - **`cmd/webdemo`** — HTTP server + single-page visualiser.
 - **`cmd/wasm`** — the same `packapi` compiled to `js/wasm`; see [WebAssembly](#webassembly).
 - **`bench/`** — a separate module benchmarking against
-  [bavix/boxpacker3](https://github.com/bavix/boxpacker3).
+  [bavix/boxpacker3](https://github.com/bavix/boxpacker3) and
+  [gedex/bp3d](https://github.com/gedex/bp3d).
 
 Algorithm provenance for methods adapted from other projects/papers is recorded in
 [ATTRIBUTION.md](ATTRIBUTION.md).
@@ -186,6 +189,76 @@ cd dist && python3 -m http.server 8083
 The bundle runs the solver in a Web Worker, so packs stream progressively without
 blocking the UI. The same `cmd/webdemo` page also works server-served (it falls
 back to the `/api/*` endpoints when the WASM bridge is absent).
+
+## Benchmarks
+
+The tables below compare the algorithms head-to-head on identical instances —
+speed plus solution quality (bins used, fill rate). Regenerate them in place with:
+
+```
+go test ./packapi/ -bench BenchmarkAlgos -run '^$'
+```
+
+That run rewrites everything between the markers below (the comparison vs the
+external `boxpacker3`/`bp3d` libraries lives in the separate [`bench/`](bench/) module).
+
+<!-- BENCH:START -->
+
+_`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. Time is per solve; absolute numbers vary by machine._
+
+### 3D — 500 mixed boxes (sides 1–6) into a 20×20×20 bin
+
+| Algorithm | Bins | Fill % | Unfit | Time/op |
+|-----------|-----:|-------:|------:|--------:|
+| ff | 3 | 76.7 | 0 | 183.787ms |
+| ffd | 3 | 76.7 | 0 | 91.367ms |
+| bfd | 3 | 76.7 | 0 | 90.761ms |
+| nfd | 3 | 76.7 | 0 | 83.465ms |
+| blf | 3 | 76.7 | 0 | 187.58ms |
+| ems | 3 | 76.7 | 0 | 17.103ms |
+| heightmap | 3 | 76.7 | 0 | 480.518ms |
+| laff | 4 | 57.5 | 0 | 1.896ms |
+| layer | 3 | 76.7 | 0 | 852µs |
+| auto | 3 | 76.7 | 0 | 119.436ms |
+
+### 3D · anti-slosh — same 500 boxes with 60% bottom support + 50% side anti-slosh (X & Y)
+
+| Algorithm | Bins | Fill % | Unfit | Time/op |
+|-----------|-----:|-------:|------:|--------:|
+| ff | 3 | 76.7 | 0 | 199.311ms |
+| ffd | 3 | 76.7 | 0 | 143.621ms |
+| bfd | 3 | 76.7 | 0 | 142.341ms |
+| nfd | 3 | 76.7 | 0 | 219.184ms |
+| blf | 3 | 76.7 | 0 | 189.875ms |
+| ems | 3 | 76.7 | 0 | 24.135ms |
+| heightmap | 3 | 76.7 | 0 | 491.642ms |
+| layer | 3 | 76.7 | 0 | 1.483ms |
+
+### 2D — 400 mixed rectangles (10–50) into a 300×300 bin
+
+| Algorithm | Bins | Fill % | Unfit | Time/op |
+|-----------|-----:|-------:|------:|--------:|
+| ff | 4 | 71.1 | 0 | 1.837ms |
+| ffd | 3 | 94.8 | 0 | 2.254ms |
+| bfd | 3 | 94.8 | 0 | 2.264ms |
+| nfd | 4 | 71.1 | 0 | 1.694ms |
+| skyline | 4 | 71.1 | 0 | 297µs |
+| auto | 3 | 94.8 | 0 | 3.285ms |
+
+### 1D — 1000 mixed items (1–8) into capacity-10 bins
+
+| Algorithm | Bins | Fill % | Unfit | Time/op |
+|-----------|-----:|-------:|------:|--------:|
+| ff | 418 | 99.4 | 0 | 1.042ms |
+| bf | 418 | 99.4 | 0 | 1.116ms |
+| wf | 464 | 89.6 | 0 | 1.643ms |
+| ffd | 416 | 99.9 | 0 | 1.165ms |
+| bfd | 416 | 99.9 | 0 | 1.44ms |
+| wfd | 416 | 99.9 | 0 | 1.432ms |
+| mffd | 416 | 99.9 | 0 | 1.091ms |
+| auto | 416 | 99.9 | 0 | 1.942ms |
+
+<!-- BENCH:END -->
 
 ## Development
 

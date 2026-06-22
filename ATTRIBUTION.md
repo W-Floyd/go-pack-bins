@@ -17,6 +17,7 @@ Ideas reimplemented:
 | Idea | Our implementation |
 |------|--------------------|
 | Largest-Area-Fit-First (LAFF) layered packing | [`d3/laff.go`](d3/laff.go) |
+| Layered packing, sequential/streaming variant — lay items flat, sort by smallest dimension, fill one layer's floor (2-D MaxRects) at a time so progress streams | [`d3/layer.go`](d3/layer.go) (our adaptation of the LAFF layer idea) |
 | Brute-force packager for small orders (with permutation pruning + deadline) | [`offline/bruteforce.go`](offline/bruteforce.go) — uses our `context` deadline |
 | Heterogeneous container catalog + max container count | [`catalog/catalog.go`](catalog/catalog.go) |
 | Manifest rule (incompatible items must not share a container) | [`pack/incompatible.go`](pack/incompatible.go) |
