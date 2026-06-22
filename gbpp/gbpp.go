@@ -182,70 +182,84 @@ func PackCatalog(ctx context.Context, items []pack.Item, types []BinType, opts O
 	return res
 }
 
-// Pack solves the GBPP for items. Compulsory items are packed first (First-Fit-
-// Decreasing); optional items are then considered by decreasing profit and
-// included greedily: into an existing bin's free space whenever they fit, or
-// into a new bin only when their profit covers the bin cost. ctx is honoured.
+// Pack solves the GBPP for items. To pack tightly, it first packs *all* items
+// together (compulsory and optional) with First-Fit-Decreasing, so optional
+// items consolidate with compulsory ones instead of being slotted into leftover
+// gaps afterwards. It then drops only the optional items that genuinely forced an
+// extra bin not worth its cost: any bin containing no compulsory item whose total
+// optional profit is below the bin cost is removed and its items rejected. An
+// optional item sharing a bin with compulsory items is always kept (its profit is
+// free — that bin's cost is already paid). ctx is honoured.
 func Pack(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts Options) Result {
 	profitKey, optKey := opts.profitKey(), opts.optionalKey()
-
-	var compulsory, optional []pack.Item
+	optional := make(map[string]bool, len(items))
 	profitOf := make(map[string]float64, len(items))
 	for _, it := range items {
 		s := pack.ScalarsOf(it)
 		profitOf[it.ID()] = s[profitKey]
-		if s[optKey] != 0 {
-			optional = append(optional, it)
-		} else {
-			compulsory = append(compulsory, it)
+		optional[it.ID()] = s[optKey] != 0
+	}
+
+	// Phase 1: pack everything together for the tightest consolidation.
+	full, _ := offline.FirstFitDecreasing(factory).PackAllCtx(ctx, items)
+
+	byBin := make(map[string][]pack.Placement, len(full.Bins))
+	for _, p := range full.Placements {
+		if p != nil {
+			byBin[p.BinID()] = append(byBin[p.BinID()], p)
 		}
 	}
 
-	// Phase 1: pack all compulsory items.
-	base, _ := offline.FirstFitDecreasing(factory).PackAllCtx(ctx, compulsory)
-	res := Result{Result: base}
-
-	// Phase 2: include optional items by decreasing profit.
-	sort.SliceStable(optional, func(i, j int) bool {
-		return profitOf[optional[i].ID()] > profitOf[optional[j].ID()]
-	})
-	for _, it := range optional {
-		if ctx.Err() != nil {
-			res.Rejected = append(res.Rejected, it.ID())
-			res.Unplaced = append(res.Unplaced, it.ID())
-			continue
-		}
-		if placed := tryExistingBins(&res.Result, it); placed {
-			res.IncludedProfit += profitOf[it.ID()]
-			continue
-		}
-		// Doesn't fit any open bin — opening a new one is worth it only if the
-		// item's profit covers the bin cost.
-		if profitOf[it.ID()] >= opts.BinCost {
-			b := factory.Open()
-			if p, err := b.TryPlace(it); err == nil {
-				res.Bins = append(res.Bins, b)
-				res.Placements = append(res.Placements, p)
-				res.IncludedProfit += profitOf[it.ID()]
-				continue
+	// Phase 2: keep every bin that holds a compulsory item; drop an all-optional
+	// bin only when its optional profit can't cover the bin cost.
+	var res Result
+	res.PlacementErrors = full.PlacementErrors
+	for _, b := range full.Bins {
+		pls := byBin[binID(b)]
+		hasCompulsory := false
+		binProfit := 0.0
+		for _, p := range pls {
+			if optional[p.ItemID()] {
+				binProfit += profitOf[p.ItemID()]
+			} else {
+				hasCompulsory = true
 			}
 		}
-		res.Rejected = append(res.Rejected, it.ID())
-		res.Unplaced = append(res.Unplaced, it.ID())
+		if !hasCompulsory && binProfit < opts.BinCost {
+			continue // not worth its cost — reject this bin's (all-optional) items
+		}
+		res.Bins = append(res.Bins, b)
+		for _, p := range pls {
+			res.Placements = append(res.Placements, p)
+			if optional[p.ItemID()] {
+				res.IncludedProfit += profitOf[p.ItemID()]
+			}
+		}
+	}
+
+	// Anything not in the final packing is unplaced; unplaced optionals are
+	// reported as rejected.
+	placed := make(map[string]bool, len(res.Placements))
+	for _, p := range res.Placements {
+		placed[p.ItemID()] = true
+	}
+	for _, it := range items {
+		if !placed[it.ID()] {
+			res.Unplaced = append(res.Unplaced, it.ID())
+			if optional[it.ID()] {
+				res.Rejected = append(res.Rejected, it.ID())
+			}
+		}
 	}
 
 	res.NetCost = opts.BinCost*float64(res.BinsUsed()) - res.IncludedProfit
 	return res
 }
 
-// tryExistingBins attempts to place item into one of the already-open bins
-// (no new bin). On success it records the placement in r and returns true.
-func tryExistingBins(r *pack.Result, item pack.Item) bool {
-	for _, b := range r.Bins {
-		if p, err := b.TryPlace(item); err == nil {
-			r.Placements = append(r.Placements, p)
-			return true
-		}
+// binID returns a bin's ID via its optional ID() method.
+func binID(b pack.Bin) string {
+	if idr, ok := b.(interface{ ID() string }); ok {
+		return idr.ID()
 	}
-	return false
+	return ""
 }
