@@ -90,6 +90,6 @@ lives in `$(go env GOROOT)/lib/wasm/`).
 
 ## Git
 
-Default branch `main`. Commit only when asked. `bench/bench` is a build artifact
-(gitignored); never commit binaries. End commit messages with the Co-Authored-By
-trailer.
+Default branch `main`. Commit only when asked, and commit **directly to `main`**
+— do not create a feature branch. `bench/bench` is a build artifact (gitignored);
+never commit binaries. End commit messages with the Co-Authored-By trailer.
