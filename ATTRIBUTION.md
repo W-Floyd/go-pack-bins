@@ -38,3 +38,25 @@ commit, port any improvements, and bump the commit hash above.
   trained deep-RL policy, impractical for a pure-Go, dependency-free library. Its
   non-ML heuristic baselines (heightmap-min, EMS scoring) remain a possible
   future addition.
+
+## Generalized Bin Packing literature (Mantzou & Dimitriadis 2025 SLR)
+
+Mantzou, T., & Dimitriadis, S. (2025). *Generalized bin packing and related
+problems: A systematic literature review.* Journal of Industrial Engineering and
+Management, 18(3), 394–426. https://doi.org/10.3926/jiem.8784
+
+Clean-room implementations of methods/objectives surveyed there (ideas, not code):
+
+| Idea | Source(s) cited in the SLR | Our implementation |
+|------|----------------------------|--------------------|
+| Generalized Bin Packing objective: optional items + profit, bin cost, rejection (BPRC), net-cost minimisation | Baldi, Crainic, Perboli & Tadei (2012); Hu, Wei & Lim (2018) | [`gbpp/gbpp.go`](gbpp/gbpp.go) |
+| Ruin-and-recreate metaheuristic | Gardeyn & Wauters (2022), 2-D variable-sized BPP | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
+| GRASP (greedy randomized adaptive search) | Correcher et al. (2017); Calzavara et al. (2021) | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
+| Beam search (bounded tree search over placement order) | Araya et al. (2020); Parreño et al. (2020) | [`offline/beam.go`](offline/beam.go) |
+| Lexicographic multi-objective selection | Bin packing with lexicographic objectives (2022) | [`meta/lexicographic.go`](meta/lexicographic.go) |
+
+Not yet implemented (larger, geometric — candidates for future work): load-bearing
+/ support-fraction and fragile-on-top constraints (Gzara et al. 2020; Paquay et
+al. 2018), and multi-drop / LIFO unload ordering (Gimenez-Palacios et al. 2023).
+The existing *incompatible-items* constraint already covers the conflict / type-
+compatibility line (Goldberg & Karhi 2019; Chen et al. 2025).

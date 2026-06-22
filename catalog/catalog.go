@@ -16,6 +16,7 @@ package catalog
 
 import (
 	"context"
+	"strings"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
@@ -81,6 +82,71 @@ func Best(ctx context.Context, items []pack.Item, candidates []Candidate) (Resul
 		return Result{}, pack.ErrItemTooLarge
 	}
 	return best, nil
+}
+
+// PackSequential packs items by cascading across the candidate container types
+// in the given order: it fills each type up to its MaxCount, then spills the
+// items that didn't fit (because the type's cap was reached, or they were too
+// large) into the next type, and so on. Use this — rather than Best — when no
+// single type can hold the whole order and you want a mix of sizes; list the
+// preferred/cheaper types first.
+//
+// The returned Result may contain bins of different types (in the order they
+// were opened, grouped by type); Label lists the types actually used. Items that
+// fit no remaining type end up in Unplaced. ctx is honoured.
+func PackSequential(ctx context.Context, items []pack.Item, candidates []Candidate) (Result, error) {
+	volByID := make(map[string]float64, len(items))
+	byID := make(map[string]pack.Item, len(items))
+	for _, it := range items {
+		volByID[it.ID()] = it.Volume()
+		byID[it.ID()] = it
+	}
+
+	remaining := append([]pack.Item(nil), items...)
+	var merged pack.Result
+	var used []string
+
+	for _, c := range candidates {
+		if len(remaining) == 0 {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		r, err := c.Pack(ctx, remaining)
+		if err != nil {
+			if ctx.Err() != nil {
+				return Result{}, ctx.Err()
+			}
+			if !isTooLarge(err) {
+				continue // this type failed hard; try the next
+			}
+		}
+		r = truncateToMaxCount(r, c.MaxCount, volByID)
+		if len(r.Placements) > 0 {
+			merged.Bins = append(merged.Bins, r.Bins...)
+			merged.Placements = append(merged.Placements, r.Placements...)
+			used = append(used, c.Label)
+		}
+		// Whatever this type couldn't place (over cap, or too large) cascades on.
+		remaining = itemsFromIDs(byID, r.Unplaced)
+	}
+	for _, it := range remaining {
+		merged.Unplaced = append(merged.Unplaced, it.ID())
+	}
+	return Result{Result: merged, Label: strings.Join(used, "+")}, nil
+}
+
+// itemsFromIDs maps a list of item IDs back to their items, preserving order and
+// skipping any unknown IDs.
+func itemsFromIDs(byID map[string]pack.Item, ids []string) []pack.Item {
+	out := make([]pack.Item, 0, len(ids))
+	for _, id := range ids {
+		if it, ok := byID[id]; ok {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func isTooLarge(err error) bool {

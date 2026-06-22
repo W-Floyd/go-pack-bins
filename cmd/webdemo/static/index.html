@@ -761,6 +761,9 @@ const ALGOS = {
     {v:'kk',  l:'Karmarkar-Karp (KK)'},
     {v:'bc',  l:'Bin Completion (exact)'},
     {v:'brute',l:'Brute-force order (small N)'},
+    {v:'beam', l:'Beam search'},
+    {v:'rr',   l:'Ruin & recreate'},
+    {v:'grasp',l:'GRASP'},
     {v:'pref',l:'Preference-Fit'},
   ],
   '2d': [
@@ -778,6 +781,9 @@ const ALGOS = {
     {v:'ffdh',       l:'Shelf FFDH (decreasing height)'},
     {v:'bfdh',       l:'Shelf BFDH (decreasing height)'},
     {v:'brute',      l:'Brute-force order (small N)'},
+    {v:'beam',       l:'Beam search'},
+    {v:'rr',         l:'Ruin & recreate'},
+    {v:'grasp',      l:'GRASP'},
     {v:'pref',       l:'Preference-Fit'},
   ],
   '3d': [
@@ -793,6 +799,9 @@ const ALGOS = {
     {v:'bfd', l:'Best Fit Decreasing (BFD)'},
     {v:'nfd', l:'Next Fit Decreasing (NFD)'},
     {v:'brute',l:'Brute-force order (small N)'},
+    {v:'beam', l:'Beam search'},
+    {v:'rr',   l:'Ruin & recreate'},
+    {v:'grasp',l:'GRASP'},
     {v:'pref',l:'Preference-Fit'},
   ],
 };
@@ -1979,6 +1988,14 @@ async function runSinglePack(auto = false) {
     if (result.error) { if (!auto) showError(result.error); endPackIndicator(); return; }
     if (result.container_bin) {
       body.bin = { width: result.container_bin.width, height: result.container_bin.height, depth: result.container_bin.depth };
+    } else if (result.bin_dims && result.bin_dims.length) {
+      // Mixed container sizes (cascade): render every bin at the largest size in
+      // the mix so no item clips. (True per-bin sizing is a future refinement.)
+      body.bin = result.bin_dims.reduce((m, d) => ({
+        width:  Math.max(m.width,  d.width),
+        height: Math.max(m.height, d.height),
+        depth:  Math.max(m.depth,  d.depth),
+      }), { width: 1, height: 1, depth: 1 });
     }
     data.bins_used = result.bins_used || 0;
     data.best_packer = result.container ? ('container ' + result.container) : (result.best_packer || '');

@@ -82,6 +82,34 @@ func TestPackCatalogMaxCount(t *testing.T) {
 	}
 }
 
+// When one container size's max count is exhausted, the catalog must cascade the
+// overflow into the next available size rather than dropping items. Four 6³
+// cubes each need their own 10³ bin; with two types capped at 2 bins each, only a
+// 2+2 mix places them all.
+func TestPackCatalogCascadesWhenMaxExhausted(t *testing.T) {
+	resp := Pack(PackRequest{
+		Mode: "3d", Algorithm: "ffd",
+		Items: cubes(4, 6),
+		Containers: []ContainerSpec{
+			{Bin: BinSpec{Width: 10, Height: 10, Depth: 10}, MaxCount: 2},
+			{Bin: BinSpec{Width: 10, Height: 10, Depth: 10}, MaxCount: 2},
+		},
+	})
+	if resp.Error != "" {
+		t.Fatal(resp.Error)
+	}
+	if len(resp.Unplaced) != 0 {
+		t.Fatalf("expected the overflow to cascade into the second size, got %d unplaced: %v",
+			len(resp.Unplaced), resp.Unplaced)
+	}
+	if resp.BinsUsed != 4 {
+		t.Fatalf("expected 4 bins (2 of each size), got %d", resp.BinsUsed)
+	}
+	if len(resp.BinDims) != 4 {
+		t.Fatalf("expected per-bin dimensions for all 4 mixed bins, got %d", len(resp.BinDims))
+	}
+}
+
 // The incompatible constraint, via the "incompatible" op, keeps category-1 and
 // category-2 items in separate bins even though both fit in one.
 func TestPackIncompatible(t *testing.T) {
