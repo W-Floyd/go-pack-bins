@@ -1,6 +1,9 @@
 package packapi
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // overlaps3D reports whether two 3-D placements share positive volume.
 func overlaps3D(a, b PlacementResult) bool {
@@ -34,10 +37,11 @@ func assertValid3D(t *testing.T, resp PackResponse, bw, bd, bh float64) {
 	}
 }
 
-// EMS and heightmap each tile eight 5³ cubes into a single 10³ bin with no
-// leftovers, no overlaps, and full utilisation — exercising the packapi wiring.
+// EMS, heightmap and the layer packer each tile eight 5³ cubes into a single 10³
+// bin with no leftovers, no overlaps, and full utilisation — exercising the
+// packapi wiring.
 func TestPackEMSAndHeightmapTilePerfectly(t *testing.T) {
-	for _, algo := range []string{"ems", "heightmap"} {
+	for _, algo := range []string{"ems", "heightmap", "layer"} {
 		resp := Pack(PackRequest{
 			Mode: "3d", Algorithm: algo,
 			Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
@@ -62,7 +66,7 @@ func TestPackEMSAndHeightmapMixedNoOverlap(t *testing.T) {
 		w := float64(2 + i%4) // 2..5
 		items = append(items, ItemSpec{ID: itoa(i), Width: w, Height: w, Depth: w, AllowRotate: true})
 	}
-	for _, algo := range []string{"ems", "heightmap"} {
+	for _, algo := range []string{"ems", "heightmap", "layer"} {
 		resp := Pack(PackRequest{
 			Mode: "3d", Algorithm: algo,
 			Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
@@ -78,5 +82,34 @@ func TestPackEMSAndHeightmapMixedNoOverlap(t *testing.T) {
 			t.Errorf("%s: placed %d of %d", algo, len(resp.Placements), len(items))
 		}
 		assertValid3D(t, resp, 10, 10, 10)
+	}
+}
+
+// The layer packer is streamable: a solve emits batch placements and numeric
+// progress incrementally, not just a final result.
+func TestPackLayerStreams(t *testing.T) {
+	req := PackRequest{
+		Mode: "3d", Algorithm: "layer",
+		Bin:   BinSpec{Width: 10, Height: 10, Depth: 10},
+		Items: cubes(40, 3),
+	}
+	if !isStreamable(req) {
+		t.Fatal("layer should be streamable")
+	}
+	var batches, progress, placed int
+	StreamPack(context.Background(), req, func(f StreamFrame) {
+		switch f.Type {
+		case "batch":
+			batches++
+			placed += len(f.Placements)
+		case "progress":
+			progress++
+		}
+	})
+	if batches == 0 || progress == 0 {
+		t.Errorf("layer stream: batches=%d progress=%d, want both > 0", batches, progress)
+	}
+	if placed != 40 {
+		t.Errorf("layer stream: %d items placed across batches, want 40", placed)
 	}
 }

@@ -44,6 +44,24 @@ func itemHeight(it pack.Item) float64 {
 	return it.Volume()
 }
 
+// DecreasingLayerHeight sorts items from tallest to shortest by their laid-flat
+// height (an item's smallest dimension when it may rotate, else its natural
+// height). It feeds the 3-D layer packer (d3.LayerStack) so each layer is seeded
+// by its tallest member and the rest pack beneath that ceiling. Items exposing
+// LayerHeight() are ordered by it; others fall back to height/volume.
+var DecreasingLayerHeight SortPolicy = func(items []pack.Item) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return layerHeight(items[i]) > layerHeight(items[j])
+	})
+}
+
+func layerHeight(it pack.Item) float64 {
+	if h, ok := it.(interface{ LayerHeight() float64 }); ok {
+		return h.LayerHeight()
+	}
+	return itemHeight(it)
+}
+
 // Wrapper wraps an online packer with a sort policy to create an offline packer.
 type Wrapper struct {
 	name   string
