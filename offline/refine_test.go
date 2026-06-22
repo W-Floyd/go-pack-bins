@@ -50,7 +50,7 @@ func TestRefineBalance_TightensWeightSpread(t *testing.T) {
 	}
 
 	before := spread(start)
-	refined := offline.RefineBalance(factory, start, items)
+	refined := offline.RefineBalance(factory, start, items, offline.RefineOptions{})
 	after := spread(refined)
 
 	if refined.BinsUsed() != start.BinsUsed() {

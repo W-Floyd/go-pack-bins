@@ -8,12 +8,38 @@ import (
 
 // RefineBalanceMaxItems caps the problem size for RefineBalance: above it the
 // local search (which re-validates moves by rebuilding bins) is skipped to keep
-// packing responsive. The result is returned unchanged in that case.
+// packing responsive. The result is returned unchanged in that case. This is the
+// default; callers may override via RefineOptions.MaxItems.
 const RefineBalanceMaxItems = 80
 
 // refineEvalBudget bounds the number of feasibility rebuilds so a single refine
-// pass stays bounded regardless of instance shape.
+// pass stays bounded regardless of instance shape. Default for
+// RefineOptions.EvalBudget.
 const refineEvalBudget = 40000
+
+// RefineOptions configures RefineBalance.
+type RefineOptions struct {
+	// MaxItems is the problem-size cap above which the local search is skipped;
+	// 0 uses RefineBalanceMaxItems.
+	MaxItems int
+	// EvalBudget bounds the number of feasibility rebuilds in one pass; 0 uses
+	// refineEvalBudget.
+	EvalBudget int
+}
+
+func (o RefineOptions) maxItems() int {
+	if o.MaxItems <= 0 {
+		return RefineBalanceMaxItems
+	}
+	return o.MaxItems
+}
+
+func (o RefineOptions) evalBudget() int {
+	if o.EvalBudget <= 0 {
+		return refineEvalBudget
+	}
+	return o.EvalBudget
+}
 
 // RefineBalance improves an existing packing by local search: it repeatedly
 // moves a single item to another bin, or swaps two items between bins, accepting
@@ -24,9 +50,9 @@ const refineEvalBudget = 40000
 // pruned), only the distribution within it changes.
 //
 // factory must match the one that produced r (same dimensions/constraints).
-// Large instances (> RefineBalanceMaxItems) are returned unchanged.
-func RefineBalance(factory pack.BinFactory, r pack.Result, items []pack.Item) pack.Result {
-	if len(items) == 0 || len(items) > RefineBalanceMaxItems {
+// Large instances (> opts.MaxItems) are returned unchanged.
+func RefineBalance(factory pack.BinFactory, r pack.Result, items []pack.Item, opts RefineOptions) pack.Result {
+	if len(items) == 0 || len(items) > opts.maxItems() {
 		return r
 	}
 	byID := make(map[string]pack.Item, len(items))
@@ -53,7 +79,7 @@ func RefineBalance(factory pack.BinFactory, r pack.Result, items []pack.Item) pa
 		}
 	}
 
-	budget := refineEvalBudget
+	budget := opts.evalBudget()
 	feasible := func(set []pack.Item) bool {
 		budget--
 		bin := factory.Open()

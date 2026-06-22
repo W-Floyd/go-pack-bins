@@ -474,6 +474,13 @@
         </div>
       </div>
 
+      <!-- advanced per-algorithm tuning: expert knobs, clamped server-side -->
+      <div id="algo-tuning-field" style="display:none; margin-top:6px">
+        <div class="section-label">Advanced tuning</div>
+        <div id="algo-tuning-inputs" class="row"></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Trade time for quality. Blank uses the default; values are clamped to safe ranges.</div>
+      </div>
+
       <!-- bin spec -->
       <div id="bin-capacity-block">
         <div id="outer-bin-label" class="section-label">Bin capacity</div>
@@ -537,6 +544,13 @@
               <label>Inner algorithm</label>
               <select id="inner-algorithm" onchange="onAlgorithmChange()"></select>
             </div>
+          </div>
+
+          <!-- advanced per-algorithm tuning for the inner (carton) level -->
+          <div id="inner-algo-tuning-field" style="display:none; margin-top:6px">
+            <div class="section-label">Advanced tuning</div>
+            <div id="inner-algo-tuning-inputs" class="row"></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">Trade time for quality. Blank uses the default; values are clamped to safe ranges.</div>
           </div>
 
           <!-- carton catalog: choose the best carton size(s) for the items -->
@@ -1343,9 +1357,62 @@ function removePreference(lvl, idx) {
   scheduleAutoPack();
 }
 
+// Per-algorithm advanced tunables. Keys match packapi AlgorithmOptions; values
+// are clamped server-side, so the placeholder just shows the default.
+const REFINE_KNOBS = [
+  { key: 'refine_max_items', label: 'Refine max items', def: 80 },
+  { key: 'refine_eval_budget', label: 'Refine eval budget', def: 40000 },
+];
+const ALGO_TUNABLES = {
+  beam:  [ { key: 'beam_width', label: 'Beam width', def: 6 }, { key: 'beam_branch', label: 'Branch', def: 4 }, { key: 'beam_max_items', label: 'Max items', def: 200 } ],
+  brute: [ { key: 'brute_max_items', label: 'Max items (n!)', def: 8 } ],
+  rr:    [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
+  grasp: [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_restarts', label: 'Restarts', def: 16 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
+  bf:    REFINE_KNOBS,
+  wf:    REFINE_KNOBS,
+  pref:  REFINE_KNOBS,
+};
+
+// algoPanelIds maps a panel ('outer' = main/pallet controls, 'inner' = carton
+// controls in nested mode) to its tuning field/input container element ids.
+function algoPanelIds(which) {
+  return which === 'inner'
+    ? { field: 'inner-algo-tuning-field', inputs: 'inner-algo-tuning-inputs' }
+    : { field: 'algo-tuning-field', inputs: 'algo-tuning-inputs' };
+}
+
+function renderAlgoTuning(algo, which) {
+  const ids = algoPanelIds(which);
+  const field = document.getElementById(ids.field);
+  const host = document.getElementById(ids.inputs);
+  if (!field || !host) return;
+  const knobs = ALGO_TUNABLES[algo];
+  if (!knobs) { field.style.display = 'none'; host.innerHTML = ''; return; }
+  field.style.display = '';
+  host.innerHTML = knobs.map(k =>
+    `<div class="field" style="max-width:130px">
+       <label style="font-size:11px">${k.label}</label>
+       <input type="number" class="algo-tune" data-key="${k.key}" min="1" step="1" placeholder="${k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
+     </div>`).join('');
+}
+
+// Collect filled-in tuning inputs for a panel into an algorithm_options object
+// (omitted when none are set, so the server applies defaults).
+function collectAlgoOptions(which) {
+  const ids = algoPanelIds(which);
+  const opts = {};
+  document.querySelectorAll('#' + ids.inputs + ' .algo-tune').forEach(el => {
+    const v = parseFloat(el.value);
+    if (!isNaN(v)) opts[el.dataset.key] = v;
+  });
+  return Object.keys(opts).length ? opts : undefined;
+}
+
 function onAlgorithmChange() {
   updateBalanceVisibility();
   const algo = document.getElementById('algorithm').value;
+  renderAlgoTuning(algo, 'outer');
+  renderAlgoTuning(document.getElementById('inner-algorithm')?.value, 'inner');
   document.getElementById('bin-cost-field').style.display = (algo === 'gbpp') ? '' : 'none';
   document.getElementById('lex-section').style.display = (algo === 'lex') ? '' : 'none';
   const ialgo = document.getElementById('inner-algorithm')?.value;
@@ -2170,6 +2237,8 @@ async function runSinglePack(auto = false) {
   };
   if (algo === 'gbpp') body.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (algo === 'lex') body.lex_objectives = lexObjectives.slice();
+  const algoOpts = collectAlgoOptions('outer');
+  if (algoOpts) body.algorithm_options = algoOpts;
 
   // Stream the solve as NDJSON and render each batch the moment it arrives. For
   // incremental algorithms the server flushes placements mid-solve, so the pack
@@ -2392,6 +2461,8 @@ async function runNestedPack(auto = false) {
   if (catalogEnabled && containerCatalog.length) outer.containers = catalogContainers(mode);
   if (outerAlgo === 'gbpp') outer.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (outerAlgo === 'lex') outer.lex_objectives = lexObjectives.slice();
+  const outerOpts = collectAlgoOptions('outer');
+  if (outerOpts) outer.algorithm_options = outerOpts;
 
   // Inner (carton) level: its own catalog / bin cost / lexicographic objectives.
   const inner = {
@@ -2401,6 +2472,8 @@ async function runNestedPack(auto = false) {
   if (innerCatalogEnabled && innerCatalog.length) inner.containers = innerCatalogContainers(mode);
   if (innerAlgo === 'gbpp') inner.bin_cost = parseFloat(document.getElementById('inner-bin-cost')?.value) || 0;
   if (innerAlgo === 'lex') inner.lex_objectives = innerLexObjectives.slice();
+  const innerOpts = collectAlgoOptions('inner');
+  if (innerOpts) inner.algorithm_options = innerOpts;
 
   const body = {
     mode,

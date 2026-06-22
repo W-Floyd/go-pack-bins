@@ -460,6 +460,77 @@ type PackRequest struct {
 	// LexObjectives is the priority-ordered objective list for the "lex" algorithm
 	// (values: "unplaced", "bins", "spread").
 	LexObjectives []string `json:"lex_objectives,omitempty"`
+	// AlgorithmOptions carries optional, per-algorithm numeric tunables (advanced).
+	// Absent/non-positive values fall back to each solver's default; present values
+	// are clamped to safe ceilings (see optInt) so a UI knob can never remove a
+	// guardrail and hang the solve. Recognised keys:
+	//   beam_width, beam_branch, beam_max_items          (algorithm "beam")
+	//   brute_max_items                                  (algorithm "brute")
+	//   search_max_iters, search_restarts, search_seed   (algorithms "rr", "grasp")
+	//   refine_max_items, refine_eval_budget             (balancing algorithms)
+	AlgorithmOptions map[string]float64 `json:"algorithm_options,omitempty"`
+}
+
+// Clamp ceilings for AlgorithmOptions. These bound how far a UI knob can push a
+// solver: they keep search cost finite (and, for brute force, keep n! from
+// hanging) while still letting users trade time for quality. The solvers remain
+// ctx-aware, so even a maxed-out value is interruptible.
+const (
+	maxBeamWidth          = 64
+	maxBeamBranch         = 32
+	maxBeamMaxItems       = 2000
+	maxBruteForceMaxItems = 11 // 11! ≈ 4e7 orderings; 12! is too slow even with ctx
+	maxSearchMaxIters     = 200000
+	maxSearchRestarts     = 1000
+	maxRefineMaxItems     = 2000
+	maxRefineEvalBudget   = 2000000
+)
+
+// optInt reads a positive integer tunable from AlgorithmOptions, clamped to
+// [1, max]. It returns 0 when the key is absent or non-positive, which each
+// solver interprets as "use my default".
+func (req PackRequest) optInt(key string, max int) int {
+	v, ok := req.AlgorithmOptions[key]
+	if !ok || v < 1 {
+		return 0
+	}
+	n := int(v)
+	if n > max {
+		n = max
+	}
+	return n
+}
+
+func (req PackRequest) beamOptions() offline.BeamOptions {
+	return offline.BeamOptions{
+		Width:    req.optInt("beam_width", maxBeamWidth),
+		Branch:   req.optInt("beam_branch", maxBeamBranch),
+		MaxItems: req.optInt("beam_max_items", maxBeamMaxItems),
+	}
+}
+
+func (req PackRequest) bruteForceOptions(key func(pack.Item) string) offline.BruteForceOptions {
+	return offline.BruteForceOptions{
+		MaxItems: req.optInt("brute_max_items", maxBruteForceMaxItems),
+		Key:      key,
+	}
+}
+
+func (req PackRequest) searchOptions() offline.SearchOptions {
+	// Seed is passed through unclamped (0 → solver default); it changes the random
+	// stream, not the search cost.
+	return offline.SearchOptions{
+		Seed:     int64(req.AlgorithmOptions["search_seed"]),
+		MaxIters: req.optInt("search_max_iters", maxSearchMaxIters),
+		Restarts: req.optInt("search_restarts", maxSearchRestarts),
+	}
+}
+
+func (req PackRequest) refineOptions() offline.RefineOptions {
+	return offline.RefineOptions{
+		MaxItems:   req.optInt("refine_max_items", maxRefineMaxItems),
+		EvalBudget: req.optInt("refine_eval_budget", maxRefineEvalBudget),
+	}
 }
 
 // ContainerSpec is one container type in a catalog: its size, an optional cap on
@@ -1127,7 +1198,7 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -1233,13 +1304,13 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	case "bc":
 		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
 	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey1D})
+		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey1D))
 	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})
+		result = offline.BeamSearch(ctx, items, factory, req.beamOptions())
 	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})
+		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions())
 	case "grasp":
-		result = offline.GRASP(ctx, items, factory, offline.SearchOptions{})
+		result = offline.GRASP(ctx, items, factory, req.searchOptions())
 	case "auto":
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
@@ -1344,7 +1415,7 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -1410,13 +1481,13 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
 		result, err = packAllCtx(ctx, p, items)
 	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey2D})
+		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey2D))
 	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})
+		result = offline.BeamSearch(ctx, items, factory, req.beamOptions())
 	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})
+		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions())
 	case "grasp":
-		result = offline.GRASP(ctx, items, factory, offline.SearchOptions{})
+		result = offline.GRASP(ctx, items, factory, req.searchOptions())
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
@@ -1522,7 +1593,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items)
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -1547,7 +1618,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// Brute-force: exhaustive item-order search for small orders (FFD fallback
 	// above the cap). Identical boxes are pruned via a sorted-dimension key.
 	if req.Algorithm == "brute" {
-		result, berr := offline.BruteForce(ctx, items, factory, offline.BruteForceOptions{Key: shapeKey3D})
+		result, berr := offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey3D))
 		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
@@ -1558,11 +1629,11 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// extreme-point factory; they manage their own search and ignore contact.
 	switch req.Algorithm {
 	case "beam":
-		return buildResponse3D(offline.BeamSearch(ctx, items, factory, offline.BeamOptions{})), nil
+		return buildResponse3D(offline.BeamSearch(ctx, items, factory, req.beamOptions())), nil
 	case "rr":
-		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, offline.SearchOptions{})), nil
+		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, req.searchOptions())), nil
 	case "grasp":
-		return buildResponse3D(offline.GRASP(ctx, items, factory, offline.SearchOptions{})), nil
+		return buildResponse3D(offline.GRASP(ctx, items, factory, req.searchOptions())), nil
 	}
 
 	// GBPP: optional items (profit scalar) + bin cost, net-cost minimisation.
@@ -1769,7 +1840,7 @@ func isBalanceable(algo string) bool {
 // 1) so the distribution leans full/empty; Auto tries both balanceable flavors
 // and keeps the one using fewer bins, breaking ties on lower imbalance. Returns
 // the winning flavor label (for Auto).
-func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item) (pack.Result, string, error) {
+func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item, refineOpts offline.RefineOptions) (pack.Result, string, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
@@ -1784,8 +1855,8 @@ func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, pref
 		}
 		r, err := packAllCtx(ctx, offline.NewBalancedFitW(factory, p, w), items)
 		// Local-search pass: move/swap items between bins to tighten the balance
-		// (no-op above RefineBalanceMaxItems items).
-		return offline.RefineBalance(factory, r, items), err
+		// (no-op above the refine MaxItems cap).
+		return offline.RefineBalance(factory, r, items, refineOpts), err
 	}
 	switch algo {
 	case "bf":
@@ -1997,6 +2068,9 @@ type NestedLevelSpec struct {
 	Containers    []ContainerSpec `json:"containers,omitempty"`
 	BinCost       float64         `json:"bin_cost,omitempty"`
 	LexObjectives []string        `json:"lex_objectives,omitempty"`
+	// AlgorithmOptions carries this level's per-algorithm numeric tunables, with
+	// the same keys, defaults, and server-side clamping as PackRequest.
+	AlgorithmOptions map[string]float64 `json:"algorithm_options,omitempty"`
 }
 
 type NestedPackRequest struct {
@@ -2042,16 +2116,17 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		l0Contact.NoFloating = true
 	}
 	l0req := PackRequest{
-		Mode:          req.Mode,
-		Algorithm:     l0spec.Algorithm,
-		Bin:           l0spec.Bin,
-		Items:         req.Items,
-		Constraints:   l0spec.Constraints,
-		Preferences:   l0spec.Preferences,
-		Contact:       l0Contact,
-		Containers:    l0spec.Containers,
-		BinCost:       l0spec.BinCost,
-		LexObjectives: l0spec.LexObjectives,
+		Mode:             req.Mode,
+		Algorithm:        l0spec.Algorithm,
+		Bin:              l0spec.Bin,
+		Items:            req.Items,
+		Constraints:      l0spec.Constraints,
+		Preferences:      l0spec.Preferences,
+		Contact:          l0Contact,
+		Containers:       l0spec.Containers,
+		BinCost:          l0spec.BinCost,
+		LexObjectives:    l0spec.LexObjectives,
+		AlgorithmOptions: l0spec.AlgorithmOptions,
 	}
 	l0resp, err := packByMode(ctx, l0req)
 	if err != nil {
@@ -2092,16 +2167,17 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 	// Level 1: pack carton items into outer bins (pallets).
 	l1spec := req.Levels[1]
 	l1req := PackRequest{
-		Mode:          req.Mode,
-		Algorithm:     l1spec.Algorithm,
-		Bin:           l1spec.Bin,
-		Items:         cartonItems,
-		Constraints:   l1spec.Constraints,
-		Preferences:   l1spec.Preferences,
-		Contact:       l1spec.Contact,
-		Containers:    l1spec.Containers,
-		BinCost:       l1spec.BinCost,
-		LexObjectives: l1spec.LexObjectives,
+		Mode:             req.Mode,
+		Algorithm:        l1spec.Algorithm,
+		Bin:              l1spec.Bin,
+		Items:            cartonItems,
+		Constraints:      l1spec.Constraints,
+		Preferences:      l1spec.Preferences,
+		Contact:          l1spec.Contact,
+		Containers:       l1spec.Containers,
+		BinCost:          l1spec.BinCost,
+		LexObjectives:    l1spec.LexObjectives,
+		AlgorithmOptions: l1spec.AlgorithmOptions,
 	}
 	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
