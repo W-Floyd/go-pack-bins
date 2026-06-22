@@ -21,6 +21,9 @@ type BeamOptions struct {
 	Branch int
 	// MaxItems caps exhaustive search; 0 uses DefaultBeamMaxItems.
 	MaxItems int
+	// Progress, if set, receives the level completed out of the total (one level
+	// per item) as the beam advances.
+	Progress pack.ProgressObserver
 }
 
 func (o BeamOptions) width() int {
@@ -115,6 +118,9 @@ func BeamSearch(ctx context.Context, items []pack.Item, factory pack.BinFactory,
 			next = next[:opts.width()]
 		}
 		beam = next
+		if opts.Progress != nil {
+			opts.Progress(level+1, n)
+		}
 	}
 
 	// The best full ordering in the final beam is the answer; if ctx cut the

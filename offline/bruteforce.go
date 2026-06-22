@@ -2,6 +2,7 @@ package offline
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -22,6 +23,9 @@ type BruteForceOptions struct {
 	// to item ID, i.e. no pruning — always correct, just slower. Pass a shape key
 	// (e.g. sorted dimensions) so identical boxes collapse and the search shrinks.
 	Key func(pack.Item) string
+	// Progress, if set, receives first-item subtrees completed out of the total as
+	// the search fans out.
+	Progress pack.ProgressObserver
 }
 
 // BruteForce finds the item ordering that packs best, by exhaustively trying
@@ -134,9 +138,13 @@ func BruteForce(ctx context.Context, items []pack.Item, factory pack.BinFactory,
 		err  error
 	}
 	outs := make([]taskResult, len(firsts))
+	var completed int64
 	parallelFor(len(firsts), func(t int) {
 		b, have, err := searchFrom(firsts[t])
 		outs[t] = taskResult{best: b, have: have, err: err}
+		if opts.Progress != nil {
+			opts.Progress(int(atomic.AddInt64(&completed, 1)), len(firsts))
+		}
 	})
 
 	var best pack.Result

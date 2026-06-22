@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync/atomic"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
@@ -52,6 +53,14 @@ type LexBestOfPacker struct {
 	metrics    []Metric
 	candidates []pack.OfflinePacker
 	winner     string
+	progress   pack.ProgressObserver
+}
+
+// OnProgress registers fn to receive candidates-completed out of the total as the
+// race runs. fn may be called concurrently and must be safe for that. Returns p.
+func (p *LexBestOfPacker) OnProgress(fn pack.ProgressObserver) *LexBestOfPacker {
+	p.progress = fn
+	return p
 }
 
 // LexBestOf returns a packer choosing the lexicographically best candidate under
@@ -78,11 +87,15 @@ func (p *LexBestOfPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pa
 	}
 	results := make([]pack.Result, len(p.candidates))
 	errs := make([]error, len(p.candidates))
+	var completed int64
 	parallelFor(len(p.candidates), func(i int) {
 		if cc, ok := p.candidates[i].(pack.CtxOfflinePacker); ok {
 			results[i], errs[i] = cc.PackAllCtx(ctx, items)
 		} else {
 			results[i], errs[i] = p.candidates[i].PackAll(items)
+		}
+		if p.progress != nil {
+			p.progress(int(atomic.AddInt64(&completed, 1)), len(p.candidates))
 		}
 	})
 	var best pack.Result

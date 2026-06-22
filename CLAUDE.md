@@ -41,7 +41,10 @@ lives in `$(go env GOROOT)/lib/wasm/`).
   extreme-point (`ContactSpec`: Bottom support, NoFloating, SideX/Y anti-slosh),
   BLF, LAFF. **`joint`** = 3-D one-pass bin-select+place. **`catalog`** = best
   single container type, sequential cascade, or (for GBPP) cheapest profitable mix.
-  **`gbpp`** = optional-items + profit + bin-cost objective.
+  **`gbpp`** = optional-items + profit + bin-cost objective; `Pack` packs *all*
+  items together (FFD) then prunes only the optional items in all-optional bins
+  whose profit can't cover the bin cost (do not revert to compulsory-then-optional
+  — it fragments and wastes bins).
 - **`packapi`** — transport-independent solve API (`PackCtx`/`StreamPack`/
   `PackNested`); the shared core for both front-ends. **No net/http or json here.**
 - **`cmd/webdemo`** — thin HTTP server. **`cmd/wasm`** (`//go:build js && wasm`) —
@@ -74,10 +77,19 @@ lives in `$(go env GOROOT)/lib/wasm/`).
 - **3-D rendering:** the camera far-plane scales with scene size in `ensureBins`
   (many bins were clipped at the old hardcoded 1000). Catalog mixes render every
   bin at the largest size in the mix (`bin_dims`).
+- **Nested mode** (`/api/pack/nested`, two levels: cartons → pallets) supports the
+  new features *per level*: each `NestedLevelSpec` carries `Containers` (catalog),
+  `BinCost`, and `LexObjectives`. A level-0 catalog that mixes carton sizes feeds
+  level 1 via each carton's *actual* chosen dimensions; results carry per-bin dims.
+  The UI mirrors the outer (pallet) and inner (carton) controls separately.
 - Run `gofmt -w` on Go files you edit. Prefer the Edit/Write tools over `sed`/`perl`.
 - **Verify UI changes** by driving the running server with headless Chromium over
   the DevTools protocol (`--use-gl=angle --use-angle=swiftshader` for software
   WebGL) and screenshotting — JS errors and blank renders don't show up in `go test`.
+  **Kill port 8082 first** (`lsof -ti tcp:8082 | xargs kill -9`): a `go run`/built
+  server silently fails to bind if an old one is still listening, so you'd test
+  stale code. Multi-step CDP scripts can flake on await-chaining — prefer one
+  `Runtime.evaluate` that does the setup and returns a JSON summary.
 
 ## Git
 
