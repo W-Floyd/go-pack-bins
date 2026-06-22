@@ -68,31 +68,34 @@ func (p *LexBestOfPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	return p.PackAllCtx(context.Background(), items)
 }
 
-// PackAllCtx runs each candidate (with cancellation if supported) and returns
-// the lexicographically best result.
+// PackAllCtx runs the candidates concurrently (with cancellation if supported),
+// then reduces in candidate order so the lexicographically best result and its
+// tie-break are deterministic regardless of scheduling.
 func (p *LexBestOfPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.Result, error) {
+	p.winner = ""
+	if err := ctx.Err(); err != nil {
+		return pack.Result{}, err
+	}
+	results := make([]pack.Result, len(p.candidates))
+	errs := make([]error, len(p.candidates))
+	parallelFor(len(p.candidates), func(i int) {
+		if cc, ok := p.candidates[i].(pack.CtxOfflinePacker); ok {
+			results[i], errs[i] = cc.PackAllCtx(ctx, items)
+		} else {
+			results[i], errs[i] = p.candidates[i].PackAll(items)
+		}
+	})
 	var best pack.Result
 	found := false
-	p.winner = ""
-	for _, c := range p.candidates {
-		if err := ctx.Err(); err != nil {
-			return pack.Result{}, err
+	for i, c := range p.candidates {
+		if errors.Is(errs[i], context.Canceled) || errors.Is(errs[i], context.DeadlineExceeded) {
+			return pack.Result{}, errs[i]
 		}
-		var r pack.Result
-		var err error
-		if cc, ok := c.(pack.CtxOfflinePacker); ok {
-			r, err = cc.PackAllCtx(ctx, items)
-		} else {
-			r, err = c.PackAll(items)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return pack.Result{}, err
-		}
-		if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
+		if errs[i] != nil && !errors.Is(errs[i], pack.ErrItemTooLarge) {
 			continue
 		}
-		if !found || p.lexLess(r, best) {
-			best, found, p.winner = r, true, c.Name()
+		if !found || p.lexLess(results[i], best) {
+			best, found, p.winner = results[i], true, c.Name()
 		}
 	}
 	if !found {

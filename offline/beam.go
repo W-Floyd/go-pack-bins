@@ -79,26 +79,36 @@ func BeamSearch(ctx context.Context, items []pack.Item, factory pack.BinFactory,
 		if ctx.Err() != nil {
 			break
 		}
-		var next []state
-		for _, st := range beam {
+		// Enumerate this level's candidate extensions in a fixed order (beam order ×
+		// branch order), then score them concurrently — each extension is an
+		// independent First-Fit pack. Writing into next[k] by index keeps the order
+		// (and so the stable sort below) identical to the sequential version.
+		type ext struct{ st, item int }
+		var exts []ext
+		for si, st := range beam {
 			added := 0
 			for i := 0; i < n && added < opts.branch(); i++ {
 				if st.used[i] {
 					continue
 				}
 				added++
-				order := make([]pack.Item, len(st.order)+1)
-				copy(order, st.order)
-				order[len(st.order)] = sorted[i]
-				used := make([]bool, n)
-				copy(used, st.used)
-				used[i] = true
-				next = append(next, state{order: order, used: used, score: scoreResult(packOrdering(factory, order))})
+				exts = append(exts, ext{st: si, item: i})
 			}
 		}
-		if len(next) == 0 {
+		if len(exts) == 0 {
 			break
 		}
+		next := make([]state, len(exts))
+		parallelFor(len(exts), func(k int) {
+			st, i := beam[exts[k].st], exts[k].item
+			order := make([]pack.Item, len(st.order)+1)
+			copy(order, st.order)
+			order[len(st.order)] = sorted[i]
+			used := make([]bool, n)
+			copy(used, st.used)
+			used[i] = true
+			next[k] = state{order: order, used: used, score: scoreResult(packOrdering(factory, order))}
+		})
 		// Keep the Width best partial orderings.
 		sort.SliceStable(next, func(i, j int) bool { return next[i].score.better(next[j].score) })
 		if len(next) > opts.width() {

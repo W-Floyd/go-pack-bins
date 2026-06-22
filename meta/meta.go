@@ -65,33 +65,36 @@ func (p *BestOfPacker) PackAll(items []pack.Item) (pack.Result, error) {
 	return p.PackAllCtx(context.Background(), items)
 }
 
-// PackAllCtx runs each candidate with cancellation: it checks ctx before each
-// candidate, passes ctx to any candidate that supports it, and aborts with
-// ctx.Err() if cancelled mid-solve.
+// PackAllCtx runs the candidates concurrently (each independent), then reduces in
+// candidate order so the winner and tie-break are deterministic regardless of
+// scheduling. Each candidate is passed ctx if it supports it; a cancellation from
+// within any candidate is terminal for the whole race.
 func (p *BestOfPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.Result, error) {
+	p.winner = ""
+	if err := ctx.Err(); err != nil {
+		return pack.Result{}, err
+	}
+	results := make([]pack.Result, len(p.candidates))
+	errs := make([]error, len(p.candidates))
+	parallelFor(len(p.candidates), func(i int) {
+		if cc, ok := p.candidates[i].(pack.CtxOfflinePacker); ok {
+			results[i], errs[i] = cc.PackAllCtx(ctx, items)
+		} else {
+			results[i], errs[i] = p.candidates[i].PackAll(items)
+		}
+	})
 	var best pack.Result
 	found := false
-	p.winner = ""
-	for _, c := range p.candidates {
-		if err := ctx.Err(); err != nil {
-			return pack.Result{}, err
-		}
-		var r pack.Result
-		var err error
-		if cc, ok := c.(pack.CtxOfflinePacker); ok {
-			r, err = cc.PackAllCtx(ctx, items)
-		} else {
-			r, err = c.PackAll(items)
-		}
+	for i, c := range p.candidates {
 		// A cancellation from within a candidate is terminal for the whole race.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return pack.Result{}, err
+		if errors.Is(errs[i], context.Canceled) || errors.Is(errs[i], context.DeadlineExceeded) {
+			return pack.Result{}, errs[i]
 		}
-		if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
+		if errs[i] != nil && !errors.Is(errs[i], pack.ErrItemTooLarge) {
 			continue
 		}
-		if !found || isBetter(r, best) {
-			best = r
+		if !found || isBetter(results[i], best) {
+			best = results[i]
 			found = true
 			p.winner = c.Name()
 		}

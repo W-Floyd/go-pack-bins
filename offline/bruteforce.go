@@ -64,52 +64,98 @@ func BruteForce(ctx context.Context, items []pack.Item, factory pack.BinFactory,
 		return p.Result()
 	}
 
-	var best pack.Result
-	haveBest := false
-	cur := make([]pack.Item, 0, n)
-	used := make([]bool, n)
-
-	var search func() error
-	search = func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if len(cur) == n {
-			r := packOrder(cur)
-			if !haveBest || betterBrute(r, best) {
-				best = r
-				haveBest = true
+	// searchFrom exhaustively explores all orderings that start with items[first],
+	// using its own local state so tasks never share mutable data. It keeps the
+	// first strictly-better result in DFS order (so ties resolve to the earliest).
+	searchFrom := func(first int) (pack.Result, bool, error) {
+		used := make([]bool, n)
+		cur := make([]pack.Item, 0, n)
+		used[first] = true
+		cur = append(cur, items[first])
+		var best pack.Result
+		haveBest := false
+		var search func() error
+		search = func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if len(cur) == n {
+				r := packOrder(cur)
+				if !haveBest || betterBrute(r, best) {
+					best = r
+					haveBest = true
+				}
+				return nil
+			}
+			// Pick the next item; skip any whose key was already tried at this depth
+			// (those permutations are identical), so multisets don't blow up to n!.
+			triedKeys := make(map[string]bool)
+			for i := 0; i < n; i++ {
+				if used[i] {
+					continue
+				}
+				k := key(items[i])
+				if triedKeys[k] {
+					continue
+				}
+				triedKeys[k] = true
+				used[i] = true
+				cur = append(cur, items[i])
+				if err := search(); err != nil {
+					return err
+				}
+				cur = cur[:len(cur)-1]
+				used[i] = false
 			}
 			return nil
 		}
-		// Pick the next item; skip any whose key was already tried at this depth
-		// (those permutations are identical), so multisets don't blow up to n!.
-		triedKeys := make(map[string]bool)
-		for i := 0; i < n; i++ {
-			if used[i] {
-				continue
-			}
-			k := key(items[i])
-			if triedKeys[k] {
-				continue
-			}
-			triedKeys[k] = true
-			used[i] = true
-			cur = append(cur, items[i])
-			if err := search(); err != nil {
-				return err
-			}
-			cur = cur[:len(cur)-1]
-			used[i] = false
-		}
-		return nil
+		err := search()
+		return best, haveBest, err
 	}
 
-	if err := search(); err != nil {
-		if haveBest {
-			return best, err // partial best on cancellation
+	// Fan out by the choice of first item: each distinct first-item key roots an
+	// independent subtree. The set (and its order) matches the sequential DFS's
+	// depth-0 expansion, so reducing the per-task bests in first-item order with
+	// the same strict-better rule yields the exact result a sequential search would.
+	var firsts []int
+	tried := make(map[string]bool)
+	for i := 0; i < n; i++ {
+		k := key(items[i])
+		if tried[k] {
+			continue
 		}
-		return pack.Result{}, err
+		tried[k] = true
+		firsts = append(firsts, i)
+	}
+
+	type taskResult struct {
+		best pack.Result
+		have bool
+		err  error
+	}
+	outs := make([]taskResult, len(firsts))
+	parallelFor(len(firsts), func(t int) {
+		b, have, err := searchFrom(firsts[t])
+		outs[t] = taskResult{best: b, have: have, err: err}
+	})
+
+	var best pack.Result
+	haveBest := false
+	var cancelErr error
+	for _, tr := range outs {
+		if tr.err != nil {
+			cancelErr = tr.err
+		}
+		if tr.have && (!haveBest || betterBrute(tr.best, best)) {
+			best = tr.best
+			haveBest = true
+		}
+	}
+	if cancelErr != nil {
+		if haveBest {
+			return best, cancelErr // partial best on cancellation
+		}
+		return pack.Result{}, cancelErr
 	}
 	return best, nil
 }

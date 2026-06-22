@@ -150,20 +150,26 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 	if len(items) == 0 {
 		return pack.Result{}
 	}
-	rng := rand.New(rand.NewSource(opts.seed()))
-
-	var best pack.Result
-	var bestScore resultScore
-	have := false
-	localBudget := opts.maxIters() / opts.restarts()
+	restarts := opts.restarts()
+	localBudget := opts.maxIters() / restarts
 	if localBudget < 1 {
 		localBudget = 1
 	}
 
-	for r := 0; r < opts.restarts(); r++ {
+	// Restarts are independent, so run them concurrently. Each draws from its own
+	// RNG seeded deterministically (base seed + restart index), keeping the run
+	// reproducible for a given Seed regardless of scheduling.
+	type restartResult struct {
+		res   pack.Result
+		score resultScore
+		have  bool
+	}
+	outs := make([]restartResult, restarts)
+	parallelFor(restarts, func(r int) {
 		if ctx.Err() != nil {
-			break
+			return // leaves have=false; skipped in the reduction
 		}
+		rng := rand.New(rand.NewSource(opts.seed() + int64(r)))
 		order := randomizedGreedyOrder(items, rng)
 		res := packOrdering(factory, order)
 		// Short local search around this start.
@@ -179,8 +185,19 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 				res, curScore, curOrder = cr, s, cand
 			}
 		}
-		if !have || curScore.better(bestScore) {
-			best, bestScore, have = res, curScore, true
+		outs[r] = restartResult{res: res, score: curScore, have: true}
+	})
+
+	// Reduce in restart order so the winner is deterministic.
+	var best pack.Result
+	var bestScore resultScore
+	have := false
+	for _, o := range outs {
+		if !o.have {
+			continue
+		}
+		if !have || o.score.better(bestScore) {
+			best, bestScore, have = o.res, o.score, true
 		}
 	}
 	return best
