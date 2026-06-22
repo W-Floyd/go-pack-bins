@@ -478,6 +478,13 @@
       <div id="bin-capacity-block">
         <div id="outer-bin-label" class="section-label">Bin capacity</div>
         <div id="bin-fields" class="row"></div>
+        <div id="bin-cost-field" style="display:none; margin-top:6px">
+          <div class="field" style="max-width:160px">
+            <label>Bin cost (GBPP)</label>
+            <input type="number" id="bin-cost" value="0" min="0" step="any" style="font-size:12px" oninput="scheduleAutoPack()">
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Items with a <code>profit</code> scalar are optional; rejected if profit can't cover a bin.</div>
+        </div>
       </div>
 
       <!-- container catalog: choose the best container type for the order -->
@@ -492,9 +499,13 @@
           <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Packs into each container type and keeps the best one. The bin capacity above is ignored.</div>
           <div style="display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
             <div id="catalog-fields" class="row" style="flex:3"></div>
-            <div class="field" style="flex:1; min-width:46px">
+            <div class="field" style="flex:1; min-width:42px">
               <label>Max</label>
               <input type="number" id="cat-max" placeholder="∞" min="0" step="1" style="font-size:12px" onkeydown="if(event.key==='Enter')addContainer()">
+            </div>
+            <div class="field" style="flex:1; min-width:42px">
+              <label>Cost</label>
+              <input type="number" id="cat-cost" placeholder="0" min="0" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addContainer()">
             </div>
             <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addContainer()">+ Add</button>
           </div>
@@ -603,6 +614,26 @@
         <label class="checkbox-row" id="contact-nofloat-row" style="margin-top:8px">
           <input type="checkbox" id="contact-nofloat" onchange="scheduleAutoPack()"> No floating items (must rest on floor/box)
         </label>
+      </div>
+
+      <!-- Lexicographic objectives: ordered priority list -->
+      <div id="lex-section" style="display:none">
+        <div class="section-label">Lexicographic objectives</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          Compared in priority order (first listed wins ties downward).
+        </div>
+        <div class="item-list" id="lex-list"></div>
+        <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end;">
+          <div class="field" style="flex:1">
+            <label>Add objective</label>
+            <select id="lex-pick" style="font-size:12px">
+              <option value="unplaced">Fewest unplaced</option>
+              <option value="bins">Fewest bins</option>
+              <option value="spread">Even fill (low spread)</option>
+            </select>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addLexObjective()">+ Add</button>
+        </div>
       </div>
 
       <!-- balance objectives — one panel per Preference-Fit level -->
@@ -739,6 +770,7 @@ let itemCounter = 0;
 let nestedEnabled = false;
 let catalogEnabled = false;
 let containerCatalog = []; // [{ w, h, d, maxCount }] — container types to choose among
+let lexObjectives = []; // ordered objective keys for the "lex" algorithm
 
 // ── algorithm lists ──────────────────────────────────────────────────────────
 const ALGOS = {
@@ -764,6 +796,8 @@ const ALGOS = {
     {v:'beam', l:'Beam search'},
     {v:'rr',   l:'Ruin & recreate'},
     {v:'grasp',l:'GRASP'},
+    {v:'gbpp', l:'GBPP (optional items + profit)'},
+    {v:'lex',  l:'Lexicographic objectives'},
     {v:'pref',l:'Preference-Fit'},
   ],
   '2d': [
@@ -784,6 +818,8 @@ const ALGOS = {
     {v:'beam',       l:'Beam search'},
     {v:'rr',         l:'Ruin & recreate'},
     {v:'grasp',      l:'GRASP'},
+    {v:'gbpp',       l:'GBPP (optional items + profit)'},
+    {v:'lex',        l:'Lexicographic objectives'},
     {v:'pref',       l:'Preference-Fit'},
   ],
   '3d': [
@@ -802,6 +838,8 @@ const ALGOS = {
     {v:'beam', l:'Beam search'},
     {v:'rr',   l:'Ruin & recreate'},
     {v:'grasp',l:'GRASP'},
+    {v:'gbpp', l:'GBPP (optional items + profit)'},
+    {v:'lex',  l:'Lexicographic objectives'},
     {v:'pref',l:'Preference-Fit'},
   ],
 };
@@ -823,6 +861,10 @@ function onModeChange() {
   document.getElementById('bin-capacity-block').style.display = '';
   buildCatalogFields(mode);
   renderContainerList();
+  lexObjectives = [];
+  renderLexObjectives();
+  document.getElementById('bin-cost-field').style.display = 'none';
+  document.getElementById('lex-section').style.display = 'none';
   renderItemList();
   renderConstraintList();
   renderPreferenceLists();
@@ -920,7 +962,8 @@ function addContainer() {
   const d = (mode === '3d') ? (num('cat-d') || w) : w;
   const maxRaw = parseInt(document.getElementById('cat-max')?.value);
   const maxCount = isNaN(maxRaw) || maxRaw <= 0 ? 0 : maxRaw;
-  containerCatalog.push({ w, h, d, maxCount });
+  const cost = parseFloat(document.getElementById('cat-cost')?.value) || 0;
+  containerCatalog.push({ w, h, d, maxCount, cost });
   renderContainerList();
   scheduleAutoPack();
 }
@@ -938,11 +981,12 @@ function renderContainerList() {
   el.innerHTML = '';
   containerCatalog.forEach((c, idx) => {
     const dims = mode === '1d' ? `${c.w}` : mode === '2d' ? `${c.w}×${c.h}` : `${c.w}×${c.d}×${c.h}`;
-    const cap = c.maxCount > 0 ? ` (max ${c.maxCount})` : '';
+    const cap = c.maxCount > 0 ? ` ×${c.maxCount}` : '';
+    const cost = c.cost > 0 ? ` · $${c.cost}` : '';
     const row = document.createElement('div');
     row.className = 'item-row';
     row.innerHTML = `
-      <span class="item-dims" style="flex:1;font-family:var(--mono)">${dims}${cap}</span>
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${dims}${cap}${cost}</span>
       <button class="remove-btn" onclick="removeContainer(${idx})">✕</button>`;
     el.appendChild(row);
   });
@@ -953,6 +997,7 @@ function catalogContainers(mode) {
   return containerCatalog.map(c => ({
     bin: { width: c.w, height: (mode === '1d' ? c.w : c.h), depth: (mode === '3d' ? c.d : c.w) },
     max_count: c.maxCount,
+    cost: c.cost || 0,
   }));
 }
 
@@ -1144,7 +1189,41 @@ function removePreference(lvl, idx) {
 
 function onAlgorithmChange() {
   updateBalanceVisibility();
+  const algo = document.getElementById('algorithm').value;
+  document.getElementById('bin-cost-field').style.display = (algo === 'gbpp') ? '' : 'none';
+  document.getElementById('lex-section').style.display = (algo === 'lex') ? '' : 'none';
   scheduleAutoPack();
+}
+
+// ── lexicographic objectives ────────────────────────────────────────────────
+const LEX_LABELS = { unplaced: 'Fewest unplaced', bins: 'Fewest bins', spread: 'Even fill (low spread)' };
+
+function addLexObjective() {
+  const v = document.getElementById('lex-pick').value;
+  if (!lexObjectives.includes(v)) lexObjectives.push(v);
+  renderLexObjectives();
+  scheduleAutoPack();
+}
+
+function removeLexObjective(idx) {
+  lexObjectives.splice(idx, 1);
+  renderLexObjectives();
+  scheduleAutoPack();
+}
+
+function renderLexObjectives() {
+  const el = document.getElementById('lex-list');
+  if (!el) return;
+  el.innerHTML = '';
+  lexObjectives.forEach((o, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      <span class="item-id">${idx + 1}.</span>
+      <span class="item-dims" style="flex:1">${LEX_LABELS[o] || o}</span>
+      <button class="remove-btn" onclick="removeLexObjective(${idx})">✕</button>`;
+    el.appendChild(row);
+  });
 }
 
 // Each balance panel shows only when its level's algorithm is balanceable (⚖).
@@ -1646,6 +1725,8 @@ function currentConfig() {
     cfg.catalog = true;
     cfg.containerCatalog = containerCatalog.map(c => ({ ...c }));
   }
+  if (cfg.algorithm === 'gbpp') cfg.binCost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
+  if (cfg.algorithm === 'lex') cfg.lexObjectives = lexObjectives.slice();
   return cfg;
 }
 
@@ -1699,6 +1780,13 @@ function applyState(s) {
   setVal('algorithm', s.algorithm);
   if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
   setContact(s.contact); // percentages, matching readContactPercent()
+
+  // GBPP bin cost + lexicographic objectives, with their panels shown to match.
+  setVal('bin-cost', s.binCost != null ? s.binCost : 0);
+  lexObjectives = (s.lexObjectives || []).slice();
+  renderLexObjectives();
+  document.getElementById('bin-cost-field').style.display = (s.algorithm === 'gbpp') ? '' : 'none';
+  document.getElementById('lex-section').style.display = (s.algorithm === 'lex') ? '' : 'none';
 
   // Container catalog
   containerCatalog = (s.containerCatalog || []).map(c => ({ ...c }));
@@ -1875,6 +1963,8 @@ async function runSinglePack(auto = false) {
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
     contact: readContact(),
   };
+  if (algo === 'gbpp') body.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
+  if (algo === 'lex') body.lex_objectives = lexObjectives.slice();
 
   // Stream the solve as NDJSON and render each batch the moment it arrives. For
   // incremental algorithms the server flushes placements mid-solve, so the pack
@@ -1917,7 +2007,10 @@ async function runSinglePack(auto = false) {
     renderStats(data, mode, body.bin);
     if (!auto) {
       const msgs = Object.values(data.item_errors || {});
+      const rejected = (data.rejected || []).length;
       if (msgs.length > 0) showWarn(msgs[0]);
+      else if (rejected > 0)
+        showWarn(`${rejected} optional item(s) rejected (not worth a bin)`);
       else if ((data.unplaced || []).length > 0)
         showWarn(`${data.unplaced.length} item(s) could not be placed`);
     }
@@ -1956,6 +2049,11 @@ async function runSinglePack(auto = false) {
         data.free_rects = f.free_rects;
         data.item_errors = f.item_errors || {};
         data.unplaced = f.unplaced || [];
+        data.rejected = f.rejected || [];
+        if (f.net_cost !== undefined) {
+          const r = x => Math.round(x * 100) / 100;
+          data.best_packer = `net cost ${r(f.net_cost)} · profit ${r(f.included_profit || 0)}`;
+        }
         finish();
       }
     }
@@ -2002,6 +2100,11 @@ async function runSinglePack(auto = false) {
     data.free_rects = result.free_rects;
     data.item_errors = result.item_errors || {};
     data.unplaced = result.unplaced || [];
+    data.rejected = result.rejected || [];
+    if (result.net_cost !== undefined) {
+      const r = x => Math.round(x * 100) / 100;
+      data.best_packer = `net cost ${r(result.net_cost)} · profit ${r(result.included_profit || 0)}`;
+    }
     renderShell(data, mode, body.bin, 0);
     if (is3D) ctl = beginScene3D(body.bin, Math.max(1, data.bins_used), body.items.length);
     drawBatch(result.placements || []);

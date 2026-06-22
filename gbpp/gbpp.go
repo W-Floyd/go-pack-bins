@@ -49,12 +49,137 @@ func (o Options) optionalKey() string {
 // Result is a GBPP packing plus its economics.
 type Result struct {
 	pack.Result
-	// NetCost is BinCost×BinsUsed − IncludedProfit (lower is better).
+	// NetCost is (total bin cost) − IncludedProfit (lower is better).
 	NetCost float64
 	// IncludedProfit is the total profit of the optional items that were packed.
 	IncludedProfit float64
 	// Rejected lists optional items deliberately left out (not worth a bin).
 	Rejected []string
+	// BinTypeIdx is set by PackCatalog: the catalog type index of each bin in
+	// Bins (so callers can recover each bin's size/cost). Nil for Pack.
+	BinTypeIdx []int
+}
+
+// BinType is one container type in a GBPP catalog: a cost per bin used, an
+// optional usage cap, and a factory that opens a fresh bin of this type.
+type BinType struct {
+	Label    string
+	Cost     float64
+	MaxCount int // 0 = unlimited
+	Open     func() pack.Bin
+}
+
+// PackCatalog solves the GBPP over a *catalog* of bin types, choosing the most
+// profitable mix rather than exhausting one type before trying another: each
+// item is placed into an open bin if it fits, else into a freshly opened bin of
+// the cheapest type that can hold it (respecting MaxCount). Compulsory items are
+// always packed; an optional item only opens a new bin when its profit covers
+// that type's cost. Net cost = Σ opened-bin costs − Σ included profit.
+//
+// This is the heterogeneous (variable-cost) extension of Pack; the per-bin type
+// is reported in Result.BinTypeIdx. ctx is honoured.
+func PackCatalog(ctx context.Context, items []pack.Item, types []BinType, opts Options) Result {
+	profitKey, optKey := opts.profitKey(), opts.optionalKey()
+
+	// Try the cheapest type first when opening a new bin.
+	order := make([]int, len(types))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return types[order[a]].Cost < types[order[b]].Cost })
+
+	var compulsory, optional []pack.Item
+	profitOf := make(map[string]float64, len(items))
+	for _, it := range items {
+		s := pack.ScalarsOf(it)
+		profitOf[it.ID()] = s[profitKey]
+		if s[optKey] != 0 {
+			optional = append(optional, it)
+		} else {
+			compulsory = append(compulsory, it)
+		}
+	}
+	sort.SliceStable(compulsory, func(i, j int) bool { return compulsory[i].Volume() > compulsory[j].Volume() })
+	sort.SliceStable(optional, func(i, j int) bool { return profitOf[optional[i].ID()] > profitOf[optional[j].ID()] })
+
+	type openBin struct {
+		bin     pack.Bin
+		typeIdx int
+	}
+	var open []openBin
+	counts := make([]int, len(types))
+	var res Result
+
+	placeExisting := func(it pack.Item) bool {
+		for _, o := range open {
+			if p, err := o.bin.TryPlace(it); err == nil {
+				res.Placements = append(res.Placements, p)
+				return true
+			}
+		}
+		return false
+	}
+	// openFor opens the cheapest feasible new bin for it. When optional, it only
+	// opens a type whose cost the item's profit covers.
+	openFor := func(it pack.Item, optional bool, profit float64) bool {
+		for _, ti := range order {
+			t := types[ti]
+			if t.MaxCount > 0 && counts[ti] >= t.MaxCount {
+				continue
+			}
+			if optional && profit < t.Cost {
+				continue
+			}
+			b := t.Open()
+			p, err := b.TryPlace(it)
+			if err != nil {
+				continue
+			}
+			open = append(open, openBin{b, ti})
+			counts[ti]++
+			res.Bins = append(res.Bins, b)
+			res.BinTypeIdx = append(res.BinTypeIdx, ti)
+			res.Placements = append(res.Placements, p)
+			return true
+		}
+		return false
+	}
+
+	for _, it := range compulsory {
+		if ctx.Err() != nil {
+			res.Unplaced = append(res.Unplaced, it.ID())
+			continue
+		}
+		if placeExisting(it) || openFor(it, false, 0) {
+			continue
+		}
+		res.Unplaced = append(res.Unplaced, it.ID())
+	}
+	for _, it := range optional {
+		if ctx.Err() != nil {
+			res.Rejected = append(res.Rejected, it.ID())
+			res.Unplaced = append(res.Unplaced, it.ID())
+			continue
+		}
+		profit := profitOf[it.ID()]
+		if placeExisting(it) {
+			res.IncludedProfit += profit
+			continue
+		}
+		if openFor(it, true, profit) {
+			res.IncludedProfit += profit
+			continue
+		}
+		res.Rejected = append(res.Rejected, it.ID())
+		res.Unplaced = append(res.Unplaced, it.ID())
+	}
+
+	binCost := 0.0
+	for _, ti := range res.BinTypeIdx {
+		binCost += types[ti].Cost
+	}
+	res.NetCost = binCost - res.IncludedProfit
+	return res
 }
 
 // Pack solves the GBPP for items. Compulsory items are packed first (First-Fit-
