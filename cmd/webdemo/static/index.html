@@ -523,11 +523,53 @@
         </div>
         <div id="nested-inner-section" style="display:none;margin-top:8px">
           <div class="section-label" style="margin-bottom:6px">Inner bin (carton)</div>
-          <div id="inner-bin-fields" class="row"></div>
+          <div id="inner-bin-capacity-block">
+            <div id="inner-bin-fields" class="row"></div>
+            <div id="inner-bin-cost-field" style="display:none; margin-top:6px">
+              <div class="field" style="max-width:160px">
+                <label>Carton cost (GBPP)</label>
+                <input type="number" id="inner-bin-cost" value="0" min="0" step="any" style="font-size:12px" oninput="scheduleAutoPack()">
+              </div>
+            </div>
+          </div>
           <div style="margin-top:6px">
             <div class="field">
               <label>Inner algorithm</label>
               <select id="inner-algorithm" onchange="onAlgorithmChange()"></select>
+            </div>
+          </div>
+
+          <!-- carton catalog: choose the best carton size(s) for the items -->
+          <div style="margin-top:8px; display:flex; justify-content:space-between; align-items:center">
+            <span class="section-label" style="margin:0">Carton catalog</span>
+            <label class="checkbox-row" style="margin:0">
+              <input type="checkbox" id="inner-catalog-toggle" onchange="onInnerCatalogToggle()"> Enable
+            </label>
+          </div>
+          <div id="inner-catalog-section" style="display:none; margin-top:6px">
+            <div style="display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+              <div id="inner-catalog-fields" class="row" style="flex:3"></div>
+              <div class="field" style="flex:1; min-width:42px"><label>Max</label>
+                <input type="number" id="inner-cat-max" placeholder="∞" min="0" step="1" style="font-size:12px" onkeydown="if(event.key==='Enter')addInnerContainer()"></div>
+              <div class="field" style="flex:1; min-width:42px"><label>Cost</label>
+                <input type="number" id="inner-cat-cost" placeholder="0" min="0" step="any" style="font-size:12px" onkeydown="if(event.key==='Enter')addInnerContainer()"></div>
+              <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addInnerContainer()">+ Add</button>
+            </div>
+            <div class="item-list" id="inner-catalog-list" style="margin-top:6px"></div>
+          </div>
+
+          <!-- inner lexicographic objectives -->
+          <div id="inner-lex-section" style="display:none; margin-top:8px">
+            <div class="section-label">Inner lexicographic objectives</div>
+            <div class="item-list" id="inner-lex-list"></div>
+            <div style="margin-top:6px; display:flex; gap:6px; align-items:flex-end;">
+              <div class="field" style="flex:1"><label>Add objective</label>
+                <select id="inner-lex-pick" style="font-size:12px">
+                  <option value="unplaced">Fewest unplaced</option>
+                  <option value="bins">Fewest bins</option>
+                  <option value="spread">Even fill (low spread)</option>
+                </select></div>
+              <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addInnerLexObjective()">+ Add</button>
             </div>
           </div>
         </div>
@@ -769,8 +811,11 @@ let activeBin = 0;
 let itemCounter = 0;
 let nestedEnabled = false;
 let catalogEnabled = false;
-let containerCatalog = []; // [{ w, h, d, maxCount }] — container types to choose among
-let lexObjectives = []; // ordered objective keys for the "lex" algorithm
+let containerCatalog = []; // [{ w, h, d, maxCount, cost }] — outer/pallet container types
+let lexObjectives = []; // ordered objective keys for the outer "lex" algorithm
+let innerCatalog = []; // carton container types (nested inner level)
+let innerCatalogEnabled = false;
+let innerLexObjectives = []; // ordered objective keys for the inner "lex" algorithm
 
 // ── algorithm lists ──────────────────────────────────────────────────────────
 const ALGOS = {
@@ -865,6 +910,17 @@ function onModeChange() {
   renderLexObjectives();
   document.getElementById('bin-cost-field').style.display = 'none';
   document.getElementById('lex-section').style.display = 'none';
+  innerCatalog = [];
+  innerCatalogEnabled = false;
+  innerLexObjectives = [];
+  document.getElementById('inner-catalog-toggle').checked = false;
+  document.getElementById('inner-catalog-section').style.display = 'none';
+  document.getElementById('inner-bin-capacity-block').style.display = '';
+  document.getElementById('inner-bin-cost-field').style.display = 'none';
+  document.getElementById('inner-lex-section').style.display = 'none';
+  buildInnerCatalogFields(mode);
+  renderInnerContainerList();
+  renderInnerLexObjectives();
   renderItemList();
   renderConstraintList();
   renderPreferenceLists();
@@ -1001,6 +1057,106 @@ function catalogContainers(mode) {
   }));
 }
 
+// ── inner (carton) catalog + lexicographic, twins of the outer controls ──────
+function onInnerCatalogToggle() {
+  innerCatalogEnabled = document.getElementById('inner-catalog-toggle').checked;
+  document.getElementById('inner-catalog-section').style.display = innerCatalogEnabled ? '' : 'none';
+  document.getElementById('inner-bin-capacity-block').style.display = innerCatalogEnabled ? 'none' : '';
+  scheduleAutoPack();
+}
+
+function buildInnerCatalogFields(mode) {
+  const el = document.getElementById('inner-catalog-fields');
+  if (!el) return;
+  const enter = `onkeydown="if(event.key==='Enter')addInnerContainer()"`;
+  if (mode === '1d') {
+    el.innerHTML = `<div class="field"><label>Width</label><input type="number" id="inner-cat-w" value="5" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  } else if (mode === '2d') {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="inner-cat-w" value="50" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>H</label><input type="number" id="inner-cat-h" value="50" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  } else {
+    el.innerHTML = `
+      <div class="field"><label>W</label><input type="number" id="inner-cat-w" value="8" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>D</label><input type="number" id="inner-cat-d" value="8" min="0.01" step="any" style="font-size:12px" ${enter}></div>
+      <div class="field"><label>H</label><input type="number" id="inner-cat-h" value="8" min="0.01" step="any" style="font-size:12px" ${enter}></div>`;
+  }
+}
+
+function addInnerContainer() {
+  const mode = document.getElementById('mode').value;
+  const num = id => parseFloat(document.getElementById(id)?.value);
+  const w = num('inner-cat-w') || 5;
+  const h = mode === '1d' ? w : (num('inner-cat-h') || w);
+  const d = (mode === '3d') ? (num('inner-cat-d') || w) : w;
+  const maxRaw = parseInt(document.getElementById('inner-cat-max')?.value);
+  const maxCount = isNaN(maxRaw) || maxRaw <= 0 ? 0 : maxRaw;
+  const cost = parseFloat(document.getElementById('inner-cat-cost')?.value) || 0;
+  innerCatalog.push({ w, h, d, maxCount, cost });
+  renderInnerContainerList();
+  scheduleAutoPack();
+}
+
+function removeInnerContainer(idx) {
+  innerCatalog.splice(idx, 1);
+  renderInnerContainerList();
+  scheduleAutoPack();
+}
+
+function renderInnerContainerList() {
+  const el = document.getElementById('inner-catalog-list');
+  if (!el) return;
+  const mode = document.getElementById('mode').value;
+  el.innerHTML = '';
+  innerCatalog.forEach((c, idx) => {
+    const dims = mode === '1d' ? `${c.w}` : mode === '2d' ? `${c.w}×${c.h}` : `${c.w}×${c.d}×${c.h}`;
+    const cap = c.maxCount > 0 ? ` ×${c.maxCount}` : '';
+    const cost = c.cost > 0 ? ` · $${c.cost}` : '';
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      <span class="item-dims" style="flex:1;font-family:var(--mono)">${dims}${cap}${cost}</span>
+      <button class="remove-btn" onclick="removeInnerContainer(${idx})">✕</button>`;
+    el.appendChild(row);
+  });
+}
+
+function innerCatalogContainers(mode) {
+  return innerCatalog.map(c => ({
+    bin: { width: c.w, height: (mode === '1d' ? c.w : c.h), depth: (mode === '3d' ? c.d : c.w) },
+    max_count: c.maxCount,
+    cost: c.cost || 0,
+  }));
+}
+
+function addInnerLexObjective() {
+  const v = document.getElementById('inner-lex-pick').value;
+  if (!innerLexObjectives.includes(v)) innerLexObjectives.push(v);
+  renderInnerLexObjectives();
+  scheduleAutoPack();
+}
+
+function removeInnerLexObjective(idx) {
+  innerLexObjectives.splice(idx, 1);
+  renderInnerLexObjectives();
+  scheduleAutoPack();
+}
+
+function renderInnerLexObjectives() {
+  const el = document.getElementById('inner-lex-list');
+  if (!el) return;
+  el.innerHTML = '';
+  innerLexObjectives.forEach((o, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      <span class="item-id">${idx + 1}.</span>
+      <span class="item-dims" style="flex:1">${LEX_LABELS[o] || o}</span>
+      <button class="remove-btn" onclick="removeInnerLexObjective(${idx})">✕</button>`;
+    el.appendChild(row);
+  });
+}
+
 function buildItemForm(mode) {
   const el = document.getElementById('item-form');
   const rotRow = document.getElementById('rotate-row');
@@ -1029,9 +1185,9 @@ function onNestedToggle() {
     const mode = document.getElementById('mode').value;
     buildInnerBinFields(mode);
     buildInnerAlgorithmSelect(mode);
+    buildInnerCatalogFields(mode);
   }
-  updateBalanceVisibility();
-  scheduleAutoPack();
+  onAlgorithmChange(); // refresh inner gbpp/lex panel visibility for the inner algo
 }
 
 function buildInnerBinFields(mode) {
@@ -1192,6 +1348,9 @@ function onAlgorithmChange() {
   const algo = document.getElementById('algorithm').value;
   document.getElementById('bin-cost-field').style.display = (algo === 'gbpp') ? '' : 'none';
   document.getElementById('lex-section').style.display = (algo === 'lex') ? '' : 'none';
+  const ialgo = document.getElementById('inner-algorithm')?.value;
+  document.getElementById('inner-bin-cost-field').style.display = (ialgo === 'gbpp') ? '' : 'none';
+  document.getElementById('inner-lex-section').style.display = (ialgo === 'lex') ? '' : 'none';
   scheduleAutoPack();
 }
 
@@ -1720,6 +1879,10 @@ function currentConfig() {
   if (nestedEnabled) {
     cfg.innerBin = { width: num('inner-w', 5), height: num('inner-h', num('inner-w', 5)), depth: num('inner-d', num('inner-w', 5)) };
     cfg.innerAlgorithm = document.getElementById('inner-algorithm')?.value || 'ff';
+    if (innerCatalogEnabled && innerCatalog.length) cfg.innerCatalog = innerCatalog.map(c => ({ ...c }));
+    const ia = cfg.innerAlgorithm;
+    if (ia === 'gbpp') cfg.innerBinCost = parseFloat(document.getElementById('inner-bin-cost')?.value) || 0;
+    if (ia === 'lex') cfg.innerLexObjectives = innerLexObjectives.slice();
   }
   if (catalogEnabled && containerCatalog.length) {
     cfg.catalog = true;
@@ -1765,10 +1928,22 @@ function applyState(s) {
     nestedEnabled = true; toggleEl.checked = true;
     document.getElementById('nested-inner-section').style.display = '';
     document.getElementById('outer-bin-label').textContent = 'Outer container (pallet)';
-    buildInnerBinFields(mode); buildInnerAlgorithmSelect(mode);
+    buildInnerBinFields(mode); buildInnerAlgorithmSelect(mode); buildInnerCatalogFields(mode);
     const ib = s.innerBin || {};
     setVal('inner-w', ib.width); setVal('inner-h', ib.height); setVal('inner-d', ib.depth);
     setVal('inner-algorithm', s.innerAlgorithm);
+    // Inner catalog / bin cost / lexicographic objectives.
+    innerCatalog = (s.innerCatalog || []).map(c => ({ ...c }));
+    innerCatalogEnabled = innerCatalog.length > 0;
+    document.getElementById('inner-catalog-toggle').checked = innerCatalogEnabled;
+    document.getElementById('inner-catalog-section').style.display = innerCatalogEnabled ? '' : 'none';
+    document.getElementById('inner-bin-capacity-block').style.display = innerCatalogEnabled ? 'none' : '';
+    renderInnerContainerList();
+    setVal('inner-bin-cost', s.innerBinCost != null ? s.innerBinCost : 0);
+    innerLexObjectives = (s.innerLexObjectives || []).slice();
+    renderInnerLexObjectives();
+    document.getElementById('inner-bin-cost-field').style.display = (s.innerAlgorithm === 'gbpp') ? '' : 'none';
+    document.getElementById('inner-lex-section').style.display = (s.innerAlgorithm === 'lex') ? '' : 'none';
   } else {
     nestedEnabled = false; toggleEl.checked = false;
     document.getElementById('nested-inner-section').style.display = 'none';
@@ -2188,13 +2363,18 @@ async function runNestedPack(auto = false) {
   if (outerAlgo === 'gbpp') outer.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (outerAlgo === 'lex') outer.lex_objectives = lexObjectives.slice();
 
+  // Inner (carton) level: its own catalog / bin cost / lexicographic objectives.
+  const inner = {
+    bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [],
+    preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
+  };
+  if (innerCatalogEnabled && innerCatalog.length) inner.containers = innerCatalogContainers(mode);
+  if (innerAlgo === 'gbpp') inner.bin_cost = parseFloat(document.getElementById('inner-bin-cost')?.value) || 0;
+  if (innerAlgo === 'lex') inner.lex_objectives = innerLexObjectives.slice();
+
   const body = {
     mode,
-    levels: [
-      { bin: { width: iw, height: ih, depth: idp }, algorithm: innerAlgo, constraints: [],
-        preferences: innerPreferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })) },
-      outer,
-    ],
+    levels: [inner, outer],
     items: items.map(it => ({
       id: it.id, width: it.width, height: it.height, depth: it.depth,
       allow_rotate: it.allow_rotate ?? (document.getElementById('allow-rotate')?.checked || false),
