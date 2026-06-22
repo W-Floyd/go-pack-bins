@@ -63,6 +63,11 @@ function handle(m) {
     } else if (m.kind === 'nested') {
       const result = JSON.parse(self.goPackNested(JSON.stringify(m.body)));
       postMessage({ reqId: m.reqId, result });
+    } else if (m.kind === 'packOnce') {
+      // Non-streaming single solve (used by container-catalog mode, which runs a
+      // full solve per container type and has no honest partial state to stream).
+      const result = JSON.parse(self.goPack(JSON.stringify(m.body)));
+      postMessage({ reqId: m.reqId, result });
     }
   } catch (err) {
     postMessage({ reqId: m.reqId, frame: { type: 'error', error: String(err && err.message || err) } });
