@@ -43,6 +43,12 @@ import (
 // The "tallest unpacked item" is measured by each item's *flattest* orientation
 // (its minimum height), so a rotatable long-skinny box — which can lie flat —
 // never triggers a deferral; only items tall in every orientation do.
+//
+// Final layer: when every remaining item fits flat (in its flattest orientation)
+// in a single layer, they are laid flat rather than fused into vertical stacks —
+// there is nothing above the top layer, so stacking would only add height and
+// voids. Stacking is used on the top layer only when the items do not all fit
+// flat, i.e. only when required.
 type BlockPacker struct {
 	w, d, h  float64
 	observer pack.PlaceObserver
@@ -71,9 +77,11 @@ const blockEps = 1e-9
 // kept only when the footprint fits the bin floor and fh fits the bin.
 type orient struct{ fw, fd, fh float64 }
 
-// pitem is a placeable item with its distinct valid orientations.
+// pitem is a placeable item with its distinct valid orientations. item is the
+// original, kept so leftovers can be handed to LAFF for a flat finish.
 type pitem struct {
 	id     string
+	item   pack.Item
 	orient []orient
 }
 
@@ -126,7 +134,7 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 			result.Unplaced = append(result.Unplaced, i3.ID())
 			continue
 		}
-		its = append(its, &pitem{id: i3.ID(), orient: os})
+		its = append(its, &pitem{id: i3.ID(), item: i3, orient: os})
 	}
 
 	consumed := make([]bool, len(its))
@@ -147,6 +155,15 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		flat := bp.flattestTallest(its, consumed)
 		if flat <= 0 {
 			break // no remaining item fits any bin (pre-filtered; defensive)
+		}
+
+		// Final stage: once the remaining items fit (laid flat) within a single bin,
+		// first slot whatever fits into the voids/wells of the already-packed bins,
+		// then lay the rest flat (LAFF) — as flat as possible, even if a few items
+		// can't be fully flattened — rather than standing them up in tall stacks.
+		if bp.endgame(its, consumed) {
+			bp.finalStage(&result, its, consumed, &binIdx)
+			break
 		}
 
 		// Prefer reusing a deferred shallow top now tall enough (tightest first, to
@@ -268,6 +285,162 @@ func (bp *BlockPacker) flattestTallest(its []*pitem, consumed []bool) float64 {
 	return best
 }
 
+// remainingItems returns the still-unconsumed items (their original pack.Items).
+func remainingItems(its []*pitem, consumed []bool) []pack.Item {
+	var out []pack.Item
+	for i, it := range its {
+		if !consumed[i] {
+			out = append(out, it.item)
+		}
+	}
+	return out
+}
+
+// endgame reports whether the packing has reached its final stage: the remaining
+// items, laid flat, fit within a single bin. When true the finish lays them flat
+// (LAFF) rather than standing them up in tall stacks. A cheap volume check gates
+// the LAFF probe so it only runs once a bin's worth (or less) remains — keeping
+// huge multi-bin solves fast.
+func (bp *BlockPacker) endgame(its []*pitem, consumed []bool) bool {
+	vol := 0.0
+	for i, it := range its {
+		if !consumed[i] {
+			vol += orientVolume(it)
+		}
+	}
+	if vol <= 0 || vol > bp.w*bp.d*bp.h+blockEps {
+		return false // more than one bin's worth left — still the body phase
+	}
+	r, _ := LAFF(remainingItems(its, consumed), bp.w, bp.d, bp.h)
+	return len(r.Unplaced) == 0 && r.BinsUsed() <= 1
+}
+
+// finalStage finishes the solve once the remaining items fit flat within one bin.
+// First it slots whatever fits into the voids/wells of the already-packed bins
+// (reconstructing each bin's free space with EMS), then it lays the rest flat
+// with LAFF — as flat as possible, opening a fresh bin only for the leftovers.
+// Resting support is required for void placements, so nothing floats. Bins with
+// very many boxes are skipped for the (super-linear) void scan to keep huge
+// single-bin solves fast.
+func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []bool, binIdx *int) {
+	const voidScanMaxBoxes = 1200 // cap EMS reconstruction cost per bin
+
+	commit := func(binID, itemID string, x, y, z, w, d, h float64) {
+		p := &Placement3D{binID: binID, itemID: itemID, X: x, Y: y, Z: z, W: w, D: d, H: h}
+		result.Placements = append(result.Placements, p)
+		if bp.observer != nil {
+			bp.observer(p)
+		}
+	}
+
+	// Reconstruct each existing bin's free space from its committed boxes (skipping
+	// bins too full of boxes to scan cheaply).
+	count := map[string]int{}
+	for _, p := range result.Placements {
+		count[bin3DID(p)]++
+	}
+	var binIDs []string
+	ems := map[string]*EmptyMaximalSpace{}
+	for _, b := range result.Bins {
+		id := b.ID()
+		if count[id] == 0 || count[id] > voidScanMaxBoxes {
+			continue
+		}
+		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
+		e.contact = ContactSpec{NoFloating: true} // void placements must rest on something
+		ems[id] = e
+		binIDs = append(binIDs, id)
+	}
+	for _, raw := range result.Placements {
+		pl, ok := raw.(*Placement3D)
+		if !ok {
+			continue
+		}
+		if e := ems[pl.binID]; e != nil {
+			e.Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+		}
+	}
+
+	// Void-fill: largest items first into the first existing bin whose free space
+	// accepts them (even partial-height wells).
+	idxByVol := make([]int, 0, len(its))
+	for i := range its {
+		if !consumed[i] {
+			idxByVol = append(idxByVol, i)
+		}
+	}
+	sort.SliceStable(idxByVol, func(a, b int) bool {
+		return orientVolume(its[idxByVol[a]]) > orientVolume(its[idxByVol[b]])
+	})
+	for _, i := range idxByVol {
+		orients := orientationsOf(its[i])
+		for _, id := range binIDs {
+			if x, y, z, w, d, h, ok := ems[id].TryInsert(orients); ok {
+				commit(id, its[i].id, x, y, z, w, d, h)
+				consumed[i] = true
+				break
+			}
+		}
+	}
+
+	// Whatever remains is laid out flat with LAFF (smallest dimension vertical, in
+	// flat layers) — as flat as possible — into one or more fresh bins. LAFF's bins
+	// are renamed to this packer's scheme and its placements re-emitted.
+	leftover := remainingItems(its, consumed)
+	if len(leftover) == 0 {
+		return
+	}
+	idxByID := map[string]int{}
+	for i, it := range its {
+		idxByID[it.id] = i
+	}
+	r, _ := LAFF(leftover, bp.w, bp.d, bp.h)
+	binMap := map[string]string{}
+	for _, raw := range r.Placements {
+		pl, ok := raw.(*Placement3D)
+		if !ok {
+			continue
+		}
+		newID, seen := binMap[pl.binID]
+		if !seen {
+			newID = fmt.Sprintf("blocks-bin-%d", *binIdx)
+			binMap[pl.binID] = newID
+			result.Bins = append(result.Bins, NewBin(newID, bp.w, bp.d, bp.h, NewExtremePointStrategy(bp.w, bp.d, bp.h)))
+			*binIdx++
+		}
+		commit(newID, pl.itemID, pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+		if i, ok := idxByID[pl.itemID]; ok {
+			consumed[i] = true
+		}
+	}
+}
+
+// bin3DID returns the bin id a placement belongs to.
+func bin3DID(p pack.Placement) string {
+	if pl, ok := p.(*Placement3D); ok {
+		return pl.binID
+	}
+	return ""
+}
+
+// orientationsOf returns an item's valid orientations as (w,d,h) triples for EMS.
+func orientationsOf(it *pitem) [][3]float64 {
+	os := make([][3]float64, len(it.orient))
+	for i, o := range it.orient {
+		os[i] = [3]float64{o.fw, o.fd, o.fh}
+	}
+	return os
+}
+
+// orientVolume is the (orientation-invariant) volume of an item.
+func orientVolume(it *pitem) float64 {
+	if len(it.orient) == 0 {
+		return 0
+	}
+	o := it.orient[0]
+	return o.fw * o.fd * o.fh
+}
+
 // maxHeight is the tallest item height (over available items' valid orientations)
 // that fits within cap — the height of the next layer.
 func (bp *BlockPacker) maxHeight(its []*pitem, consumed []bool, cap float64) float64 {
@@ -332,7 +505,8 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []b
 			groups[key] = append(groups[key], ent{i, o.fh})
 		}
 	}
-	for key, es := range groups {
+	for _, key := range sortedKeys(groups) { // sorted for deterministic block order
+		es := groups[key]
 		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first prunes the search
 		used := make([]bool, len(es))
 		for {
@@ -434,7 +608,8 @@ func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, consumed []bool, H floa
 		}
 	}
 	var blocks []block
-	for key, es := range groups {
+	for _, key := range sortedKeys(groups) { // sorted for deterministic block order
+		es := groups[key]
 		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first
 		used := make([]bool, len(es))
 		for {
@@ -463,6 +638,22 @@ func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, consumed []bool, H floa
 		return blocks[a].fw*blocks[a].fd > blocks[b].fw*blocks[b].fd
 	})
 	return blocks
+}
+
+// sortedKeys returns a footprint-group map's keys in ascending order, so blocks
+// are built in a deterministic order regardless of Go's randomized map iteration.
+func sortedKeys[V any](m map[[2]float64]V) [][2]float64 {
+	keys := make([][2]float64, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(a, b int) bool {
+		if keys[a][0] != keys[b][0] {
+			return keys[a][0] < keys[b][0]
+		}
+		return keys[a][1] < keys[b][1]
+	})
+	return keys
 }
 
 // blockHeight is the total stacked height of a block.
