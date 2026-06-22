@@ -1,6 +1,9 @@
 package packapi
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // optInt: absent/invalid → 0 (solver default); present → clamped to [1, max].
 func TestOptIntClamp(t *testing.T) {
@@ -32,11 +35,11 @@ func TestOptIntClamp(t *testing.T) {
 // maxBruteForceMaxItems so n! can never hang the solve.
 func TestBruteForceMaxItemsClamped(t *testing.T) {
 	req := PackRequest{AlgorithmOptions: map[string]float64{"brute_max_items": 100}}
-	if got := req.bruteForceOptions(nil).MaxItems; got != maxBruteForceMaxItems {
+	if got := req.bruteForceOptions(context.Background(), nil).MaxItems; got != maxBruteForceMaxItems {
 		t.Fatalf("brute_max_items clamped to %d, want %d", got, maxBruteForceMaxItems)
 	}
 	// Absent → 0 so the solver applies DefaultBruteForceMaxItems.
-	if got := (PackRequest{}).bruteForceOptions(nil).MaxItems; got != 0 {
+	if got := (PackRequest{}).bruteForceOptions(context.Background(), nil).MaxItems; got != 0 {
 		t.Fatalf("absent brute_max_items = %d, want 0 (solver default)", got)
 	}
 }
@@ -51,10 +54,10 @@ func TestOptionBuildersMapAndClamp(t *testing.T) {
 		"search_seed":        42,
 		"refine_eval_budget": 1e12, // clamps to maxRefineEvalBudget
 	}}
-	if b := req.beamOptions(); b.Width != 8 || b.Branch != maxBeamBranch {
+	if b := req.beamOptions(context.Background()); b.Width != 8 || b.Branch != maxBeamBranch {
 		t.Fatalf("beamOptions = %+v, want Width=8 Branch=%d", b, maxBeamBranch)
 	}
-	if s := req.searchOptions(); s.MaxIters != 5000 || s.Seed != 42 {
+	if s := req.searchOptions(context.Background()); s.MaxIters != 5000 || s.Seed != 42 {
 		t.Fatalf("searchOptions = %+v, want MaxIters=5000 Seed=42", s)
 	}
 	if r := req.refineOptions(); r.EvalBudget != maxRefineEvalBudget {

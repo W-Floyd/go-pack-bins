@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/W-Floyd/go-pack-bins/d1"
 	"github.com/W-Floyd/go-pack-bins/d2"
@@ -50,6 +51,9 @@ func lexResult(ctx context.Context, req PackRequest, factory pack.BinFactory, it
 		offline.FirstFitDecreasing(factory),
 		offline.BestFitDecreasing(factory),
 		offline.NextFitDecreasing(factory))
+	if prog := progressFromCtx(ctx); prog != nil {
+		p.OnProgress(prog)
+	}
 	r, err := p.PackAllCtx(ctx, items)
 	return r, p.Winner(), err
 }
@@ -501,28 +505,31 @@ func (req PackRequest) optInt(key string, max int) int {
 	return n
 }
 
-func (req PackRequest) beamOptions() offline.BeamOptions {
+func (req PackRequest) beamOptions(ctx context.Context) offline.BeamOptions {
 	return offline.BeamOptions{
 		Width:    req.optInt("beam_width", maxBeamWidth),
 		Branch:   req.optInt("beam_branch", maxBeamBranch),
 		MaxItems: req.optInt("beam_max_items", maxBeamMaxItems),
+		Progress: progressFromCtx(ctx),
 	}
 }
 
-func (req PackRequest) bruteForceOptions(key func(pack.Item) string) offline.BruteForceOptions {
+func (req PackRequest) bruteForceOptions(ctx context.Context, key func(pack.Item) string) offline.BruteForceOptions {
 	return offline.BruteForceOptions{
 		MaxItems: req.optInt("brute_max_items", maxBruteForceMaxItems),
 		Key:      key,
+		Progress: progressFromCtx(ctx),
 	}
 }
 
-func (req PackRequest) searchOptions() offline.SearchOptions {
+func (req PackRequest) searchOptions(ctx context.Context) offline.SearchOptions {
 	// Seed is passed through unclamped (0 → solver default); it changes the random
 	// stream, not the search cost.
 	return offline.SearchOptions{
 		Seed:     int64(req.AlgorithmOptions["search_seed"]),
 		MaxIters: req.optInt("search_max_iters", maxSearchMaxIters),
 		Restarts: req.optInt("search_restarts", maxSearchRestarts),
+		Progress: progressFromCtx(ctx),
 	}
 }
 
@@ -618,6 +625,8 @@ type StreamFrame struct {
 	Multi          bool              `json:"multi,omitempty"`      // meta: segmented multi-candidate race (auto)
 	Segments       []string          `json:"segments,omitempty"`   // meta: candidate labels, one per segment
 	Seg            int               `json:"seg,omitempty"`        // batch: segment this batch belongs to (0 default)
+	Done           int               `json:"done,omitempty"`       // progress: work units completed
+	Total          int               `json:"total,omitempty"`      // progress: total work units (<=0 = indeterminate)
 	WinnerSeg      *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
 	BinsUsed       int               `json:"bins_used,omitempty"`  // done
 	BestPacker     string            `json:"best_packer,omitempty"`
@@ -642,7 +651,37 @@ type StreamFrame struct {
 // send is only ever called from the calling goroutine, so it need not be
 // concurrency-safe. The frame protocol leaves room for a genuinely-incremental
 // solver to emit batches mid-solve without any client change.
+// progressKey carries a pack.ProgressObserver through ctx so StreamPack can let
+// long-running solvers report progress without changing the pack1D/2D/3D
+// signatures. nil (the non-streaming Pack path) means no progress sink.
+type progressCtxKey struct{}
+
+var progressKey progressCtxKey
+
+func progressFromCtx(ctx context.Context) pack.ProgressObserver {
+	if fn, ok := ctx.Value(progressKey).(pack.ProgressObserver); ok {
+		return fn
+	}
+	return nil
+}
+
 func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
+	// Serialize all frame emission: the slow solvers report progress from worker
+	// goroutines (and streamAuto's candidates stream concurrently), so wrap send in
+	// a mutex once here and use it everywhere downstream.
+	var sendMu sync.Mutex
+	rawSend := send
+	send = func(f StreamFrame) {
+		sendMu.Lock()
+		rawSend(f)
+		sendMu.Unlock()
+	}
+	// Expose a progress sink to the solvers via ctx; the dispatch reads it when
+	// constructing search/metaheuristic packers (see progressFromCtx).
+	ctx = context.WithValue(ctx, progressKey, pack.ProgressObserver(func(done, total int) {
+		send(StreamFrame{Type: "progress", Done: done, Total: total})
+	}))
+
 	// A buffered emitter coalesces placements into batches so we are not flushing
 	// one tiny frame per box, while still pushing each batch the moment it fills.
 	var buf []PlacementResult
@@ -1105,11 +1144,15 @@ func streamAuto(ctx context.Context, send func(StreamFrame), req PackRequest, ca
 	results := make([]pack.Result, len(cands))
 	errs := make([]error, len(cands))
 
+	var completed int64
 	var wg sync.WaitGroup
 	for i, c := range cands {
 		wg.Add(1)
 		go func(i int, c candidate) {
 			defer wg.Done()
+			defer func() {
+				send(StreamFrame{Type: "progress", Done: int(atomic.AddInt64(&completed, 1)), Total: len(cands)})
+			}()
 			conv := &placeConv{mode: req.Mode, binIdx: map[string]int{}, offsets: map[string]float64{},
 				sizeByID: map[string]float64{}, binW: req.Bin.Width}
 			for _, s := range req.Items {
@@ -1304,13 +1347,13 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	case "bc":
 		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
 	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey1D))
+		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey1D))
 	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, req.beamOptions())
+		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
 	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions())
+		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
 	case "grasp":
-		result = offline.GRASP(ctx, items, factory, req.searchOptions())
+		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
 	case "auto":
 		p := meta.BestOf(
 			offline.FirstFitDecreasing(factory),
@@ -1481,13 +1524,13 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
 		result, err = packAllCtx(ctx, p, items)
 	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey2D))
+		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey2D))
 	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, req.beamOptions())
+		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
 	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions())
+		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
 	case "grasp":
-		result = offline.GRASP(ctx, items, factory, req.searchOptions())
+		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
 	case "auto":
 		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
 		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
@@ -1618,7 +1661,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// Brute-force: exhaustive item-order search for small orders (FFD fallback
 	// above the cap). Identical boxes are pruned via a sorted-dimension key.
 	if req.Algorithm == "brute" {
-		result, berr := offline.BruteForce(ctx, items, factory, req.bruteForceOptions(shapeKey3D))
+		result, berr := offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey3D))
 		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
@@ -1629,11 +1672,11 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// extreme-point factory; they manage their own search and ignore contact.
 	switch req.Algorithm {
 	case "beam":
-		return buildResponse3D(offline.BeamSearch(ctx, items, factory, req.beamOptions())), nil
+		return buildResponse3D(offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))), nil
 	case "rr":
-		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, req.searchOptions())), nil
+		return buildResponse3D(offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))), nil
 	case "grasp":
-		return buildResponse3D(offline.GRASP(ctx, items, factory, req.searchOptions())), nil
+		return buildResponse3D(offline.GRASP(ctx, items, factory, req.searchOptions(ctx))), nil
 	}
 
 	// GBPP: optional items (profit scalar) + bin cost, net-cost minimisation.

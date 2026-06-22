@@ -112,8 +112,8 @@ func (r Result) BinsUsed() int { return len(r.Bins) }
 //   - (p, idx, nil)  – placed in bin at index idx.
 //   - (nil, -1, nil) – no existing bin fit; caller should open a new one.
 //   - (nil, -1, err) – permanent failure; item can never be placed in any bin
-//                      of this factory's configuration. Caller must not open a
-//                      new bin. err is the same kind returned by Bin.TryPlace.
+//     of this factory's configuration. Caller must not open a
+//     new bin. err is the same kind returned by Bin.TryPlace.
 //
 // Selectors are responsible for calling TryPlace on their chosen bin(s).
 // The Packer calls Open on the factory and retries if Select returns -1, nil.
@@ -141,6 +141,14 @@ type OnlinePacker interface {
 // PlaceObserver is notified of each placement at the moment the packer commits
 // it, in commit order. It enables streaming a solve as it progresses.
 type PlaceObserver func(Placement)
+
+// ProgressObserver receives coarse progress from a long-running solve: done out
+// of total work units completed (e.g. restarts, beam levels, candidates). It is
+// the signal for search/metaheuristic packers that have no honest partial
+// placements to stream. A total <= 0 means the total is unknown, so done is a
+// heartbeat count rather than a fraction. May be called concurrently — installers
+// must make the callback safe for that.
+type ProgressObserver func(done, total int)
 
 // Observable is implemented by packers that can report each placement as it is
 // committed mid-solve. The sequential packers support this: every online

@@ -4,6 +4,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
@@ -48,11 +49,20 @@ var _ pack.CtxOfflinePacker = (*Func)(nil)
 type BestOfPacker struct {
 	candidates []pack.OfflinePacker
 	winner     string
+	progress   pack.ProgressObserver
 }
 
 // BestOf returns a packer that tries every candidate and keeps the best result.
 func BestOf(candidates ...pack.OfflinePacker) *BestOfPacker {
 	return &BestOfPacker{candidates: candidates}
+}
+
+// OnProgress registers fn to receive candidates-completed out of the total as the
+// race runs (candidates complete concurrently, so fn may be called from multiple
+// goroutines and must be safe for that). Returns p for chaining.
+func (p *BestOfPacker) OnProgress(fn pack.ProgressObserver) *BestOfPacker {
+	p.progress = fn
+	return p
 }
 
 // Winner returns the Name of the candidate that produced the best result on the
@@ -76,11 +86,15 @@ func (p *BestOfPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 	}
 	results := make([]pack.Result, len(p.candidates))
 	errs := make([]error, len(p.candidates))
+	var completed int64
 	parallelFor(len(p.candidates), func(i int) {
 		if cc, ok := p.candidates[i].(pack.CtxOfflinePacker); ok {
 			results[i], errs[i] = cc.PackAllCtx(ctx, items)
 		} else {
 			results[i], errs[i] = p.candidates[i].PackAll(items)
+		}
+		if p.progress != nil {
+			p.progress(int(atomic.AddInt64(&completed, 1)), len(p.candidates))
 		}
 	})
 	var best pack.Result

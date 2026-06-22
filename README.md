@@ -41,7 +41,8 @@ a small variation on it.
 - **`joint`** — a 3-D packer that decides bin selection *and* placement position
   together under one multi-objective score (balance + anti-slosh, single pass).
 - **`catalog`** — picks the best container type for an order from a catalog of
-  candidate sizes, honouring a per-type max count.
+  candidate sizes (honouring a per-type max count), or cascades an order across
+  sizes when one type's count is exhausted.
 - **`gbpp`** — the Generalized Bin Packing objective: optional items carry a
   profit, bins carry a cost, and the solve minimises net cost (with rejection).
 - **`geometry`** — vector/matrix helpers for 3-D solids.
@@ -131,7 +132,12 @@ containers → least waste), honouring a per-type max count.
 `gbpp.Pack` implements the Generalized Bin Packing objective: items may be
 *compulsory* or *optional* (optional ones carry a `profit` scalar), bins carry a
 cost, and the solve minimises **net cost = bins×cost − included profit**, rejecting
-optional items that aren't worth a bin.
+optional items that aren't worth a bin. It packs *all* items together first (so
+optional and compulsory items consolidate tightly) and then drops only the optional
+items in an all-optional bin whose profit can't cover the bin cost — an optional
+item riding along in a bin a compulsory item already paid for is always kept free.
+`gbpp.PackCatalog` extends this to a heterogeneous catalog, choosing the most
+profitable *mix* of bin types rather than exhausting one type first.
 
 ## Quick start
 
@@ -160,9 +166,12 @@ cd cmd/webdemo && go run .   # then open http://localhost:8082
 
 Pick a dimension and algorithm, add items (with scalars), set constraints (incl.
 incompatibilities), enable a container catalog or nested (cartons → pallets), and —
-for the ⚖ balanceable algorithms — add balance objectives. The pack streams in
-progressively; the right-hand panel reports per-metric sum / average / σ across
-bins plus a per-bin breakdown. Setups can be saved and reloaded as JSON.
+for the ⚖ balanceable algorithms — add balance objectives. Nested mode exposes the
+new features at *each* level independently: the inner (carton) and outer (pallet)
+stages each take their own catalog, bin cost, GBPP, and lexicographic objectives.
+The pack streams in progressively; the right-hand panel reports per-metric sum /
+average / σ across bins plus a per-bin breakdown. Setups can be saved and reloaded
+as JSON.
 
 ## WebAssembly
 

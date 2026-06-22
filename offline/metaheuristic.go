@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand"
 	"sort"
+	"sync/atomic"
 
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -61,6 +62,9 @@ type SearchOptions struct {
 	MaxIters int
 	// Restarts is the number of GRASP multistarts (default 16).
 	Restarts int
+	// Progress, if set, receives coarse progress: GRASP reports restarts completed
+	// out of the total; RuinRecreate reports iterations completed out of MaxIters.
+	Progress pack.ProgressObserver
 }
 
 func (o SearchOptions) seed() int64 {
@@ -101,7 +105,12 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 	best := packOrdering(factory, bestOrder)
 	bestScore := scoreResult(best)
 
-	for iter := 0; iter < opts.maxIters(); iter++ {
+	maxIters := opts.maxIters()
+	step := maxIters / 100 // throttle to ~100 progress updates over the run
+	if step < 1 {
+		step = 1
+	}
+	for iter := 0; iter < maxIters; iter++ {
 		if ctx.Err() != nil {
 			break
 		}
@@ -109,6 +118,9 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 		r := packOrdering(factory, cand)
 		if s := scoreResult(r); s.better(bestScore) {
 			best, bestScore, bestOrder = r, s, cand
+		}
+		if opts.Progress != nil && (iter+1)%step == 0 {
+			opts.Progress(iter+1, maxIters)
 		}
 	}
 	return best
@@ -165,6 +177,7 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 		have  bool
 	}
 	outs := make([]restartResult, restarts)
+	var completed int64
 	parallelFor(restarts, func(r int) {
 		if ctx.Err() != nil {
 			return // leaves have=false; skipped in the reduction
@@ -186,6 +199,9 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 			}
 		}
 		outs[r] = restartResult{res: res, score: curScore, have: true}
+		if opts.Progress != nil {
+			opts.Progress(int(atomic.AddInt64(&completed, 1)), restarts)
+		}
 	})
 
 	// Reduce in restart order so the winner is deterministic.

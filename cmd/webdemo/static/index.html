@@ -2250,7 +2250,7 @@ async function runSinglePack(auto = false) {
   teardownRaceGrid(); // clear any prior auto-race grid
   const data = { bins_used: 0, placements: [], unplaced: [], item_errors: {}, free_rects: undefined, best_packer: '' };
   const is3D = (mode === '3d');
-  let count = 0, ctl = null, lastStats = 0, multi = false;
+  let count = 0, ctl = null, lastStats = 0, multi = false, progressMax = 0;
 
   const liveStats = () => {
     document.getElementById('stat-placed').textContent = data.placements.length;
@@ -2299,6 +2299,18 @@ async function runSinglePack(auto = false) {
     if (f.type === 'error') {
       if (!auto) showError(f.error);
       endPackIndicator();
+    } else if (f.type === 'progress') {
+      // Coarse progress from a slow solver (search/metaheuristic/auto race): show
+      // it on the Pack button. Cancel the deferred spinner so it can't clobber us.
+      // Parallel solvers report out of order, so track the max so the bar only
+      // advances.
+      clearTimeout(packSpinnerTimer);
+      progressMax = Math.max(progressMax, f.done || 0);
+      const label = f.total > 0
+        ? `Packing… ${Math.round(100 * progressMax / f.total)}%`
+        : `Packing… ${progressMax}`;
+      const btn = document.getElementById('pack-btn');
+      if (btn) btn.innerHTML = `<span class="spinner"></span> ${label}`;
     } else if (f.type === 'meta') {
       count = f.count || 0;
       multi = !!f.multi;
