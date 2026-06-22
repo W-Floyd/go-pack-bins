@@ -8,10 +8,11 @@
 // reqId so the page can discard frames from a superseded request.
 //
 // Message protocol:
-//   page → worker: { kind: 'pack'|'nested', reqId, body }
+//   page → worker: { kind: 'pack'|'nested'|'packOnce'|'voids', reqId, body }
 //   worker → page: { kind: 'ready' }                       once, after wasm loads
 //                  { reqId, frame: <StreamFrame> }          per pack frame
 //                  { reqId, result: <NestedPackResponse> }  once per nested
+//                  { reqId, result: <VoidResponse> }        once per voids
 //
 // This file is only used by the static WASM bundle; the Go server's page talks
 // to /api/* directly and never spawns the worker.
@@ -62,6 +63,10 @@ function handle(m) {
       });
     } else if (m.kind === 'nested') {
       const result = JSON.parse(self.goPackNested(JSON.stringify(m.body)));
+      postMessage({ reqId: m.reqId, result });
+    } else if (m.kind === 'voids') {
+      // Internal-void inspection of an already-solved packing (no streaming).
+      const result = JSON.parse(self.goVoids(JSON.stringify(m.body)));
       postMessage({ reqId: m.reqId, result });
     } else if (m.kind === 'packOnce') {
       // Non-streaming single solve (used by container-catalog mode, which runs a

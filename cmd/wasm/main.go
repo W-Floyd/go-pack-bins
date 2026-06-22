@@ -30,6 +30,7 @@ func main() {
 	js.Global().Set("goPack", js.FuncOf(packFn))
 	js.Global().Set("goPackNested", js.FuncOf(packNestedFn))
 	js.Global().Set("goPackStream", js.FuncOf(packStreamFn))
+	js.Global().Set("goVoids", js.FuncOf(voidsFn))
 	// goPackReady lets the frontend feature-detect the bridge without poking at
 	// each function. Set last so it is only true once everything is registered.
 	js.Global().Set("goPackReady", true)
@@ -46,6 +47,18 @@ func packFn(this js.Value, args []js.Value) any {
 		return errResponse("goPack: " + err.Error())
 	}
 	return marshal(packapi.Pack(req))
+}
+
+// voidsFn implements goVoids(jsonRequest) -> jsonResponse (mirrors POST /api/voids).
+func voidsFn(this js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		return errResponse("goVoids: missing request argument")
+	}
+	var req packapi.VoidRequest
+	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
+		return errResponse("goVoids: " + err.Error())
+	}
+	return marshal(packapi.Voids(req))
 }
 
 // packNestedFn implements goPackNested(jsonRequest) -> jsonResponse.

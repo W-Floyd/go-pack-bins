@@ -343,7 +343,7 @@ func BenchmarkAlgos3D(b *testing.B) {
 		group: "3D", mode: "3d", desc: "500 mixed boxes (sides 1–6) into a 20×20×20 bin",
 		bin:   BinSpec{Width: 20, Depth: 20, Height: 20},
 		items: benchMix("3d", 500, 33),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "auto"},
+		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
 	})
 }
 
@@ -359,7 +359,45 @@ func BenchmarkAlgos3DSlosh(b *testing.B) {
 		bin:     BinSpec{Width: 20, Depth: 20, Height: 20},
 		contact: ContactSpec{Bottom: 0.6, SideX: 0.5, SideY: 0.5},
 		items:   benchMix("3d", 500, 33),
-		algos:   []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks"},
+		algos:   []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks", "assemble"},
+	})
+}
+
+// benchCartons builds n boxes drawn from a small SKU palette whose footprints and
+// heights are divisors of a 12×12×12 bin — repeated, tile-friendly sizes (as in a
+// carton/pallet load) where fusing and stacking pay off, unlike the fully-random
+// instance above. This is a single-level packer comparison, not true (nested)
+// palletizing.
+func benchCartons(n int, seed uint32) []ItemSpec {
+	s := seed
+	if s == 0 {
+		s = 1
+	}
+	next := func() float64 { s = s*1664525 + 1013904223; return float64(s>>8) / (1 << 24) }
+	type sku struct{ w, d, h float64 }
+	skus := []sku{
+		{6, 6, 6}, {6, 6, 3}, {6, 6, 2}, {6, 3, 3}, {4, 4, 4},
+		{3, 3, 6}, {12, 6, 2}, {6, 12, 3}, {4, 4, 2}, {3, 6, 4},
+	}
+	out := make([]ItemSpec, n)
+	for i := range out {
+		k := skus[int(next()*float64(len(skus)))%len(skus)]
+		out[i] = ItemSpec{ID: itoa(i), Width: k.w, Depth: k.d, Height: k.h, AllowRotate: true}
+	}
+	return out
+}
+
+// BenchmarkAlgos3DCartons is the case the block/assemble packers are built for:
+// repeated carton SKUs that tile and stack into a 12×12×12 bin. Fusion should match
+// or beat the free packers here, where on the fully-random instance it lags. (This
+// is a single-bin comparison; true cartons-into-pallets is nested mode.)
+func BenchmarkAlgos3DCartons(b *testing.B) {
+	runScenario(b, scenario{
+		group: "3D · carton SKUs", mode: "3d",
+		desc:  "400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12",
+		bin:   BinSpec{Width: 12, Depth: 12, Height: 12},
+		items: benchCartons(400, 5),
+		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
 	})
 }
 
