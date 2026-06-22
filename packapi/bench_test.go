@@ -40,8 +40,21 @@ type benchRow struct {
 	dnf                          bool // did not finish within the time budget
 }
 
-// benchTimeout is the per-solve budget; a solve that doesn't finish is reported DNF.
-const benchTimeout = time.Second
+// benchTimeout is the per-solve budget; a solve that doesn't finish is reported
+// DNF. It defaults to 1s — an interactive-request budget, the regime in which a
+// user actually waits on a synchronous solve — and is overridable via
+// PACK_BENCH_TIMEOUT (e.g. "30s") to regenerate an offline-planning table where the
+// metaheuristics and exact solvers have room to run.
+var benchTimeout = parseBenchTimeout()
+
+func parseBenchTimeout() time.Duration {
+	if v := os.Getenv("PACK_BENCH_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Second
+}
 
 var (
 	benchMu    sync.Mutex
@@ -112,7 +125,7 @@ func benchTables() string {
 	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
 	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
 	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
-	b.WriteString("Each solve is timeboxed to 1 s; **DNF** = did not finish in that budget. ")
+	fmt.Fprintf(&b, "Each solve is timeboxed to %s (an interactive-request budget; raise PACK_BENCH_TIMEOUT for an offline-planning table); **DNF** = did not finish in time. ", benchTimeout)
 	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
 	for _, g := range groups {
 		rows := byGroup[g]
@@ -444,7 +457,7 @@ func BenchmarkAlgos3DCartons(b *testing.B) {
 func BenchmarkAlgos3DMega(b *testing.B) {
 	runScenario(b, scenario{
 		group: "3D · mega-stress", mode: "3d",
-		desc:  "10 000 mixed boxes (sides 1–6) into a 75×75×75 bin (each solve timeboxed to 1 s)",
+		desc:  "10 000 mixed boxes (sides 1–6) into a 75×75×75 bin",
 		bin:   BinSpec{Width: 75, Depth: 75, Height: 75},
 		items: benchMix("3d", 10000, 99),
 		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
