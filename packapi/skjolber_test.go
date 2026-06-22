@@ -110,6 +110,41 @@ func TestPackCatalogCascadesWhenMaxExhausted(t *testing.T) {
 	}
 }
 
+// A nested solve may use a container catalog at a level: level 0 chooses the
+// best carton size for the items, and that chosen size feeds level 1. Eight 3³
+// cubes fill a 6³ carton exactly (no waste), so the catalog picks 6³ over 10³.
+func TestPackNestedCatalog(t *testing.T) {
+	resp, err := PackNested(NestedPackRequest{
+		Mode:  "3d",
+		Items: cubes(8, 3),
+		Levels: []NestedLevelSpec{
+			{Algorithm: "ffd", Bin: BinSpec{Width: 6, Height: 6, Depth: 6},
+				Containers: []ContainerSpec{
+					{Bin: BinSpec{Width: 6, Height: 6, Depth: 6}},
+					{Bin: BinSpec{Width: 10, Height: 10, Depth: 10}},
+				}},
+			{Algorithm: "ffd", Bin: BinSpec{Width: 30, Height: 30, Depth: 30}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Levels) != 2 {
+		t.Fatalf("expected 2 levels, got %d", len(resp.Levels))
+	}
+	l0, l1 := resp.Levels[0], resp.Levels[1]
+	if len(l0.Placements) != 8 || len(l0.Unplaced) != 0 {
+		t.Fatalf("level 0: expected 8 placed / 0 unplaced, got %d / %v", len(l0.Placements), l0.Unplaced)
+	}
+	if l0.BinDims.Width != 6 {
+		t.Fatalf("expected the catalog to choose the 6³ carton (no waste), got width %g", l0.BinDims.Width)
+	}
+	if len(l1.Placements) != l0.BinsUsed {
+		t.Fatalf("level 1 should place one carton per filled carton bin: %d cartons vs %d placements",
+			l0.BinsUsed, len(l1.Placements))
+	}
+}
+
 // The incompatible constraint, via the "incompatible" op, keeps category-1 and
 // category-2 items in separate bins even though both fit in one.
 func TestPackIncompatible(t *testing.T) {

@@ -1990,6 +1990,13 @@ type NestedLevelSpec struct {
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 	Contact     ContactSpec      `json:"contact,omitempty"`
+	// Containers, BinCost and LexObjectives enable the catalog / GBPP / lexicographic
+	// features at this level (same semantics as PackRequest). When Containers is
+	// set, this level chooses among those container sizes; the chosen size(s) feed
+	// the next level as item dimensions.
+	Containers    []ContainerSpec `json:"containers,omitempty"`
+	BinCost       float64         `json:"bin_cost,omitempty"`
+	LexObjectives []string        `json:"lex_objectives,omitempty"`
 }
 
 type NestedPackRequest struct {
@@ -2002,7 +2009,15 @@ type NestedLevelResult struct {
 	BinsUsed   int               `json:"bins_used"`
 	Placements []PlacementResult `json:"placements"`
 	Unplaced   []string          `json:"unplaced"`
-	BinDims    BinSpec           `json:"bin_dims"`
+	BinDims    BinSpec           `json:"bin_dims"` // nominal/uniform size for this level
+	// BinDimsList is set when the level mixes container sizes (catalog): one entry
+	// per bin index. Empty means every bin is BinDims.
+	BinDimsList []BinSpec `json:"bin_dims_list,omitempty"`
+	// GBPP economics for this level (set when its algorithm is "gbpp").
+	Container      string   `json:"container,omitempty"`
+	NetCost        float64  `json:"net_cost,omitempty"`
+	IncludedProfit float64  `json:"included_profit,omitempty"`
+	Rejected       []string `json:"rejected,omitempty"`
 }
 
 type NestedPackResponse struct {
@@ -2027,13 +2042,16 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		l0Contact.NoFloating = true
 	}
 	l0req := PackRequest{
-		Mode:        req.Mode,
-		Algorithm:   l0spec.Algorithm,
-		Bin:         l0spec.Bin,
-		Items:       req.Items,
-		Constraints: l0spec.Constraints,
-		Preferences: l0spec.Preferences,
-		Contact:     l0Contact,
+		Mode:          req.Mode,
+		Algorithm:     l0spec.Algorithm,
+		Bin:           l0spec.Bin,
+		Items:         req.Items,
+		Constraints:   l0spec.Constraints,
+		Preferences:   l0spec.Preferences,
+		Contact:       l0Contact,
+		Containers:    l0spec.Containers,
+		BinCost:       l0spec.BinCost,
+		LexObjectives: l0spec.LexObjectives,
 	}
 	l0resp, err := packByMode(ctx, l0req)
 	if err != nil {
@@ -2060,14 +2078,13 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		}
 	}
 
-	// Build one carton item per filled bin.
+	// Build one carton item per filled bin, sized to that bin's actual dimensions
+	// (a catalog at level 0 may have chosen different carton sizes per bin).
 	cartonItems := make([]ItemSpec, l0resp.BinsUsed)
 	for b := 0; b < l0resp.BinsUsed; b++ {
+		d := binDimsAt(l0resp, b, l0spec.Bin)
 		cartonItems[b] = ItemSpec{
-			ID:      fmt.Sprintf("carton_%d", b),
-			Width:   l0spec.Bin.Width,
-			Height:  l0spec.Bin.Height,
-			Depth:   l0spec.Bin.Depth,
+			ID: fmt.Sprintf("carton_%d", b), Width: d.Width, Height: d.Height, Depth: d.Depth,
 			Scalars: binScalars[b],
 		}
 	}
@@ -2075,13 +2092,16 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 	// Level 1: pack carton items into outer bins (pallets).
 	l1spec := req.Levels[1]
 	l1req := PackRequest{
-		Mode:        req.Mode,
-		Algorithm:   l1spec.Algorithm,
-		Bin:         l1spec.Bin,
-		Items:       cartonItems,
-		Constraints: l1spec.Constraints,
-		Preferences: l1spec.Preferences,
-		Contact:     l1spec.Contact,
+		Mode:          req.Mode,
+		Algorithm:     l1spec.Algorithm,
+		Bin:           l1spec.Bin,
+		Items:         cartonItems,
+		Constraints:   l1spec.Constraints,
+		Preferences:   l1spec.Preferences,
+		Contact:       l1spec.Contact,
+		Containers:    l1spec.Containers,
+		BinCost:       l1spec.BinCost,
+		LexObjectives: l1spec.LexObjectives,
 	}
 	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
@@ -2090,14 +2110,18 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 
 	return NestedPackResponse{
 		Levels: []NestedLevelResult{
-			{BinsUsed: l0resp.BinsUsed, Placements: l0resp.Placements, Unplaced: l0resp.Unplaced, BinDims: l0spec.Bin},
-			{BinsUsed: l1resp.BinsUsed, Placements: l1resp.Placements, Unplaced: l1resp.Unplaced, BinDims: l1spec.Bin},
+			nestedLevelResult(l0resp, l0spec.Bin),
+			nestedLevelResult(l1resp, l1spec.Bin),
 		},
 	}, nil
 }
 
-// packByMode dispatches to the appropriate dimensioned packer.
+// packByMode dispatches to the appropriate dimensioned packer, routing to the
+// container catalog when this request carries multiple container types.
 func packByMode(ctx context.Context, req PackRequest) (PackResponse, error) {
+	if len(req.Containers) > 0 {
+		return solveCatalog(ctx, req), nil
+	}
 	switch req.Mode {
 	case "1d":
 		return pack1D(ctx, req)
@@ -2108,4 +2132,34 @@ func packByMode(ctx context.Context, req PackRequest) (PackResponse, error) {
 	default:
 		return PackResponse{}, fmt.Errorf("unknown mode: %s", req.Mode)
 	}
+}
+
+// binDimsAt returns the dimensions of bin i in a response: the per-bin entry for
+// a mixed catalog result, else the single chosen container, else the fallback.
+func binDimsAt(resp PackResponse, i int, fallback BinSpec) BinSpec {
+	if i < len(resp.BinDims) {
+		return resp.BinDims[i]
+	}
+	if resp.ContainerBin != nil {
+		return *resp.ContainerBin
+	}
+	return fallback
+}
+
+// nestedLevelResult builds the per-level result, carrying per-bin dims (for a
+// mixed catalog) and GBPP economics.
+func nestedLevelResult(resp PackResponse, nominal BinSpec) NestedLevelResult {
+	r := NestedLevelResult{
+		BinsUsed: resp.BinsUsed, Placements: resp.Placements, Unplaced: resp.Unplaced,
+		BinDims:        nominal,
+		BinDimsList:    resp.BinDims,
+		Container:      resp.Container,
+		NetCost:        resp.NetCost,
+		IncludedProfit: resp.IncludedProfit,
+		Rejected:       resp.Rejected,
+	}
+	if resp.ContainerBin != nil {
+		r.BinDims = *resp.ContainerBin
+	}
+	return r
 }
