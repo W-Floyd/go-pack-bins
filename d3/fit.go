@@ -12,6 +12,12 @@ import "math"
 // constructive criterion for the container-loading problem (the "maximal contact"
 // / fitness-number heuristic; see ATTRIBUTION.md).
 //
+// It always respects gravity: a candidate is only considered if it rests on the
+// bin floor or on the top faces of placed boxes, so the contact criterion can
+// never wedge a box high against a wall or the ceiling with empty air beneath
+// it. The opt-in ContactSpec gate (Bottom fraction / NoFloating) tightens this
+// further but is not required for grounding.
+//
 // Cost per insert is the EMS space-maintenance O(n²) plus an O(spaces × placed)
 // scan to score candidates — still a single fast pass, no search. Feed it items
 // largest-first (the offline decreasing wrappers) for best results.
@@ -58,6 +64,16 @@ func (f *FitPacker) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh
 			}
 			x, y, z := s.x, s.y, s.z // back-bottom-left corner of the space
 			if f.gated(x, y, z, w, d) {
+				continue
+			}
+			// Gravity: never float. The maximal-space set contains overhanging
+			// spaces whose floor rests only partly over a placed box (the rest
+			// over empty air); the contact criterion would happily wedge a box
+			// into such a space high against a wall or the ceiling, leaving the
+			// floor empty ("climbing"). Require every box to rest on the bin
+			// floor or on the top faces of placed boxes, independent of the
+			// opt-in support gate above.
+			if footprintSupport(f.placed, x, y, z, w, d) <= compactEps {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
