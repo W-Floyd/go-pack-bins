@@ -107,6 +107,11 @@
   }
   input:focus, select:focus { border-color: var(--accent); }
   select option { background: var(--surface); }
+  /* Hide the native number spin buttons: in narrow fields (e.g. the container-
+     catalog W/D/H/Max/Cost row) the arrows overlap and hide the value. */
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .row { display: flex; gap: 8px; }
   .row .field { flex: 1; }
   /* ── item list ── */
@@ -188,6 +193,8 @@
   }
   .btn-primary:hover { opacity: 0.88; }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Pack button while a solve is in flight: clicking it cancels. */
+  #pack-btn.cancelling { background: var(--danger, #c0392b); }
   .btn-sm { padding: 5px 10px; font-size: 12px; }
   /* spinner shown on the Pack button while a pack is in flight */
   .spinner {
@@ -887,6 +894,8 @@ const ALGOS = {
     {v:'joint',l:'Joint (balance + placement, one pass)'},
     {v:'laff',l:'Largest-Area-Fit-First (layers)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
+    {v:'ems', l:'Empty Maximal Space (EMS)'},
+    {v:'heightmap', l:'Heightmap / skyline'},
     {v:'nf',  l:'Next Fit'},
     {v:'bf',  l:'Best Fit'},
     {v:'wf',  l:'Worst Fit'},
@@ -1822,6 +1831,15 @@ const PRESETS = {
       items: bigMix('3d', 1500, 77),
     },
     {
+      label: 'Mega stress test (10k boxes)',
+      // 100,000 mixed boxes into a large bin. Uses Next-Fit-Decreasing — the most
+      // scalable packer here (one open bin at a time, no re-scan of closed bins) —
+      // so the solve stays linear-ish even at this size. Streams as it packs.
+      // Heavy on the renderer: expect a busy view (and reload the page to stop).
+      bin: {w:75, d:75, h:75}, algo: 'nfd',
+      items: bigMix('3d', 10000, 99),
+    },
+    {
       label: 'Stable + anti-slosh (support 80%, sides 50%)',
       bin: {w:10, d:10, h:10}, algo: 'ff',
       contact: {bottom: 80, side_x: 50, side_y: 50},
@@ -2171,12 +2189,34 @@ function packWorkerRef() {
   return packWorker;
 }
 
+const AUTO_PACK_MAX_ITEMS = 2000;
+let autoPackOffHinted = false;
 function scheduleAutoPack() {
   clearTimeout(autoPackTimer);
+  // Auto-packing on every edit is too costly for very large orders; above this
+  // size the user must trigger the solve manually with the Pack button. Hint once
+  // when crossing the threshold so the stale/empty view isn't a mystery.
+  if (items.length > AUTO_PACK_MAX_ITEMS) {
+    if (!autoPackOffHinted) {
+      autoPackOffHinted = true;
+      showWarn(`${items.length} items — auto-pack off; press Pack to solve.`);
+    }
+    return;
+  }
+  autoPackOffHinted = false;
   autoPackTimer = setTimeout(() => runPack(true), 120);
 }
 
 async function runPack(auto = false) {
+  // While a solve is in flight the Pack button doubles as Cancel: a manual click
+  // stops the current solve instead of starting a new one.
+  if (!auto && packInFlight) { cancelPack(); return; }
+  // Starting a fresh solve supersedes any in-flight one — abort its server fetch
+  // at the source so the server stops computing, not just the UI. (In WASM mode a
+  // superseded worker solve is left to finish; its stale frames are dropped by the
+  // packSeq guard. Explicit cancel terminates the worker.)
+  abortFetch();
+  packController = new AbortController();
   if (nestedEnabled) {
     await runNestedPack(auto);
   } else {
@@ -2190,17 +2230,47 @@ async function runPack(auto = false) {
 // the request is still in flight after 100ms, so fast packs don't flicker.
 let packSeq = 0;
 let packSpinnerTimer = null;
+let packInFlight = false;   // a solve is running; the Pack button acts as Cancel
+let packController = null;   // aborts the in-flight server fetch on cancel/supersede
 
 function beginPackIndicator() {
   clearTimeout(packSpinnerTimer);
+  packInFlight = true;
+  // Reveal the Cancel affordance after 100ms so fast packs don't flicker it.
   packSpinnerTimer = setTimeout(() => {
-    document.getElementById('pack-btn').innerHTML = '<span class="spinner"></span> Packing…';
+    const btn = document.getElementById('pack-btn');
+    if (btn) {
+      btn.classList.add('cancelling');
+      btn.title = 'Click to cancel';
+      btn.innerHTML = '<span class="spinner"></span> Cancel';
+    }
   }, 100);
 }
 
 function endPackIndicator() {
   clearTimeout(packSpinnerTimer);
-  document.getElementById('pack-btn').textContent = 'Pack';
+  packInFlight = false;
+  const btn = document.getElementById('pack-btn');
+  if (btn) { btn.classList.remove('cancelling'); btn.title = ''; btn.textContent = 'Pack'; }
+}
+
+// abortFetch cancels the in-flight server fetch. The HTTP handlers pass the
+// request context to the solver, so dropping the connection stops the server-side
+// solve too (it samples ctx.Err() in its hot loops).
+function abortFetch() {
+  if (packController) { try { packController.abort(); } catch (_) {} packController = null; }
+}
+
+// cancelPack is triggered by clicking the Pack button mid-solve. Bumping packSeq
+// makes any late frames/results from the cancelled solve no-ops; in WASM mode the
+// worker is terminated (a running Go solve can't otherwise be interrupted) and
+// respawns lazily on the next pack.
+function cancelPack() {
+  packSeq++;
+  abortFetch();
+  if (WASM_MODE && packWorker) { packWorker.terminate(); packWorker = null; }
+  endPackIndicator();
+  showWarn('Packing cancelled.');
 }
 
 async function runSinglePack(auto = false) {
@@ -2307,10 +2377,12 @@ async function runSinglePack(auto = false) {
       clearTimeout(packSpinnerTimer);
       progressMax = Math.max(progressMax, f.done || 0);
       const label = f.total > 0
-        ? `Packing… ${Math.round(100 * progressMax / f.total)}%`
-        : `Packing… ${progressMax}`;
+        ? `${Math.round(100 * progressMax / f.total)}%`
+        : `${progressMax}`;
       const btn = document.getElementById('pack-btn');
-      if (btn) btn.innerHTML = `<span class="spinner"></span> ${label}`;
+      // The button still cancels on click (packInFlight is set); keep the red
+      // Cancel styling and show progress alongside it.
+      if (btn) { btn.classList.add('cancelling'); btn.title = 'Click to cancel'; btn.innerHTML = `<span class="spinner"></span> Cancel · ${label}`; }
     } else if (f.type === 'meta') {
       count = f.count || 0;
       multi = !!f.multi;
@@ -2362,7 +2434,7 @@ async function runSinglePack(auto = false) {
           packWorkerRef().postMessage({ kind: 'packOnce', reqId: seq, body });
         });
       } else {
-        result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+        result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: packController && packController.signal })).json();
       }
     } catch (e) {
       if (seq === packSeq) { if (!auto) showError(e.message); endPackIndicator(); }
@@ -2417,6 +2489,7 @@ async function runSinglePack(auto = false) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
+      signal: packController && packController.signal,
     });
     if (!resp.ok || !resp.body) throw new Error('stream unavailable');
     const reader = resp.body.getReader();
@@ -2513,6 +2586,7 @@ async function runNestedPack(auto = false) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: packController && packController.signal,
       });
       data = await resp.json();
     }

@@ -3,3 +3,5 @@
 cmd/webdemo/webdemo
 /dist/
 /bench/bench
+# `GOOS=js GOARCH=wasm go build ./cmd/wasm` drops a bare binary named wasm in cwd
+/wasm

@@ -42,3 +42,37 @@ func TestStreamProgressFrames(t *testing.T) {
 		}
 	}
 }
+
+// Streamable packers (which commit placements incrementally) also report numeric
+// progress: each flushed batch reports items-placed-so-far against the item count,
+// so the UI can show a %% in addition to the boxes appearing.
+func TestStreamProgressFramesStreamable(t *testing.T) {
+	cases := []struct {
+		mode, algo string
+		req        PackRequest
+	}{
+		{"1d", "ffd", PackRequest{Mode: "1d", Algorithm: "ffd", Bin: BinSpec{Width: 10}, Items: items1d(20, 3)}},
+		{"3d", "ems", PackRequest{Mode: "3d", Algorithm: "ems", Bin: BinSpec{Width: 10, Depth: 10, Height: 10}, Items: cubes(40, 3)}},
+	}
+	for _, c := range cases {
+		var mu sync.Mutex
+		var prog, total, maxDone int
+		StreamPack(context.Background(), c.req, func(f StreamFrame) {
+			mu.Lock()
+			defer mu.Unlock()
+			if f.Type == "progress" {
+				prog++
+				total = f.Total
+				if f.Done > maxDone {
+					maxDone = f.Done
+				}
+			}
+		})
+		if prog == 0 {
+			t.Errorf("%s/%s: no progress frames emitted", c.mode, c.algo)
+		}
+		if total != len(c.req.Items) || maxDone > total {
+			t.Errorf("%s/%s: bad progress total=%d maxDone=%d (items=%d)", c.mode, c.algo, total, maxDone, len(c.req.Items))
+		}
+	}
+}

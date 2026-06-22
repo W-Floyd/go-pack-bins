@@ -7,4 +7,6 @@ require (
 	github.com/bavix/boxpacker3 v1.2.0
 )
 
+require github.com/gedex/bp3d v0.0.0-20170208095317-0ba3dcda7ab3
+
 replace github.com/W-Floyd/go-pack-bins => ../
