@@ -45,10 +45,12 @@ func TestAssembler_FusesCubesIntoOneBin(t *testing.T) {
 	}
 }
 
-// Heterogeneous boxes that share a face must fuse: a 6×4×4 and a 4×4×4 share the
-// 4×4 face and stack into a 4×4×10 column; rotation lets the assembler find it.
+// Heterogeneous boxes that share a face must fuse: a 4×4×6 and a 4×4×4 share the
+// 4×4 face and stack into a 4×4×10 column; rotation lets the assembler find it. The
+// bin is 8×8×10 so the column tiles it (4|8, 10|10) and the bin-aligned gate keeps
+// the merge.
 func TestAssembler_FusesHeterogeneousSharedFace(t *testing.T) {
-	a := d3.NewAssembler(10, 10, 10)
+	a := d3.NewAssembler(8, 8, 10)
 	res, err := a.PackAll([]pack.Item{
 		d3.NewItem("tall", 4, 4, 6, true),
 		d3.NewItem("short", 4, 4, 4, true),
@@ -60,7 +62,7 @@ func TestAssembler_FusesHeterogeneousSharedFace(t *testing.T) {
 	if len(ps) != 2 || len(res.Unplaced) != 0 {
 		t.Fatalf("got %d placements / %d unplaced, want 2 / 0", len(ps), len(res.Unplaced))
 	}
-	perBinNoOverlap(t, ps, 10, 10, 10)
+	perBinNoOverlap(t, ps, 8, 8, 10)
 	// Fused as a 4×4×10 column, the two boxes share a footprint and stack flush:
 	// their combined bounding box is exactly their summed volume (no internal gap).
 	minX, minY, minZ := 1e18, 1e18, 1e18

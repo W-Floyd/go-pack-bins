@@ -3,6 +3,7 @@ package d3
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -193,7 +194,7 @@ func (a *Assembler) assemble(ctx context.Context, comps []composite) []composite
 			for x := 0; x+1 < len(live); x += 2 {
 				A, B := live[x], live[x+1]
 				res := glueZ(A.oc, B.oc)
-				if !a.fitsBin(res.w, res.d, res.h) {
+				if !a.tilesBin(res.w, res.d, res.h) {
 					continue
 				}
 				consumed[A.idx], consumed[B.idx] = true, true
@@ -262,15 +263,31 @@ func glueZ(bot, top composite) composite {
 	return out
 }
 
-// fitsBin reports whether a box fits the bin in some axis-aligned orientation.
-func (a *Assembler) fitsBin(w, d, h float64) bool {
+// tilesBin reports whether a block tiles the bin: in some orientation each of its
+// dimensions evenly divides the corresponding bin dimension. Gating merges on this
+// (rather than mere fit) stops fusion from overshooting the bin's divisors — e.g.
+// stacking 4-tall pieces into an 8-tall block that can't tile a height-12 bin — so
+// the blocks EMS receives lay down like bricks. It self-tunes: when little divides
+// the bin (random sizes), few merges pass and assemble degrades to EMS on raw items.
+func (a *Assembler) tilesBin(w, d, h float64) bool {
+	bin := [3]float64{a.w, a.d, a.h}
+	box := [3]float64{w, d, h}
 	for _, p := range perms6 {
-		dd := [3]float64{w, d, h}
-		if dd[p[0]] <= a.w+blockEps && dd[p[1]] <= a.d+blockEps && dd[p[2]] <= a.h+blockEps {
+		if divides(box[0], bin[p[0]]) && divides(box[1], bin[p[1]]) && divides(box[2], bin[p[2]]) {
 			return true
 		}
 	}
 	return false
+}
+
+// divides reports whether b evenly divides B (B = k·b for some integer k ≥ 1),
+// within tolerance, and b ≤ B.
+func divides(b, B float64) bool {
+	if b <= blockEps || b > B+blockEps {
+		return false
+	}
+	k := math.Round(B / b)
+	return k >= 1 && math.Abs(k*b-B) <= blockEps*k+blockEps
 }
 
 var _ pack.Observable = (*Assembler)(nil)
