@@ -29,6 +29,9 @@ func Pack(req PackRequest) PackResponse { return PackCtx(context.Background(), r
 // field. It is the core of /api/pack; the HTTP handler passes the request
 // context so a client disconnect or deadline aborts the solve.
 func PackCtx(ctx context.Context, req PackRequest) PackResponse {
+	if len(req.Containers) > 0 {
+		return solveCatalog(ctx, req)
+	}
 	var resp PackResponse
 	var err error
 	switch req.Mode {
@@ -45,6 +48,141 @@ func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 		resp = PackResponse{Error: err.Error()}
 	}
 	return resp
+}
+
+// packOneBin runs the single-container solve for req's mode (no catalog).
+func packOneBin(ctx context.Context, req PackRequest) PackResponse {
+	req.Containers = nil
+	switch req.Mode {
+	case "1d":
+		r, err := pack1D(ctx, req)
+		return foldErr(r, err)
+	case "2d":
+		r, err := pack2D(ctx, req)
+		return foldErr(r, err)
+	case "3d":
+		r, err := pack3D(ctx, req)
+		return foldErr(r, err)
+	}
+	return PackResponse{Error: "unknown mode: " + req.Mode}
+}
+
+func foldErr(r PackResponse, err error) PackResponse {
+	if err != nil {
+		return PackResponse{Error: err.Error()}
+	}
+	return r
+}
+
+// binVolume returns one container's capacity in the mode's volume units.
+func binVolume(mode string, b BinSpec) float64 {
+	switch mode {
+	case "1d":
+		return b.Width
+	case "2d":
+		return b.Width * b.Height
+	default:
+		return b.Width * b.Height * b.Depth
+	}
+}
+
+func containerLabel(mode string, b BinSpec) string {
+	switch mode {
+	case "1d":
+		return fmt.Sprintf("%g", b.Width)
+	case "2d":
+		return fmt.Sprintf("%g×%g", b.Width, b.Height)
+	default:
+		return fmt.Sprintf("%g×%g×%g", b.Width, b.Height, b.Depth)
+	}
+}
+
+// solveCatalog packs the order into each candidate container type and returns the
+// best single type, ranked by most items placed, then fewest containers, then
+// least wasted volume — the heterogeneous-container model from
+// skjolber/3d-bin-container-packing (see catalog package). MaxCount caps a type:
+// items spilling past the allowed container count are reported unplaced.
+func solveCatalog(ctx context.Context, req PackRequest) PackResponse {
+	volByID := itemVolumes(req)
+
+	var best PackResponse
+	var bestWaste float64
+	found := false
+	for _, cs := range req.Containers {
+		if err := ctx.Err(); err != nil {
+			return PackResponse{Error: err.Error()}
+		}
+		sub := req
+		sub.Bin = cs.Bin
+		resp := packOneBin(ctx, sub)
+		if resp.Error != "" {
+			continue
+		}
+		resp = truncateCatalog(resp, cs.MaxCount)
+		waste := binVolume(req.Mode, cs.Bin)*float64(resp.BinsUsed) - placedVolume(resp, volByID)
+		if !found || betterContainer(resp, waste, best, bestWaste) {
+			best, bestWaste, found = resp, waste, true
+			b := cs.Bin
+			best.Container = containerLabel(req.Mode, cs.Bin)
+			best.ContainerBin = &b
+		}
+	}
+	if !found {
+		return PackResponse{Error: "no container type could pack the order"}
+	}
+	return best
+}
+
+// truncateCatalog enforces a container count cap by dropping placements in bins
+// beyond maxCount; their items become unplaced.
+func truncateCatalog(resp PackResponse, maxCount int) PackResponse {
+	if maxCount <= 0 || resp.BinsUsed <= maxCount {
+		return resp
+	}
+	kept := resp.Placements[:0:0]
+	for _, p := range resp.Placements {
+		if p.BinIndex < maxCount {
+			kept = append(kept, p)
+		} else {
+			resp.Unplaced = append(resp.Unplaced, p.ItemID)
+		}
+	}
+	resp.Placements = kept
+	resp.BinsUsed = maxCount
+	return resp
+}
+
+func itemVolumes(req PackRequest) map[string]float64 {
+	m := make(map[string]float64, len(req.Items))
+	for _, it := range req.Items {
+		switch req.Mode {
+		case "1d":
+			m[it.ID] = it.Width
+		case "2d":
+			m[it.ID] = it.Width * it.Height
+		default:
+			m[it.ID] = it.Width * it.Height * it.Depth
+		}
+	}
+	return m
+}
+
+func placedVolume(resp PackResponse, volByID map[string]float64) float64 {
+	v := 0.0
+	for _, p := range resp.Placements {
+		v += volByID[p.ItemID]
+	}
+	return v
+}
+
+func betterContainer(a PackResponse, aWaste float64, b PackResponse, bWaste float64) bool {
+	if len(a.Unplaced) != len(b.Unplaced) {
+		return len(a.Unplaced) < len(b.Unplaced)
+	}
+	if a.BinsUsed != b.BinsUsed {
+		return a.BinsUsed < b.BinsUsed
+	}
+	return aWaste < bWaste
 }
 
 // PackNested runs the two-level nested solve (cartons → pallets) with no
@@ -128,6 +266,17 @@ type PackRequest struct {
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 	Contact     ContactSpec      `json:"contact,omitempty"` // per-face support/anti-slosh
+	// Containers, when non-empty, switches to container-catalog mode: the order is
+	// packed into each candidate container type and the best single type is chosen
+	// (see package catalog). Bin is ignored in this mode.
+	Containers []ContainerSpec `json:"containers,omitempty"`
+}
+
+// ContainerSpec is one container type in a catalog: its size and an optional cap
+// on how many of that type may be used (0 = unlimited).
+type ContainerSpec struct {
+	Bin      BinSpec `json:"bin"`
+	MaxCount int     `json:"max_count,omitempty"`
 }
 
 // ContactSpec is the per-face contact requirement (fractions 0-1). Bottom is a
@@ -161,13 +310,17 @@ type PlacementResult struct {
 type FreeRect [4]float64
 
 type PackResponse struct {
-	BinsUsed   int                `json:"bins_used"`
-	Placements []PlacementResult  `json:"placements"`
-	Unplaced   []string           `json:"unplaced"`
-	FreeRects  [][]FreeRect       `json:"free_rects,omitempty"` // per-bin, guillotine only
-	ItemErrors map[string]string  `json:"item_errors,omitempty"`
-	BestPacker string             `json:"best_packer,omitempty"` // winning algorithm name (auto mode)
-	Error      string             `json:"error,omitempty"`
+	BinsUsed   int               `json:"bins_used"`
+	Placements []PlacementResult `json:"placements"`
+	Unplaced   []string          `json:"unplaced"`
+	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"` // per-bin, guillotine only
+	ItemErrors map[string]string `json:"item_errors,omitempty"`
+	BestPacker string            `json:"best_packer,omitempty"` // winning algorithm name (auto mode)
+	Error      string            `json:"error,omitempty"`
+	// Container/ContainerBin are set in catalog mode: the chosen container type's
+	// label and its dimensions (so the client renders with the right box size).
+	Container    string   `json:"container,omitempty"`
+	ContainerBin *BinSpec `json:"container_bin,omitempty"`
 }
 
 // ─── streaming ──────────────────────────────────────────────────────────────
@@ -197,9 +350,11 @@ type StreamFrame struct {
 	BestPacker string            `json:"best_packer,omitempty"`
 	FreeRects  [][]FreeRect      `json:"free_rects,omitempty"`
 	ItemErrors map[string]string `json:"item_errors,omitempty"`
-	Unplaced   []string          `json:"unplaced,omitempty"`
-	Placements []PlacementResult `json:"placements,omitempty"`
-	Error      string            `json:"error,omitempty"`
+	Unplaced     []string          `json:"unplaced,omitempty"`
+	Placements   []PlacementResult `json:"placements,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Container    string            `json:"container,omitempty"`     // done: chosen container (catalog)
+	ContainerBin *BinSpec          `json:"container_bin,omitempty"` // done: chosen container dims (catalog)
 }
 
 // StreamPack runs the same packing as Pack but delivers the result as a series
@@ -225,6 +380,24 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		if len(buf) >= streamBatch {
 			flushBatch()
 		}
+	}
+
+	// Catalog mode runs a full solve per container type — no honest partial state —
+	// so solve fully and emit the result at once, carrying the chosen container.
+	if len(req.Containers) > 0 {
+		resp := solveCatalog(ctx, req)
+		if resp.Error != "" {
+			send(StreamFrame{Type: "error", Error: resp.Error})
+			return
+		}
+		send(StreamFrame{Type: "meta", Count: len(req.Items), Streaming: false})
+		for _, pr := range resp.Placements {
+			emit(pr)
+		}
+		flushBatch()
+		send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, Unplaced: resp.Unplaced,
+			ItemErrors: resp.ItemErrors, Container: resp.Container, ContainerBin: resp.ContainerBin})
+		return
 	}
 
 	// Auto: race every candidate at once into its own segment, each streaming its
