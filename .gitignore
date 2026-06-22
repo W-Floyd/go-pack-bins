@@ -2,3 +2,4 @@
 *.exe
 cmd/webdemo/webdemo
 /dist/
+/bench/bench
