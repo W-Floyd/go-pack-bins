@@ -35,13 +35,16 @@ type ExtremePoint struct {
 	placed           []box
 	usedVol          float64
 	contact          ContactSpec
+
+	grid  *boxGrid     // spatial index over placed for O(local) conflict tests
+	epBuf [][3]float64 // reused candidate-point scratch (avoids per-insert realloc)
 }
 
 type box struct{ x, y, z, w, d, h float64 }
 
 // NewExtremePoint creates an extreme-point placement strategy for a bin of the given dimensions.
 func NewExtremePoint(binW, binD, binH float64) *ExtremePoint {
-	return &ExtremePoint{binW: binW, binD: binD, binH: binH}
+	return &ExtremePoint{binW: binW, binD: binD, binH: binH, grid: newBoxGrid(binW, binD, binH)}
 }
 
 // NewExtremePointStrategy is a convenience constructor matching Factory3D's signature.
@@ -132,9 +135,16 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 		return 0, 0, 0, 0, 0, 0, false
 	}
 
-	ep.placed = append(ep.placed, box{best.x, best.y, best.z, best.w, best.d, best.h})
-	ep.usedVol += best.w * best.d * best.h
+	ep.addPlaced(box{best.x, best.y, best.z, best.w, best.d, best.h})
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
+}
+
+// addPlaced records a committed box in both the placed list and the spatial grid
+// (keeping them in sync), and updates the used volume.
+func (ep *ExtremePoint) addPlaced(b box) {
+	ep.grid.insert(int32(len(ep.placed)), b)
+	ep.placed = append(ep.placed, b)
+	ep.usedVol += b.w * b.d * b.h
 }
 
 // Candidate is a feasible placement (one that already passes the support gate),
@@ -184,14 +194,17 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 // CommitCandidate places a candidate previously returned by Candidates, updating
 // the strategy's occupied set and volume.
 func (ep *ExtremePoint) CommitCandidate(c Candidate) {
-	ep.placed = append(ep.placed, box{c.X, c.Y, c.Z, c.W, c.D, c.H})
-	ep.usedVol += c.W * c.D * c.H
+	ep.addPlaced(box{c.X, c.Y, c.Z, c.W, c.D, c.H})
 }
 
 // extremePoints returns all candidate placement positions.
 // The origin (0,0,0) is always a candidate.
 func (ep *ExtremePoint) extremePoints() [][3]float64 {
-	pts := [][3]float64{{0, 0, 0}}
+	// Reuse the backing array across inserts. The result is fully consumed within
+	// the calling TryInsert/Candidates before the next call rebuilds it, so the
+	// reuse is safe and avoids regenerating an O(placed) slice every insert (the
+	// packer's largest source of allocation).
+	pts := append(ep.epBuf[:0], [3]float64{0, 0, 0})
 	for _, b := range ep.placed {
 		pts = append(pts,
 			[3]float64{b.x + b.w, b.y, b.z},
@@ -199,6 +212,7 @@ func (ep *ExtremePoint) extremePoints() [][3]float64 {
 			[3]float64{b.x, b.y, b.z + b.h},
 		)
 	}
+	ep.epBuf = pts
 	return pts
 }
 
@@ -230,8 +244,16 @@ func (ep *ExtremePoint) supportFrac(x, y, z, w, d float64) float64 {
 }
 
 // conflicts reports whether placing a box at (x,y,z) with dimensions (w,d,h)
-// overlaps any already-placed box.
+// overlaps any already-placed box. It delegates to the spatial grid, which
+// examines only boxes near the query region; conflictsBrute is the linear
+// reference it must agree with (asserted by the fuzz test).
 func (ep *ExtremePoint) conflicts(x, y, z, w, d, h float64) bool {
+	return ep.grid.conflict(x, y, z, w, d, h, ep.placed)
+}
+
+// conflictsBrute is the linear-scan overlap test the grid accelerates; retained
+// as the equivalence oracle for the grid.
+func (ep *ExtremePoint) conflictsBrute(x, y, z, w, d, h float64) bool {
 	for _, b := range ep.placed {
 		if x < b.x+b.w && x+w > b.x &&
 			y < b.y+b.d && y+d > b.y &&
