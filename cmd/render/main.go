@@ -319,6 +319,8 @@ func algoLabel(a string) string {
 		return "Layer"
 	case "blocks":
 		return "Blocks"
+	case "columns":
+		return "Columns"
 	case "assemble":
 		return "Assemble"
 	case "rr":
