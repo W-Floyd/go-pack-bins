@@ -1,20 +1,25 @@
-// Command render produces isometric PNG renders of how each packing algorithm
-// solves a set of benchmark-style 3-D instances — a browserless, pure-Go stand-in
-// for the WebGL demo, meant for embedding in docs/READMEs.
+// Command render produces PNG renders of how each packing algorithm solves a set
+// of benchmark instances — a browserless, pure-Go stand-in for the WebGL demo,
+// meant for embedding in docs/READMEs.
 //
-// For every scenario it solves the instance with each algorithm (via packapi),
-// renders the resulting bins isometrically, and tiles the algorithms into one
-// contact-sheet PNG per scenario. A Markdown block linking the images is printed
-// to stdout (and written to <out>/README.md) for pasting into docs.
+// The scenarios are the SAME instances the packapi benchmarks race (loaded from
+// packapi.BenchScenarios, backed by packapi/benchmarks.json) so renders and the
+// benchmark table never drift. For every scenario it solves the instance with
+// each algorithm (via packapi), renders the resulting bins — isometric for 3-D,
+// flat top-down for 2-D, stacked capacity bars for 1-D — and tiles the algorithms
+// into one contact-sheet PNG per scenario. A Markdown block linking the images is
+// printed to stdout (and written to <out>/README.md) for pasting into docs.
 //
 // It is a SEPARATE module (its own go.mod, replace → parent) so its image deps
 // never reach the main module. Run it from this directory:
 //
 //	cd cmd/render && go run .                 # writes ../../docs/renders/*.png
-//	go run . -out /tmp/r -items 80 -size 300  # custom output / counts / cell size
+//	go run . -out /tmp/r -size 300 -scn 3d    # custom output / cell size / subset
+//	go run . -input saved.json                # render a saved webdemo scenario
 //
-// The scenarios mirror packapi's benchmarks in spirit but use smaller item counts
-// so the thumbnails stay legible; they are illustrative, not the timed instances.
+// These are the real (large) benchmark instances, so thumbnails are dense; pick a
+// big -size and use -scn/-algos to focus. Solves are timeboxed (-timeout); an
+// algorithm that overruns is drawn as a DNF cell, matching the benchmark table.
 package main
 
 import (
@@ -29,8 +34,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/W-Floyd/go-pack-bins/packapi"
 	"github.com/fogleman/gg"
@@ -54,51 +59,52 @@ func face(points float64) font.Face {
 }
 
 // scenario is one instance to render: a slug (for the file name), a human title,
-// the bin, the items, and the algorithms to render.
+// the solve mode, the bin, an optional contact spec, the items, and the
+// algorithms to render.
 type scenario struct {
-	slug, title string
-	bin         packapi.BinSpec
-	items       []packapi.ItemSpec
-	algos       []string
+	slug, title, mode string
+	bin               packapi.BinSpec
+	contact           packapi.ContactSpec
+	items             []packapi.ItemSpec
+	algos             []string
 }
+
+// defaultAlgos is the algorithm set used for a -input scenario (which carries no
+// algos of its own); "auto" is omitted as it just renders whichever wins.
+var defaultAlgos = []string{"ff", "ffd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble"}
 
 func main() {
 	out := flag.String("out", "../../docs/renders", "output directory for PNGs + README.md")
 	mdPrefix := flag.String("mdprefix", "docs/renders", "path prefix used in the emitted Markdown image links")
 	cell := flag.Int("size", 560, "cell size in pixels (per algorithm)")
 	cols := flag.Int("cols", 3, "algorithms per row in the contact sheet")
-	nMixed := flag.Int("items", 70, "item count for the mixed scenario")
-	nCarton := flag.Int("cartons", 90, "item count for the carton scenario")
-	algoFilter := flag.String("algos", "", "comma-separated subset of algorithms to render (default: all)")
+	algoFilter := flag.String("algos", "", "comma-separated subset of algorithms to render (default: each scenario's own set)")
 	scnFilter := flag.String("scn", "", "render only scenarios whose slug contains this substring")
-	input := flag.String("input", "", "render a saved webdemo scenario (.json) instead of the built-ins")
+	timeout := flag.Duration("timeout", 15*time.Second, "per-solve time budget; an algorithm that overruns is drawn as a DNF cell")
+	input := flag.String("input", "", "render a saved webdemo scenario (.json) instead of the benchmark set")
 	flag.Parse()
 
-	// "auto" is omitted: it just races the others and renders as whichever one wins.
-	algos := []string{"ff", "ffd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble"}
-	if *algoFilter != "" {
-		algos = strings.Split(*algoFilter, ",")
-	}
 	var scenarios []scenario
 	if *input != "" {
-		sc, err := loadScenario(*input, algos)
+		sc, err := loadScenario(*input, defaultAlgos)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "render: ", err)
 			os.Exit(1)
 		}
 		scenarios = []scenario{sc}
 	} else {
-		scenarios = []scenario{
-			{
-				slug: "mixed", title: "Mixed boxes (sides 1–6) into 10×10×10",
-				bin:   packapi.BinSpec{Width: 10, Height: 10, Depth: 10},
-				items: mixItems(*nMixed, 33), algos: algos,
-			},
-			{
-				slug: "cartons", title: "Carton SKUs (sizes divide the bin) into 12×12×12",
-				bin:   packapi.BinSpec{Width: 12, Height: 12, Depth: 12},
-				items: cartonItems(*nCarton, 5), algos: algos,
-			},
+		for _, s := range packapi.BenchScenarios() {
+			scenarios = append(scenarios, scenario{
+				slug: s.Slug, title: s.Title, mode: s.Mode,
+				bin: s.Bin, contact: s.Contact, items: s.Items, algos: s.Algos,
+			})
+		}
+	}
+	// A -algos filter overrides every scenario's own algorithm set.
+	if *algoFilter != "" {
+		sub := strings.Split(*algoFilter, ",")
+		for i := range scenarios {
+			scenarios[i].algos = sub
 		}
 	}
 
@@ -109,13 +115,13 @@ func main() {
 
 	var md strings.Builder
 	md.WriteString("# Algorithm packing renders\n\n")
-	md.WriteString("Isometric renders of each algorithm's packing, generated by `cmd/render` (no browser).\n")
+	md.WriteString("Renders of each algorithm's packing on the benchmark instances, generated by `cmd/render` (no browser).\n")
 
 	for _, sc := range scenarios {
 		if *scnFilter != "" && !strings.Contains(sc.slug, *scnFilter) {
 			continue
 		}
-		img := renderScenario(sc, *cell, *cols)
+		img := renderScenario(sc, *cell, *cols, *timeout)
 		file := filepath.Join(*out, sc.slug+".png")
 		if err := savePNG(file, img); err != nil {
 			fmt.Fprintln(os.Stderr, "render: ", err)
@@ -137,10 +143,9 @@ func main() {
 
 // renderScenario solves the instance with each algorithm and tiles the per-algo
 // renders into one contact-sheet image.
-func renderScenario(sc scenario, cell, cols int) image.Image {
+func renderScenario(sc scenario, cell, cols int, timeout time.Duration) image.Image {
 	colorOf := buildPalette(sc.items)
-	dim := [3]float64{sc.bin.Width, sc.bin.Depth, sc.bin.Height}
-	binVol := sc.bin.Width * sc.bin.Depth * sc.bin.Height
+	binCap := binCapacity(sc.mode, sc.bin)
 
 	rows := (len(sc.algos) + cols - 1) / cols
 	sheet := gg.NewContext(cols*cell, rows*cell)
@@ -148,31 +153,66 @@ func renderScenario(sc scenario, cell, cols int) image.Image {
 	sheet.Clear()
 
 	for i, algo := range sc.algos {
-		resp := packapi.PackCtx(context.Background(), packapi.PackRequest{
-			Mode: "3d", Algorithm: algo, Bin: sc.bin, Items: sc.items,
+		ox := float64((i % cols) * cell)
+		oy := float64((i / cols) * cell)
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		resp := packapi.PackCtx(ctx, packapi.PackRequest{
+			Mode: sc.mode, Algorithm: algo, Bin: sc.bin, Items: sc.items, Contact: sc.contact,
 		})
+		dnf := ctx.Err() != nil
+		cancel()
+
+		if dnf {
+			drawDNF(sheet, ox, oy, float64(cell), algoLabel(algo))
+			continue
+		}
+
 		fill := 0.0
-		if resp.BinsUsed > 0 {
-			placed := 0.0
-			for _, p := range resp.Placements {
-				placed += p.W * p.H * p.D
-			}
-			fill = 100 * placed / (float64(resp.BinsUsed) * binVol)
+		if resp.BinsUsed > 0 && binCap > 0 {
+			fill = 100 * placedAmount(sc.mode, resp) / (float64(resp.BinsUsed) * binCap)
 		}
 		label := fmt.Sprintf("%s — %d bins, %.0f%% fill", algoLabel(algo), resp.BinsUsed, fill)
 		if n := len(resp.Unplaced); n > 0 {
 			label += fmt.Sprintf(", %d unfit", n)
 		}
-		ox := float64((i % cols) * cell)
-		oy := float64((i / cols) * cell)
-		drawCell(sheet, ox, oy, float64(cell), resp, dim, colorOf, label)
+		drawCell(sheet, ox, oy, float64(cell), sc, resp, colorOf, label)
 	}
 	return sheet.Image()
 }
 
+// binCapacity is one bin's total capacity in the mode's unit (length / area /
+// volume), used as the fill-percentage denominator.
+func binCapacity(mode string, b packapi.BinSpec) float64 {
+	switch mode {
+	case "1d":
+		return b.Width
+	case "2d":
+		return b.Width * b.Height
+	default:
+		return b.Width * b.Depth * b.Height
+	}
+}
+
+// placedAmount sums the placed items' occupancy in the mode's unit.
+func placedAmount(mode string, resp packapi.PackResponse) float64 {
+	s := 0.0
+	for _, p := range resp.Placements {
+		switch mode {
+		case "1d":
+			s += p.W
+		case "2d":
+			s += p.W * p.H
+		default:
+			s += p.W * p.D * p.H
+		}
+	}
+	return s
+}
+
 // drawCell renders one algorithm's full packing (its bins tiled in a row) into the
-// cell at (ox,oy), with a header label.
-func drawCell(dc *gg.Context, ox, oy, cell float64, resp packapi.PackResponse, dim [3]float64, colorOf func(string) color.RGBA, label string) {
+// cell at (ox,oy), with a header label. The per-bin drawing follows the mode.
+func drawCell(dc *gg.Context, ox, oy, cell float64, sc scenario, resp packapi.PackResponse, colorOf func(string) color.RGBA, label string) {
 	// Font and header scale with the cell so labels stay proportional at any DPI.
 	pts := cell * 0.042
 	headerH := pts * 1.8
@@ -184,11 +224,10 @@ func drawCell(dc *gg.Context, ox, oy, cell float64, resp packapi.PackResponse, d
 	dc.SetRGB(0.12, 0.12, 0.16)
 	dc.DrawString(label, ox+pad, oy+pts*1.1)
 
-	byBin := map[int][]rbox{}
+	byBin := map[int][]packapi.PlacementResult{}
 	maxBin := -1
 	for _, p := range resp.Placements {
-		// rbox is (x,y,z,w,d,h); placement W=width(x), D=depth(y), H=height(z).
-		byBin[p.BinIndex] = append(byBin[p.BinIndex], rbox{p.X, p.Y, p.Z, p.W, p.D, p.H, colorOf(p.ItemID)})
+		byBin[p.BinIndex] = append(byBin[p.BinIndex], p)
 		if p.BinIndex > maxBin {
 			maxBin = p.BinIndex
 		}
@@ -203,12 +242,34 @@ func drawCell(dc *gg.Context, ox, oy, cell float64, resp packapi.PackResponse, d
 	bw := cell / float64(show)
 	bh := cell - headerH
 	for b := 0; b < show; b++ {
-		drawBin(dc, ox+float64(b)*bw, oy+headerH, bw, bh, dim, byBin[b])
+		x, y := ox+float64(b)*bw, oy+headerH
+		switch sc.mode {
+		case "1d":
+			drawBin1D(dc, x, y, bw, bh, sc.bin.Width, byBin[b], colorOf)
+		case "2d":
+			drawBin2D(dc, x, y, bw, bh, sc.bin.Width, sc.bin.Height, byBin[b], colorOf)
+		default:
+			drawBin3D(dc, x, y, bw, bh, [3]float64{sc.bin.Width, sc.bin.Depth, sc.bin.Height}, byBin[b], colorOf)
+		}
 	}
 	if n > show {
 		dc.SetRGB(0.4, 0.4, 0.45)
 		dc.DrawString(fmt.Sprintf("+%d more bins", n-show), ox+pad, oy+cell-pad)
 	}
+}
+
+// drawDNF fills a cell with a muted "did not finish" placeholder for an algorithm
+// whose solve overran the time budget (as the benchmark table marks DNF).
+func drawDNF(dc *gg.Context, ox, oy, cell float64, name string) {
+	pts := cell * 0.042
+	dc.SetFontFace(face(pts))
+	dc.SetRGB(0.95, 0.95, 0.96)
+	dc.DrawRectangle(ox+1, oy+1, cell-2, cell-2)
+	dc.Fill()
+	dc.SetRGB(0.12, 0.12, 0.16)
+	dc.DrawString(name+" — DNF (timed out)", ox+pts*0.5, oy+pts*1.1)
+	dc.SetRGB(0.7, 0.72, 0.78)
+	dc.DrawStringAnchored("DNF", ox+cell/2, oy+cell/2, 0.5, 0.5)
 }
 
 func savePNG(file string, img image.Image) error {
@@ -224,10 +285,24 @@ func algoLabel(a string) string {
 	switch a {
 	case "ff":
 		return "First-Fit"
+	case "bf":
+		return "Best-Fit"
+	case "wf":
+		return "Worst-Fit"
+	case "nfd":
+		return "NFD"
 	case "ffd":
 		return "FFD"
+	case "bfd":
+		return "BFD"
+	case "wfd":
+		return "WFD"
+	case "mffd":
+		return "MFFD"
 	case "blf":
 		return "BLF"
+	case "skyline":
+		return "Skyline"
 	case "ems":
 		return "EMS"
 	case "fit":
@@ -242,6 +317,10 @@ func algoLabel(a string) string {
 		return "Blocks"
 	case "assemble":
 		return "Assemble"
+	case "rr":
+		return "Ruin-Recreate"
+	case "arr":
+		return "Adaptive R&R"
 	case "auto":
 		return "Auto"
 	default:
@@ -249,7 +328,8 @@ func algoLabel(a string) string {
 	}
 }
 
-// loadScenario reads a webdemo-saved scenario (.json) into a render scenario.
+// loadScenario reads a webdemo-saved scenario (.json) into a render scenario. Saved
+// scenarios are 3-D instances.
 func loadScenario(file string, algos []string) (scenario, error) {
 	raw, err := os.ReadFile(file)
 	if err != nil {
@@ -281,45 +361,10 @@ func loadScenario(file string, algos []string) (scenario, error) {
 	return scenario{
 		slug:  base,
 		title: fmt.Sprintf("%s — %d items into %g×%g×%g", base, len(items), s.Bin.Width, s.Bin.Height, s.Bin.Depth),
+		mode:  "3d",
 		bin:   packapi.BinSpec{Width: s.Bin.Width, Height: s.Bin.Height, Depth: s.Bin.Depth},
 		items: items, algos: algos,
 	}, nil
-}
-
-// ── deterministic item generators (mirror packapi's benchmark instances) ──────
-
-func mixItems(n int, seed uint32) []packapi.ItemSpec {
-	next := lcg(seed)
-	sz := []float64{1, 2, 2, 3, 3, 4, 4, 5, 6}
-	out := make([]packapi.ItemSpec, n)
-	for i := range out {
-		pick := func() float64 { return sz[int(next()*float64(len(sz)))%len(sz)] }
-		out[i] = packapi.ItemSpec{ID: strconv.Itoa(i), Width: pick(), Depth: pick(), Height: pick(), AllowRotate: true}
-	}
-	return out
-}
-
-func cartonItems(n int, seed uint32) []packapi.ItemSpec {
-	next := lcg(seed)
-	skus := [][3]float64{
-		{6, 6, 6}, {6, 6, 3}, {6, 6, 2}, {6, 3, 3}, {4, 4, 4},
-		{3, 3, 6}, {12, 6, 2}, {6, 12, 3}, {4, 4, 2}, {3, 6, 4},
-	}
-	out := make([]packapi.ItemSpec, n)
-	for i := range out {
-		k := skus[int(next()*float64(len(skus)))%len(skus)]
-		out[i] = packapi.ItemSpec{ID: strconv.Itoa(i), Width: k[0], Depth: k[1], Height: k[2], AllowRotate: true}
-	}
-	return out
-}
-
-// lcg returns a deterministic [0,1) generator matching packapi's benchmark LCG.
-func lcg(seed uint32) func() float64 {
-	s := seed
-	if s == 0 {
-		s = 1
-	}
-	return func() float64 { s = s*1664525 + 1013904223; return float64(s>>8) / (1 << 24) }
 }
 
 // ── colour palette ────────────────────────────────────────────────────────────
