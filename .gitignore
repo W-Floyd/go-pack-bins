@@ -6,3 +6,5 @@ cmd/webdemo/webdemo
 # `GOOS=js GOARCH=wasm go build ./cmd/wasm` drops a bare binary named wasm in cwd
 /wasm
 *.test
+# scripts/bench-wasm.sh saves the wasm benchmark table here
+/bench-wasm.out
