@@ -251,10 +251,20 @@ type scenario struct {
 	algos             []string
 }
 
+// splitAlgo parses a scenario algo token into the algorithm id and an optional
+// 3-D decoder override for the order-search metaheuristics (see searchDecoder3D).
+// "rr" → ("rr", ""); "rr+extreme" → ("rr", "extreme"). The token (with suffix) is
+// kept as the row label so the decoder variant is self-describing in the table.
+func splitAlgo(tok string) (algo, decoder string) {
+	algo, decoder, _ = strings.Cut(tok, "+")
+	return algo, decoder
+}
+
 // runScenarioAlgo times one algorithm of a scenario, reports quality metrics to
 // the benchmark output, and records a row for the markdown table.
 func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
-	req := PackRequest{Mode: sc.mode, Algorithm: algo, Bin: sc.bin, Items: sc.items, Contact: sc.contact}
+	algorithm, decoder := splitAlgo(algo)
+	req := PackRequest{Mode: sc.mode, Algorithm: algorithm, Decoder: decoder, Bin: sc.bin, Items: sc.items, Contact: sc.contact}
 	volByID := make(map[string]float64, len(sc.items))
 	for _, it := range sc.items {
 		volByID[it.ID] = binVolume(sc.mode, BinSpec{Width: it.Width, Height: it.Height, Depth: it.Depth})
@@ -268,7 +278,7 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 	// different: they are *designed* to run until the deadline and return their
 	// best-so-far, so consuming the budget is expected, not a failure — we record
 	// what they achieved and flag the row as budget-bound rather than DNF.
-	anytime := anytimeAlgos[algo]
+	anytime := anytimeAlgos[algorithm]
 	var resp PackResponse
 	dnf, ranToBudget := false, false
 	b.ReportAllocs()
@@ -363,6 +373,13 @@ func BenchmarkAlgos3DCartons(b *testing.B) { runScenario(b, benchScenario(b, "3d
 // and block packers — which cap per-step work — finish. It's the case that
 // separates "scales" from "doesn't".
 func BenchmarkAlgos3DMega(b *testing.B) { runScenario(b, benchScenario(b, "3d-mega")) }
+
+// BenchmarkAlgos3DChunky is the small, ordering-sensitive instance: 24 sizable
+// boxes (sides 5–7) into a 12×12×12 bin, where a 7 pairs only with a 5 on a side
+// and how items group into bins sets the count. It's the regime the order-search
+// metaheuristics are for — rr/arr save a bin the greedy/constructive packers
+// strand — which the bin-count-saturated scenarios above never exercise.
+func BenchmarkAlgos3DChunky(b *testing.B) { runScenario(b, benchScenario(b, "3d-chunky")) }
 
 func BenchmarkAlgos2D(b *testing.B) { runScenario(b, benchScenario(b, "2d")) }
 

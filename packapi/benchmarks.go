@@ -97,6 +97,8 @@ func loadBenchScenarios() []BenchScenario {
 			sc.Items = benchMix(s.Mode, s.Gen.N, s.Gen.Seed)
 		case "cartons":
 			sc.Items = benchCartons(s.Gen.N, s.Gen.Seed)
+		case "chunky":
+			sc.Items = benchChunky(s.Gen.N, s.Gen.Seed)
 		default:
 			panic(fmt.Sprintf("packapi: benchmarks.json scenario %q: unknown gen kind %q", s.Slug, s.Gen.Kind))
 		}
@@ -136,6 +138,24 @@ func benchMix(mode string, n int, seed uint32) []ItemSpec {
 			sz := []float64{1, 2, 2, 3, 3, 4, 4, 5, 6}
 			out[i] = ItemSpec{ID: strconv.Itoa(i), Width: pick(sz), Depth: pick(sz), Height: pick(sz), AllowRotate: true}
 		}
+	}
+	return out
+}
+
+// benchChunky builds n sizable cub-ish boxes with each side drawn from {5,6,7},
+// destined for a 12×12×12 bin. The point is combinatorial tension: on a side of 12
+// a 7 pairs only with a 5 (7+5=12), 6 pairs with 6, but 6+7 and 7+7 overflow — so
+// how items are *grouped* into bins decides the bin count, and a greedy decreasing
+// pass can strand a bin that reordering (rr/arr) recovers. This is the small,
+// ordering-sensitive regime where the order-search metaheuristics earn their cost,
+// which the other (bin-count-saturated) 3-D scenarios don't exercise.
+func benchChunky(n int, seed uint32) []ItemSpec {
+	next := benchLCG(seed)
+	sides := []float64{5, 6, 7}
+	pick := func() float64 { return sides[int(next()*float64(len(sides)))%len(sides)] }
+	out := make([]ItemSpec, n)
+	for i := range out {
+		out[i] = ItemSpec{ID: strconv.Itoa(i), Width: pick(), Depth: pick(), Height: pick(), AllowRotate: true}
 	}
 	return out
 }

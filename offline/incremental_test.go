@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/W-Floyd/go-pack-bins/d3"
 	"github.com/W-Floyd/go-pack-bins/offline"
@@ -98,4 +99,57 @@ func TestRuinRecreateDecodeFactory(t *testing.T) {
 	r := offline.RuinRecreate(context.Background(), items, strong,
 		offline.SearchOptions{MaxIters: 300, DecodeFactory: cheap})
 	assertAccountsForAll(t, items, r)
+}
+
+// A wall-clock Deadline must stop the search promptly (not run all MaxIters) and
+// still return a valid, complete packing.
+func TestRuinRecreateDeadline(t *testing.T) {
+	const bw, bd, bh = 20.0, 20.0, 20.0
+	items := mixed3D(300, bw, bd, bh, 11)
+	factory := d3.NewFactory(bw, bd, bh, d3.NewEMSStrategyContact(d3.ContactSpec{}))
+
+	t0 := time.Now()
+	r := offline.RuinRecreate(context.Background(), items, factory,
+		offline.SearchOptions{MaxIters: 1 << 30, Deadline: time.Now().Add(300 * time.Millisecond)})
+	elapsed := time.Since(t0)
+	assertAccountsForAll(t, items, r)
+	if elapsed > 3*time.Second {
+		t.Fatalf("deadline ignored: ran %v for a 300ms budget", elapsed)
+	}
+}
+
+// An already-expired deadline must bound even the initial construction: the search
+// returns promptly and still accounts for every item (unbuilt ones as unplaced),
+// rather than running the full O(n·placement) build before noticing the budget.
+func TestRuinRecreateDeadlineBoundsInitialBuild(t *testing.T) {
+	const bw, bd, bh = 20.0, 20.0, 20.0
+	items := mixed3D(500, bw, bd, bh, 5)
+	factory := d3.NewFactory(bw, bd, bh, d3.NewEMSStrategyContact(d3.ContactSpec{}))
+
+	t0 := time.Now()
+	r := offline.RuinRecreate(context.Background(), items, factory,
+		offline.SearchOptions{MaxIters: 1 << 30, Deadline: time.Now().Add(-time.Second)})
+	elapsed := time.Since(t0)
+	assertAccountsForAll(t, items, r)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("initial build not bounded by deadline: ran %v", elapsed)
+	}
+}
+
+// The Snapshot observer must fire at least once (the initial packing) and only
+// ever hand back valid, complete packings.
+func TestRuinRecreateSnapshot(t *testing.T) {
+	const bw, bd, bh = 20.0, 20.0, 20.0
+	items := mixed3D(120, bw, bd, bh, 3)
+	factory := d3.NewFactory(bw, bd, bh, d3.NewEMSStrategyContact(d3.ContactSpec{}))
+
+	var snaps int
+	opts := offline.SearchOptions{MaxIters: 300, Snapshot: func(r pack.Result) {
+		snaps++
+		assertAccountsForAll(t, items, r)
+	}}
+	offline.RuinRecreate(context.Background(), items, factory, opts)
+	if snaps == 0 {
+		t.Fatal("Snapshot never fired")
+	}
 }

@@ -42,6 +42,16 @@
       "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble", "rr", "arr"]
     },
     {
+      "slug": "3d-chunky",
+      "group": "3D · combinatorial",
+      "mode": "3d",
+      "title": "24 chunky boxes (sides 5–7) into 12×12×12",
+      "desc": "24 sizable boxes (sides 5–7) into a 12×12×12 bin — how items combine into a bin decides the count, so the order-search metaheuristics (rr/arr) can save a bin the greedy/constructive packers strand",
+      "bin": { "width": 12, "depth": 12, "height": 12 },
+      "gen": { "kind": "chunky", "n": 24, "seed": 11 },
+      "algos": ["ff", "ffd", "bfd", "blf", "ems", "fit", "columns", "blocks", "assemble", "rr", "arr"]
+    },
+    {
       "slug": "2d",
       "group": "2D",
       "mode": "2d",

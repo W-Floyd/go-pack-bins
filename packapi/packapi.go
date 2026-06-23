@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/W-Floyd/go-pack-bins/d1"
 	"github.com/W-Floyd/go-pack-bins/d2"
@@ -475,6 +476,8 @@ type PackRequest struct {
 	//   beam_width, beam_branch, beam_max_items          (algorithm "beam")
 	//   brute_max_items                                  (algorithm "brute")
 	//   search_max_iters, search_restarts, search_seed   (algorithms "rr", "grasp")
+	//   search_fast_decode                               (3-D rr/arr/grasp: cheap surrogate decoder)
+	//   time_limit_ms                                    (anytime searches: wall-clock cap)
 	//   refine_max_items, refine_eval_budget             (balancing algorithms)
 	AlgorithmOptions map[string]float64 `json:"algorithm_options,omitempty"`
 	// Decoder selects the 3-D placement strategy that the order-search
@@ -534,12 +537,39 @@ func (req PackRequest) bruteForceOptions(ctx context.Context, key func(pack.Item
 func (req PackRequest) searchOptions(ctx context.Context) offline.SearchOptions {
 	// Seed is passed through unclamped (0 → solver default); it changes the random
 	// stream, not the search cost.
+	maxIters := req.optInt("search_max_iters", maxSearchMaxIters)
+	var deadline time.Time
+	if d := req.timeLimit(); d > 0 {
+		deadline = time.Now().Add(d)
+		// With a wall-clock budget and no explicit iteration cap, let time be the
+		// only limiter rather than stopping early at the 2000-iteration default.
+		if maxIters == 0 {
+			maxIters = maxSearchMaxIters
+		}
+	}
 	return offline.SearchOptions{
 		Seed:     int64(req.AlgorithmOptions["search_seed"]),
-		MaxIters: req.optInt("search_max_iters", maxSearchMaxIters),
+		MaxIters: maxIters,
 		Restarts: req.optInt("search_restarts", maxSearchRestarts),
 		Progress: progressFromCtx(ctx),
+		Deadline: deadline,
+		Snapshot: snapshotFromCtx(ctx),
 	}
+}
+
+// timeLimit returns the wall-clock cap for an anytime search from the
+// "time_limit_ms" option, clamped to a sane ceiling. Zero means no limit.
+func (req PackRequest) timeLimit() time.Duration {
+	ms := req.AlgorithmOptions["time_limit_ms"]
+	if ms <= 0 {
+		return 0
+	}
+	const maxLimit = 600 * time.Second
+	d := time.Duration(ms) * time.Millisecond
+	if d > maxLimit {
+		d = maxLimit
+	}
+	return d
 }
 
 func (req PackRequest) refineOptions() offline.RefineOptions {
@@ -699,6 +729,9 @@ const streamBatch = 64
 //   - "reposition": sent once after the batches when a relocating post-pass (settle
 //     for the layered packers, lateral compaction) ran; Placements holds the final
 //     position of every item, which the client applies over what it streamed.
+//   - "snapshot": the current best packing of an anytime search (rr/arr), emitted
+//     as it converges. Placements is the full set (a complete replacement of the
+//     view, like reposition); BinsUsed is the current bin count.
 //   - "done":  terminal; carries the authoritative final summary.
 //   - "error": fatal error; terminal.
 type StreamFrame struct {
@@ -743,6 +776,21 @@ var progressKey progressCtxKey
 
 func progressFromCtx(ctx context.Context) pack.ProgressObserver {
 	if fn, ok := ctx.Value(progressKey).(pack.ProgressObserver); ok {
+		return fn
+	}
+	return nil
+}
+
+// snapshotKey carries a current-best-packing observer through ctx, mirroring
+// progressKey, so an anytime search can hand its improving solution back to
+// StreamPack for live "snapshot" frames without changing the pack1D/2D/3D
+// signatures. nil (the non-streaming path) means no snapshot sink.
+type snapshotCtxKey struct{}
+
+var snapshotKey snapshotCtxKey
+
+func snapshotFromCtx(ctx context.Context) func(pack.Result) {
+	if fn, ok := ctx.Value(snapshotKey).(func(pack.Result)); ok {
 		return fn
 	}
 	return nil
@@ -816,6 +864,15 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		return
 	}
 
+	// Anytime improvement searches (rr/arr) don't commit placements one-at-a-time,
+	// so they can't stream batches — but they do produce an improving *best* packing.
+	// Show that converging live: emit a "snapshot" frame (full placements) whenever
+	// the search beats its incumbent, then the authoritative final state.
+	if isPreviewable(req) {
+		streamPreview(ctx, send, req)
+		return
+	}
+
 	streaming := isStreamable(req)
 	send(StreamFrame{Type: "meta", Count: len(req.Items), Streaming: streaming})
 
@@ -869,6 +926,90 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, BestPacker: resp.BestPacker,
 		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors,
 		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected})
+}
+
+// snapshotInterval throttles live "snapshot" frames so an early burst of small
+// improvements doesn't flood the wire; the final state is always sent in full.
+const snapshotInterval = 120 * time.Millisecond
+
+// isPreviewable reports whether req's solve is an anytime improvement search that
+// emits live "snapshot" frames (the current best packing) as it converges, rather
+// than streaming placements one batch at a time. Catalog mode is handled earlier.
+func isPreviewable(req PackRequest) bool {
+	if len(req.Containers) > 0 {
+		return false
+	}
+	switch req.Algorithm {
+	case "rr", "arr":
+		return req.Mode == "1d" || req.Mode == "2d" || req.Mode == "3d"
+	}
+	return false
+}
+
+// snapshotResponse converts an in-progress pack.Result to a PackResponse for a
+// "snapshot" frame, using the same per-mode builder as the final response.
+func snapshotResponse(req PackRequest, r pack.Result) PackResponse {
+	switch req.Mode {
+	case "1d":
+		sizeByID := make(map[string]float64, len(req.Items))
+		for _, s := range req.Items {
+			sizeByID[s.ID] = s.Width
+		}
+		return buildResponse1D(r, req.Bin.Width, sizeByID)
+	case "2d":
+		return buildResponse2D(r, false)
+	default:
+		return buildResponse3D(r)
+	}
+}
+
+// streamPreview runs an anytime search (rr/arr), emitting a "snapshot" frame —
+// the full current-best placement set — each time the search improves (throttled
+// by snapshotInterval), then the authoritative final state and a "done" frame.
+// The search reports its improving best through the snapshot observer on ctx
+// (see snapshotFromCtx / searchOptions); the wall-clock time limit, if any, is
+// applied via SearchOptions.Deadline, so it works under js/wasm too.
+func streamPreview(ctx context.Context, send func(StreamFrame), req PackRequest) {
+	send(StreamFrame{Type: "meta", Count: len(req.Items), Streaming: false})
+
+	var mu sync.Mutex
+	var last time.Time
+	emitSnap := func(r pack.Result) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if !last.IsZero() && now.Sub(last) < snapshotInterval {
+			return // throttled — a later snapshot (or the final state) supersedes this
+		}
+		last = now
+		resp := snapshotResponse(req, r)
+		send(StreamFrame{Type: "snapshot", Placements: resp.Placements,
+			BinsUsed: resp.BinsUsed, Unplaced: resp.Unplaced})
+	}
+	ctx = context.WithValue(ctx, snapshotKey, func(r pack.Result) { emitSnap(r) })
+
+	var resp PackResponse
+	var err error
+	switch req.Mode {
+	case "1d":
+		resp, err = pack1D(ctx, req)
+	case "2d":
+		resp, err = pack2D(ctx, req)
+	case "3d":
+		resp, err = pack3D(ctx, req)
+	}
+	if err != nil {
+		resp = PackResponse{Error: err.Error()}
+	}
+	if resp.Error != "" {
+		send(StreamFrame{Type: "error", Error: resp.Error})
+		return
+	}
+	// Final authoritative state (full replacement), then the summary.
+	send(StreamFrame{Type: "snapshot", Placements: resp.Placements,
+		BinsUsed: resp.BinsUsed, Unplaced: resp.Unplaced})
+	send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, BestPacker: resp.BestPacker,
+		Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors})
 }
 
 // isStreamable reports whether req's solve streams its placements. The packer's
