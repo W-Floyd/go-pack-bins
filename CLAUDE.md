@@ -58,12 +58,16 @@ lives in `$(go env GOROOT)/lib/wasm/`).
   `PackAllCtx` (and `pack.CtxOfflinePacker`); exact solvers have `...Ctx` variants;
   HTTP handlers pass `r.Context()`. Sample `ctx.Err()` in hot loops, don't check
   every iteration.
-- **Adding an algorithm:** implement it (usually in `offline`/`d3`), wire a case in
-  `packapi.pack1D/pack2D/pack3D` (early-return block in 3-D, switch case in 1-D/2-D),
-  add it to the `ALGOS` arrays in `cmd/webdemo/static/index.html`, add it to
-  `isStreamable` only if it commits placements incrementally, and add a `packapi`
-  test. Attribute any literature/repo source in ATTRIBUTION.md and the file's doc
-  comment.
+- **Adding an algorithm:** implement it (usually in `offline`/`d3`), then (1) register
+  a solver in `packapi/algos_<mode>.go` via `registerSolve("<mode>", "<id>", fn)` — the
+  `pack1D/2D/3D` switches are gone, dispatch is a registry lookup; (2) advertise it in
+  `packapi.AlgoCapabilities()` (per-mode label + any tunables/decoder/balanceable/panel
+  caps) so both front-ends pick it up automatically — the frontend self-configures from
+  `/api/algos`, so **no `index.html` edit is needed**; (3) add it to `isStreamable` only
+  if it commits placements incrementally. The drift tests (`TestRegistryMatchesCapabilities`,
+  `TestAdvertisedAlgosSolve`) enforce that the registered set and the advertised set match
+  and every advertised algo solves — so forgetting (1) or (2) fails CI. Attribute any
+  literature/repo source in ATTRIBUTION.md and the file's doc comment.
 - **The frontend is one file** (`cmd/webdemo/static/index.html`, ~2.8k lines, inline
   JS + three.js from CDN). It is **dual-mode**: served by the Go server it calls
   `/api/*`; the `dist/` bundle sets `window.PACK_WASM` and routes through the Web
