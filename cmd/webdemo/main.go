@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/W-Floyd/go-pack-bins/packapi"
 )
@@ -18,6 +19,9 @@ func main() {
 	http.HandleFunc("/api/pack/stream", handlePackStream)
 	http.HandleFunc("/api/pack/nested", handleNestedPack)
 	http.HandleFunc("/api/voids", handleVoids)
+	http.HandleFunc("/api/algos", handleAlgos)
+	http.HandleFunc("/api/presets", handlePresets)
+	http.HandleFunc("/api/generate", handleGenerate)
 	log.Println("Listening on :8082")
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }
@@ -32,6 +36,40 @@ func cors(w http.ResponseWriter, r *http.Request) (preflight bool) {
 		return true
 	}
 	return false
+}
+
+// handleAlgos serves the algorithm-capabilities document the frontend fetches on
+// load to self-configure (dropdowns, tunables, decoder selector, feature panels).
+func handleAlgos(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if cors(w, r) {
+		return
+	}
+	json.NewEncoder(w).Encode(packapi.AlgoCapabilities())
+}
+
+// handlePresets serves the ready-made demo setups the frontend's "Load preset"
+// menu offers (curated demos + benchmark instances from benchmarks.json).
+func handlePresets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if cors(w, r) {
+		return
+	}
+	json.NewEncoder(w).Encode(packapi.Presets())
+}
+
+// handleGenerate materialises a generator preset's items on demand (mode/kind/n/seed
+// query params), so large/benchmark presets ship as a tiny spec rather than a giant
+// item list. Generation lives in packapi (single source, shared with benchmarks).
+func handleGenerate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if cors(w, r) {
+		return
+	}
+	q := r.URL.Query()
+	n, _ := strconv.Atoi(q.Get("n"))
+	seed, _ := strconv.ParseUint(q.Get("seed"), 10, 32)
+	json.NewEncoder(w).Encode(packapi.GeneratePresetItems(q.Get("mode"), q.Get("kind"), n, uint32(seed)))
 }
 
 func handlePack(w http.ResponseWriter, r *http.Request) {

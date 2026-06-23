@@ -70,39 +70,33 @@ func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 	if len(req.Containers) > 0 {
 		return solveCatalog(ctx, req)
 	}
-	var resp PackResponse
-	var err error
-	switch req.Mode {
-	case "1d":
-		resp, err = pack1D(ctx, req)
-	case "2d":
-		resp, err = pack2D(ctx, req)
-	case "3d":
-		resp, err = pack3D(ctx, req)
-	default:
-		resp = PackResponse{Error: "unknown mode: " + req.Mode}
-	}
+	resp, err := dispatch(ctx, req)
 	if err != nil {
 		resp = PackResponse{Error: err.Error()}
 	}
 	return resp
 }
 
+// dispatch routes a single-container request to its mode's solver. It is the one
+// seam every solve path (PackCtx, the catalog/nested inner solves, the streaming
+// fallback) funnels through, so per-algorithm dispatch can evolve in one place
+// (see the algorithm registry) without each caller re-deciding the mode.
+func dispatch(ctx context.Context, req PackRequest) (PackResponse, error) {
+	switch req.Mode {
+	case "1d":
+		return pack1D(ctx, req)
+	case "2d":
+		return pack2D(ctx, req)
+	case "3d":
+		return pack3D(ctx, req)
+	}
+	return PackResponse{Error: "unknown mode: " + req.Mode}, nil
+}
+
 // packOneBin runs the single-container solve for req's mode (no catalog).
 func packOneBin(ctx context.Context, req PackRequest) PackResponse {
 	req.Containers = nil
-	switch req.Mode {
-	case "1d":
-		r, err := pack1D(ctx, req)
-		return foldErr(r, err)
-	case "2d":
-		r, err := pack2D(ctx, req)
-		return foldErr(r, err)
-	case "3d":
-		r, err := pack3D(ctx, req)
-		return foldErr(r, err)
-	}
-	return PackResponse{Error: "unknown mode: " + req.Mode}
+	return foldErr(dispatch(ctx, req))
 }
 
 func foldErr(r PackResponse, err error) PackResponse {
@@ -897,18 +891,7 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 
 	// Non-incremental algorithms (auto, exact solvers, balancing, compaction):
 	// no honest partial state exists, so solve fully and send the result at once.
-	var resp PackResponse
-	var err error
-	switch req.Mode {
-	case "1d":
-		resp, err = pack1D(ctx, req)
-	case "2d":
-		resp, err = pack2D(ctx, req)
-	case "3d":
-		resp, err = pack3D(ctx, req)
-	default:
-		resp = PackResponse{Error: "unknown mode: " + req.Mode}
-	}
+	resp, err := dispatch(ctx, req)
 	if err != nil {
 		resp = PackResponse{Error: err.Error()}
 	}

@@ -30,6 +30,31 @@ type BenchScenario struct {
 	Contact ContactSpec
 	Items   []ItemSpec
 	Algos   []string
+	Gen     BenchGen // the deterministic generator (kind+n+seed) that produced Items
+}
+
+// BenchGen is a scenario's item-generator spec: deterministic from kind+n+seed, so
+// a preset can carry it (instead of the expanded items) and have the same instance
+// regenerated on demand. See GenerateItems.
+type BenchGen struct {
+	Kind string
+	N    int
+	Seed uint32
+}
+
+// GenerateItems reproduces a generated instance from its spec — the same item set a
+// benchmark scenario of (mode, kind, n, seed) holds. It is the single source of the
+// generators, shared by the benchmark loader and the on-demand preset generator.
+func GenerateItems(mode, kind string, n int, seed uint32) []ItemSpec {
+	switch kind {
+	case "mix":
+		return benchMix(mode, n, seed)
+	case "cartons":
+		return benchCartons(n, seed)
+	case "chunky":
+		return benchChunky(n, seed)
+	}
+	return nil
 }
 
 // benchFile mirrors the on-disk JSON shape; items are described by a generator
@@ -88,6 +113,7 @@ func loadBenchScenarios() []BenchScenario {
 			Slug: s.Slug, Group: s.Group, Mode: s.Mode, Title: s.Title, Desc: s.Desc,
 			Bin:   BinSpec{Width: s.Bin.Width, Height: s.Bin.Height, Depth: s.Bin.Depth},
 			Algos: s.Algos,
+			Gen:   BenchGen{Kind: s.Gen.Kind, N: s.Gen.N, Seed: s.Gen.Seed},
 		}
 		if s.Contact != nil {
 			sc.Contact = *s.Contact

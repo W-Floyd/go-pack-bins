@@ -878,85 +878,93 @@ let innerCatalog = []; // carton container types (nested inner level)
 let innerCatalogEnabled = false;
 let innerLexObjectives = []; // ordered objective keys for the inner "lex" algorithm
 
-// ── algorithm lists ──────────────────────────────────────────────────────────
-const ALGOS = {
-  '1d': [
-    {v:'auto',l:'Auto (best-of)'},
-    {v:'ff',  l:'First Fit (FF)'},
-    {v:'nf',  l:'Next Fit (NF)'},
-    {v:'nkf', l:'Next K-Fit (NkF, k=3)'},
-    {v:'bf',  l:'Best Fit (BF)'},
-    {v:'wf',  l:'Worst Fit (WF)'},
-    {v:'awf', l:'Almost Worst Fit (AWF)'},
-    {v:'rff', l:'Refined First Fit (RFF)'},
-    {v:'hk',  l:'Harmonic-k (H11)'},
-    {v:'ss',  l:'Sum of Squares (SS)'},
-    {v:'ffd', l:'First Fit Decreasing (FFD)'},
-    {v:'bfd', l:'Best Fit Decreasing (BFD)'},
-    {v:'nfd', l:'Next Fit Decreasing (NFD)'},
-    {v:'wfd', l:'Worst Fit Decreasing (WFD)'},
-    {v:'mffd',l:'Modified FFD (MFFD)'},
-    {v:'kk',  l:'Karmarkar-Karp (KK)'},
-    {v:'bc',  l:'Bin Completion (exact)'},
-    {v:'brute',l:'Brute-force order (small N)'},
-    {v:'beam', l:'Beam search'},
-    {v:'rr',   l:'Ruin & recreate'},
-    {v:'grasp',l:'GRASP'},
-    {v:'gbpp', l:'GBPP (optional items + profit)'},
-    {v:'lex',  l:'Lexicographic objectives'},
-    {v:'pref',l:'Preference-Fit'},
-  ],
-  '2d': [
-    {v:'auto',       l:'Auto (best-of)'},
-    {v:'ff',         l:'First Fit / MaxRects'},
-    {v:'guillotine', l:'First Fit / Guillotine'},
-    {v:'skyline',    l:'First Fit / Skyline'},
-    {v:'nf',         l:'Next Fit'},
-    {v:'bf',         l:'Best Fit'},
-    {v:'wf',         l:'Worst Fit'},
-    {v:'ffd',        l:'First Fit Decreasing (FFD)'},
-    {v:'bfd',        l:'Best Fit Decreasing (BFD)'},
-    {v:'nfd',        l:'Next Fit Decreasing (NFD)'},
-    {v:'nfdh',       l:'Shelf NFDH (decreasing height)'},
-    {v:'ffdh',       l:'Shelf FFDH (decreasing height)'},
-    {v:'bfdh',       l:'Shelf BFDH (decreasing height)'},
-    {v:'brute',      l:'Brute-force order (small N)'},
-    {v:'beam',       l:'Beam search'},
-    {v:'rr',         l:'Ruin & recreate'},
-    {v:'grasp',      l:'GRASP'},
-    {v:'gbpp',       l:'GBPP (optional items + profit)'},
-    {v:'lex',        l:'Lexicographic objectives'},
-    {v:'pref',       l:'Preference-Fit'},
-  ],
-  '3d': [
-    {v:'auto',l:'Auto (best-of)'},
-    {v:'ff',  l:'First Fit / Extreme-point'},
-    {v:'joint',l:'Joint (balance + placement, one pass)'},
-    {v:'laff',l:'Largest-Area-Fit-First (layers)'},
-    {v:'layer',l:'Layered (flat, sequential — streams)'},
-    {v:'blocks',l:'Block-building (fused layers — streams)'},
-    {v:'columns',l:'Column-building (fused columns — streams)'},
-    {v:'assemble',l:'Assemble blocks → EMS (streams)'},
-    {v:'blf', l:'Bottom-Left Fill (BLF)'},
-    {v:'ems', l:'Empty Maximal Space (EMS)'},
-    {v:'fit', l:'Fitness best-fit (max contact)'},
-    {v:'heightmap', l:'Heightmap / skyline'},
-    {v:'nf',  l:'Next Fit'},
-    {v:'bf',  l:'Best Fit'},
-    {v:'wf',  l:'Worst Fit'},
-    {v:'ffd', l:'First Fit Decreasing (FFD)'},
-    {v:'bfd', l:'Best Fit Decreasing (BFD)'},
-    {v:'nfd', l:'Next Fit Decreasing (NFD)'},
-    {v:'brute',l:'Brute-force order (small N)'},
-    {v:'beam', l:'Beam search'},
-    {v:'rr',   l:'Ruin & recreate'},
-    {v:'arr',  l:'Adaptive ruin & recreate'},
-    {v:'grasp',l:'GRASP'},
-    {v:'gbpp', l:'GBPP (optional items + profit)'},
-    {v:'lex',  l:'Lexicographic objectives'},
-    {v:'pref',l:'Preference-Fit'},
-  ],
+// ── algorithm registry (self-configured from /api/algos) ─────────────────────
+// REG is the single source of truth for the algorithm dropdowns, advanced
+// tunables, the 3-D decoder selector, balance/feature-panel gating, and the
+// lexicographic-objective labels. It is fetched from the backend on load
+// (loadConfig), so adding/removing an algorithm server-side reconfigures the UI
+// with no frontend change. FALLBACK_REGISTRY is a tiny lifeboat: if the config
+// can't be loaded the UI stays usable with the always-present algorithms (a stale
+// lifeboat only affects the load-failure path, never normal operation).
+const FALLBACK_REGISTRY = {
+  modes: {
+    '1d': [{id:'auto',label:'Auto (best-of)'},{id:'ff',label:'First Fit'},{id:'ffd',label:'First Fit Decreasing'},{id:'bfd',label:'Best Fit Decreasing'}],
+    '2d': [{id:'auto',label:'Auto (best-of)'},{id:'ff',label:'First Fit'},{id:'ffd',label:'First Fit Decreasing'},{id:'bfd',label:'Best Fit Decreasing'}],
+    '3d': [{id:'auto',label:'Auto (best-of)'},{id:'ff',label:'First Fit'},{id:'ffd',label:'First Fit Decreasing'},{id:'bfd',label:'Best Fit Decreasing'}],
+  },
+  algos: {}, decoders: [], lex_objectives: [],
 };
+let REG = FALLBACK_REGISTRY;
+
+// Accessors over REG — the only way the rest of the UI reads algorithm config.
+function algosForMode(mode) { return (REG.modes && REG.modes[mode]) || []; }
+function algoCaps(id) { return (REG.algos && REG.algos[id]) || {}; }
+function algoTunables(id) { return algoCaps(id).tunables || []; }
+function decoderOptions() { return REG.decoders || []; }
+function lexOptions() { return REG.lex_objectives || []; }
+function lexLabel(v) { const o = lexOptions().find(x => x.value === v); return o ? o.label : v; }
+
+// fetchConfig retrieves one backend config document by name — over /api/<name> on
+// the server, or the worker's go<Name>() in the WASM bundle — with a timeout.
+function fetchConfig(name) {
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  if (WASM_MODE) {
+    return withTimeout(new Promise((resolve) => {
+      const seq = packSeq;
+      packFrameHandler = (msg) => { if (msg.result) resolve(msg.result); };
+      packWorkerRef().postMessage({ kind: name, reqId: seq });
+    }), 15000);
+  }
+  return withTimeout(fetch('/api/' + name).then(r => r.json()), 8000);
+}
+
+// loadConfig self-configures the UI from the backend: the algorithm registry (REG)
+// and the demo presets (PRESETS). On any failure it logs and leaves the lifeboat /
+// empty preset list in place so the page still works. The two are fetched serially
+// because in WASM mode they share the single worker request slot.
+async function loadConfig() {
+  try {
+    const algos = await fetchConfig('algos');
+    if (algos && algos.modes) REG = algos;
+    else throw new Error('empty algorithm config');
+  } catch (e) {
+    console.error('loadConfig: algorithms failed; using fallback registry:', e);
+  }
+  try {
+    const presets = await fetchConfig('presets');
+    if (presets && typeof presets === 'object') PRESETS = presets;
+  } catch (e) {
+    console.error('loadConfig: presets failed; preset menu will be empty:', e);
+  }
+  refreshRegistryControls();
+}
+
+// generateItems materialises a generator preset's items on demand — over
+// /api/generate on the server, or the worker's goGenerate() in the WASM bundle.
+// In WASM mode it bumps packSeq to supersede any in-flight pack (loading a preset
+// replaces the setup), reusing the single worker request slot.
+function generateItems(mode, gen) {
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  if (WASM_MODE) {
+    const seq = ++packSeq;
+    return withTimeout(new Promise((resolve) => {
+      packFrameHandler = (msg) => { if (msg.result) resolve(msg.result); };
+      packWorkerRef().postMessage({ kind: 'generate', reqId: seq, body: { mode, kind: gen.kind, n: gen.n, seed: gen.seed || 0 } });
+    }), 30000);
+  }
+  const q = new URLSearchParams({ mode, kind: gen.kind, n: String(gen.n), seed: String(gen.seed || 0) });
+  return withTimeout(fetch('/api/generate?' + q).then(r => r.json()), 30000);
+}
+
+// refreshRegistryControls fills the registry-driven static controls (the lex
+// objective pickers) from REG; the dropdowns/tunables are rebuilt per mode/algo.
+function refreshRegistryControls() {
+  const opts = lexOptions().map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+  for (const id of ['lex-pick', 'inner-lex-pick']) {
+    const el = document.getElementById(id);
+    if (el && opts) el.innerHTML = opts;
+  }
+}
 
 // ── init ─────────────────────────────────────────────────────────────────────
 function onModeChange() {
@@ -1019,17 +1027,17 @@ function onModeChange() {
   updateBalanceVisibility();
 }
 
-// Algorithms that can host balance objectives (see backend isBalanceable).
+// Algorithms that can host balance objectives (registry `balanceable` flag).
 // The ⚖ marker in the dropdown flags them.
-function balanceableAlgo(v) { return v === 'bf' || v === 'wf' || v === 'pref' || v === 'auto' || v === 'joint'; }
-function algoLabel(a) { return balanceableAlgo(a.v) ? a.l + ' ⚖' : a.l; }
+function balanceableAlgo(v) { return !!algoCaps(v).balanceable; }
+function algoLabel(a) { return balanceableAlgo(a.id) ? a.label + ' ⚖' : a.label; }
 
 function buildAlgorithmSelect(mode) {
   const sel = document.getElementById('algorithm');
   sel.innerHTML = '';
-  for (const a of ALGOS[mode]) {
+  for (const a of algosForMode(mode)) {
     const o = document.createElement('option');
-    o.value = a.v; o.textContent = algoLabel(a);
+    o.value = a.id; o.textContent = algoLabel(a);
     sel.appendChild(o);
   }
 }
@@ -1221,7 +1229,7 @@ function renderInnerLexObjectives() {
     row.className = 'item-row';
     row.innerHTML = `
       <span class="item-id">${idx + 1}.</span>
-      <span class="item-dims" style="flex:1">${LEX_LABELS[o] || o}</span>
+      <span class="item-dims" style="flex:1">${lexLabel(o)}</span>
       <button class="remove-btn" onclick="removeInnerLexObjective(${idx})">✕</button>`;
     el.appendChild(row);
   });
@@ -1280,9 +1288,9 @@ function buildInnerBinFields(mode) {
 function buildInnerAlgorithmSelect(mode) {
   const sel = document.getElementById('inner-algorithm');
   sel.innerHTML = '';
-  for (const a of ALGOS[mode]) {
+  for (const a of algosForMode(mode)) {
     const o = document.createElement('option');
-    o.value = a.v; o.textContent = algoLabel(a);
+    o.value = a.id; o.textContent = algoLabel(a);
     sel.appendChild(o);
   }
 }
@@ -1413,26 +1421,6 @@ function removePreference(lvl, idx) {
   scheduleAutoPack();
 }
 
-// Per-algorithm advanced tunables. Keys match packapi AlgorithmOptions; values
-// are clamped server-side, so the placeholder just shows the default.
-const REFINE_KNOBS = [
-  { key: 'refine_max_items', label: 'Refine max items', def: 80 },
-  { key: 'refine_eval_budget', label: 'Refine eval budget', def: 40000 },
-];
-// Wall-clock cap for the anytime searches. The input is in seconds; scale converts
-// to the time_limit_ms key the server reads. Blank = run to the iteration cap.
-const TIME_LIMIT_KNOB = { key: 'time_limit_ms', label: 'Time limit (s)', def: 'none', scale: 1000, min: 0, step: 0.5 };
-const ALGO_TUNABLES = {
-  beam:  [ { key: 'beam_width', label: 'Beam width', def: 6 }, { key: 'beam_branch', label: 'Branch', def: 4 }, { key: 'beam_max_items', label: 'Max items', def: 200 }, TIME_LIMIT_KNOB ],
-  brute: [ { key: 'brute_max_items', label: 'Max items (n!)', def: 8 } ],
-  rr:    [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
-  arr:   [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
-  grasp: [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_restarts', label: 'Restarts', def: 16 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
-  bf:    REFINE_KNOBS,
-  wf:    REFINE_KNOBS,
-  pref:  REFINE_KNOBS,
-};
-
 // algoPanelIds maps a panel ('outer' = main/pallet controls, 'inner' = carton
 // controls in nested mode) to its tuning field/input container element ids.
 function algoPanelIds(which) {
@@ -1441,39 +1429,29 @@ function algoPanelIds(which) {
     : { field: 'algo-tuning-field', inputs: 'algo-tuning-inputs' };
 }
 
-// The order-search metaheuristics decode item orderings through a 3-D
-// constructive strategy; the decoder bounds their quality (see packapi
-// searchDecoder3D). Exposed only in 3-D for beam/rr/arr/grasp.
-const SEARCH_DECODER_ALGOS = new Set(['beam', 'rr', 'arr', 'grasp']);
-const SEARCH_DECODERS = [
-  { v: '', l: 'EMS (default, tight)' },
-  { v: 'fit', l: 'Fitness best-fit' },
-  { v: 'blf', l: 'Bottom-Left Fill' },
-  { v: 'heightmap', l: 'Heightmap' },
-  { v: 'extreme', l: 'Extreme-point (fast)' },
-];
-
+// renderAlgoTuning builds the advanced-tunable inputs (and, for 3-D order-search
+// algorithms, the decoder selector) entirely from the registry capabilities.
 function renderAlgoTuning(algo, which) {
   const ids = algoPanelIds(which);
   const field = document.getElementById(ids.field);
   const host = document.getElementById(ids.inputs);
   if (!field || !host) return;
-  const knobs = ALGO_TUNABLES[algo];
+  const knobs = algoTunables(algo);
   // The decoder selector applies to the 3-D outer panel's search algorithms only.
   const wantDecoder = which !== 'inner' &&
-    document.getElementById('mode')?.value === '3d' && SEARCH_DECODER_ALGOS.has(algo);
-  if (!knobs && !wantDecoder) { field.style.display = 'none'; host.innerHTML = ''; return; }
+    document.getElementById('mode')?.value === '3d' && !!algoCaps(algo).decoder;
+  if (knobs.length === 0 && !wantDecoder) { field.style.display = 'none'; host.innerHTML = ''; return; }
   field.style.display = '';
-  let html = (knobs || []).map(k =>
+  let html = knobs.map(k =>
     `<div class="field" style="max-width:130px">
        <label style="font-size:11px">${k.label}</label>
-       <input type="number" class="algo-tune" data-key="${k.key}" data-scale="${k.scale || 1}" min="${k.min ?? 1}" step="${k.step ?? 1}" placeholder="${k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
+       <input type="number" class="algo-tune" data-key="${k.key}" data-scale="${k.scale || 1}" min="${k.min}" step="${k.step}" placeholder="${k.def_none ? 'none' : k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
      </div>`).join('');
   if (wantDecoder) {
     html += `<div class="field" style="max-width:160px">
        <label style="font-size:11px">Decoder (placement)</label>
        <select id="algo-decoder" style="font-size:12px" onchange="scheduleAutoPack()">
-         ${SEARCH_DECODERS.map(d => `<option value="${d.v}">${d.l}</option>`).join('')}
+         ${decoderOptions().map(d => `<option value="${d.value}">${d.label}</option>`).join('')}
        </select>
      </div>`;
   }
@@ -1497,17 +1475,15 @@ function onAlgorithmChange() {
   const algo = document.getElementById('algorithm').value;
   renderAlgoTuning(algo, 'outer');
   renderAlgoTuning(document.getElementById('inner-algorithm')?.value, 'inner');
-  document.getElementById('bin-cost-field').style.display = (algo === 'gbpp') ? '' : 'none';
-  document.getElementById('lex-section').style.display = (algo === 'lex') ? '' : 'none';
+  document.getElementById('bin-cost-field').style.display = (algoCaps(algo).panel === 'bincost') ? '' : 'none';
+  document.getElementById('lex-section').style.display = (algoCaps(algo).panel === 'lex') ? '' : 'none';
   const ialgo = document.getElementById('inner-algorithm')?.value;
-  document.getElementById('inner-bin-cost-field').style.display = (ialgo === 'gbpp') ? '' : 'none';
-  document.getElementById('inner-lex-section').style.display = (ialgo === 'lex') ? '' : 'none';
+  document.getElementById('inner-bin-cost-field').style.display = (algoCaps(ialgo).panel === 'bincost') ? '' : 'none';
+  document.getElementById('inner-lex-section').style.display = (algoCaps(ialgo).panel === 'lex') ? '' : 'none';
   scheduleAutoPack();
 }
 
-// ── lexicographic objectives ────────────────────────────────────────────────
-const LEX_LABELS = { unplaced: 'Fewest unplaced', bins: 'Fewest bins', spread: 'Even fill (low spread)' };
-
+// ── lexicographic objectives (labels come from the registry; see lexLabel) ───
 function addLexObjective() {
   const v = document.getElementById('lex-pick').value;
   if (!lexObjectives.includes(v)) lexObjectives.push(v);
@@ -1530,7 +1506,7 @@ function renderLexObjectives() {
     row.className = 'item-row';
     row.innerHTML = `
       <span class="item-id">${idx + 1}.</span>
-      <span class="item-dims" style="flex:1">${LEX_LABELS[o] || o}</span>
+      <span class="item-dims" style="flex:1">${lexLabel(o)}</span>
       <button class="remove-btn" onclick="removeLexObjective(${idx})">✕</button>`;
     el.appendChild(row);
   });
@@ -1612,374 +1588,11 @@ function toggleItemRotate(id) {
 
 // ── presets ───────────────────────────────────────────────────────────────────
 
-// bigMix deterministically generates n mixed-size boxes for a mode using a small
-// LCG, so large presets are reproducible across loads. Sizes are drawn from a
-// weighted palette (small sizes repeated) to give a realistic spread. Each box
-// gets a weight scalar derived from its volume × a per-item density factor (so
-// weight tracks size but not perfectly), plus a cost scalar from an independent
-// value factor (so cost is uncorrelated with weight — a small box can be costly).
-function bigMix(mode, n, seed) {
-  let s = (seed >>> 0) || 1;
-  const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
-  const pick = arr => arr[Math.floor(rnd() * arr.length)];
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const density = pick([0.5, 1, 1, 1.5, 2]);
-    const value = pick([1, 2, 5, 10, 20, 50]);
-    let box, vol;
-    if (mode === '1d') {
-      const w = pick([1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8]);
-      box = { w }; vol = w;
-    } else if (mode === '2d') {
-      const sizes = [10, 12, 15, 18, 20, 25, 30, 35, 40, 50];
-      const w = pick(sizes), h = pick(sizes);
-      box = { w, h, rot: true }; vol = (w * h) / 80;
-    } else {
-      const sizes = [1, 2, 2, 3, 3, 4, 4, 5, 6];
-      const w = pick(sizes), d = pick(sizes), h = pick(sizes);
-      box = { w, d, h }; vol = (w * d * h) / 6;
-    }
-    box.s = { weight: Math.max(1, Math.round(vol * density)), cost: value };
-    out.push(box);
-  }
-  return out;
-}
-
-// palletMix generates n cartons drawn from a fixed SKU palette whose footprints and
-// heights divide a 12×12×12 pallet — the repeated, tile-friendly sizes of the
-// palletizing benchmark, where block-building / assembly pays off. Same palette as
-// packapi's benchPallet.
-function palletMix(n, seed) {
-  let s = (seed >>> 0) || 1;
-  const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
-  const skus = [[6,6,6],[6,6,3],[6,6,2],[6,3,3],[4,4,4],[3,3,6],[12,6,2],[6,12,3],[4,4,2],[3,6,4]];
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const k = skus[Math.floor(rnd() * skus.length)];
-    out.push({ w: k[0], d: k[1], h: k[2], rot: true });
-  }
-  return out;
-}
-
-// rotatable tags each generated box as rotation-enabled, matching the benchmark
-// instances (which all allow rotation).
-const rotatable = boxes => boxes.map(b => ({ ...b, rot: true }));
-
-const PRESETS = {
-  '1d': [
-    {
-      label: 'Classic mix',
-      bin: {w:10}, algo: 'ffd',
-      items: [6,6,5,5,4,4,3,3,2,2,1].map(s => ({w:s})),
-    },
-    {
-      label: 'Weight limit (max 8 kg)',
-      bin: {w:10}, algo: 'ff',
-      constraints: [{scalar:'weight', op:'max', value:8}],
-      items: [
-        {w:5, s:{weight:6}}, {w:5, s:{weight:6}},
-        {w:4, s:{weight:4}}, {w:4, s:{weight:4}},
-        {w:3, s:{weight:2}}, {w:3, s:{weight:2}},
-        {w:2, s:{weight:1}}, {w:2, s:{weight:1}},
-      ],
-    },
-    {
-      label: 'Exact solver (Bin Completion)',
-      bin: {w:10}, algo: 'bc',
-      items: [4,4,4,4,6,6,6,6].map(s => ({w:s})),
-    },
-    {
-      label: 'Nested: Packages → Containers → Trucks',
-      nested: true,
-      innerBin: {w:20}, innerAlgo: 'ffd',
-      bin: {w:100}, algo: 'ffd',
-      items: [8,7,6,6,5,5,4,4,3,3,2,2].map(w => ({w})),
-    },
-    {
-      label: 'High-value colocate (KK)',
-      bin: {w:12}, algo: 'kk',
-      items: [
-        {w:5, s:{value:100}}, {w:5, s:{value:100}},
-        {w:4, s:{value:1}},   {w:4, s:{value:1}},
-        {w:3, s:{value:50}},  {w:3, s:{value:50}},
-        {w:2, s:{value:1}},   {w:2, s:{value:1}},
-      ],
-    },
-    {
-      label: 'Balance weight across bins',
-      bin: {w:10}, algo: 'pref',
-      preferences: [{scalar:'weight', mode:'balance', weight:1}],
-      items: [
-        {w:3, s:{weight:9}}, {w:3, s:{weight:1}},
-        {w:3, s:{weight:8}}, {w:3, s:{weight:2}},
-        {w:3, s:{weight:7}}, {w:3, s:{weight:3}},
-      ],
-    },
-    {
-      label: 'Balance item count across bins',
-      bin: {w:10}, algo: 'pref',
-      preferences: [{scalar:'', mode:'balance', weight:1}],
-      items: [6,6,1,1,1,1].map(w => ({w})),
-    },
-    {
-      label: 'Fragile items (weight + fragility cap)',
-      bin: {w:20}, algo: 'ff',
-      constraints: [
-        {scalar:'weight',    op:'max', value:30},
-        {scalar:'fragility', op:'max', value:5},
-      ],
-      items: [
-        {w:8, s:{weight:10, fragility:1}},
-        {w:8, s:{weight:10, fragility:1}},
-        {w:6, s:{weight:8,  fragility:3}},
-        {w:6, s:{weight:8,  fragility:3}},
-        {w:4, s:{weight:4,  fragility:2}},
-        {w:4, s:{weight:4,  fragility:2}},
-        {w:3, s:{weight:2,  fragility:4}},
-        {w:3, s:{weight:2,  fragility:4}},
-      ],
-    },
-    {
-      label: 'Large mixed (80 boxes)',
-      bin: {w:20}, algo: 'ffd',
-      items: bigMix('1d', 80, 11),
-    },
-    {
-      label: 'Benchmark: 1-D mixed (1000 items)',
-      bin: {w:10}, algo: 'ffd',
-      items: bigMix('1d', 1000, 11),
-    },
-  ],
-  '2d': [
-    {
-      label: 'Mixed rectangles (MaxRects)',
-      bin: {w:100, h:100}, algo: 'ff',
-      items: [[30,40],[50,20],[20,20],[40,60],[10,80],[35,35],[60,30],[25,45],[45,45],[15,90]].map(([w,h]) => ({w,h,rot:true})),
-    },
-    {
-      label: 'Guillotine cuts visible',
-      bin: {w:100, h:100}, algo: 'guillotine',
-      items: [[40,30],[30,40],[20,20],[50,20],[25,25],[10,60]].map(([w,h]) => ({w,h,rot:false})),
-    },
-    {
-      label: 'Weight limit (max 50 kg)',
-      bin: {w:100, h:100}, algo: 'ffd',
-      constraints: [{scalar:'weight', op:'max', value:50}],
-      items: [
-        {w:40, h:40, s:{weight:20}}, {w:40, h:40, s:{weight:20}},
-        {w:30, h:30, s:{weight:18}}, {w:30, h:30, s:{weight:18}},
-        {w:20, h:20, s:{weight:10}}, {w:20, h:20, s:{weight:10}},
-        {w:50, h:20, s:{weight:15}}, {w:50, h:20, s:{weight:15}},
-      ],
-    },
-    {
-      label: 'Nested: Products → Boxes → Pallet',
-      nested: true,
-      innerBin: {w:60, h:40}, innerAlgo: 'ff',
-      bin: {w:200, h:160}, algo: 'ffd',
-      items: [
-        {w:30, h:20}, {w:30, h:20},
-        {w:20, h:30}, {w:20, h:30},
-        {w:40, h:15}, {w:40, h:15},
-        {w:25, h:25}, {w:25, h:25},
-        {w:50, h:20}, {w:50, h:20},
-        {w:15, h:35}, {w:15, h:35},
-      ],
-    },
-    {
-      label: 'Fragile: keep loads light',
-      bin: {w:120, h:120}, algo: 'ff',
-      constraints: [
-        {scalar:'weight',    op:'max', value:40},
-        {scalar:'fragility', op:'max', value:4},
-      ],
-      items: [
-        {w:50, h:50, s:{weight:25, fragility:1}},
-        {w:50, h:50, s:{weight:25, fragility:1}},
-        {w:40, h:30, s:{weight:12, fragility:3}},
-        {w:40, h:30, s:{weight:12, fragility:3}},
-        {w:30, h:30, s:{weight:8,  fragility:2}},
-        {w:30, h:30, s:{weight:8,  fragility:2}},
-        {w:20, h:60, s:{weight:5,  fragility:4}},
-        {w:20, h:60, s:{weight:5,  fragility:4}},
-      ],
-    },
-    {
-      label: 'Large mixed (60 boxes)',
-      bin: {w:200, h:200}, algo: 'ffd',
-      items: bigMix('2d', 60, 22),
-    },
-    {
-      label: 'Stress test (1200 boxes)',
-      bin: {w:300, h:300}, algo: 'ffd',
-      items: bigMix('2d', 1200, 44),
-    },
-    {
-      label: 'Benchmark: 2-D mixed (400 rects)',
-      bin: {w:300, h:300}, algo: 'ffd',
-      items: bigMix('2d', 400, 22),
-    },
-  ],
-  '3d': [
-    {
-      label: '8 cubes in one bin',
-      bin: {w:10, d:10, h:10}, algo: 'ff',
-      items: Array(8).fill({w:5, d:5, h:5}),
-    },
-    {
-      label: 'Mixed boxes (FFD)',
-      bin: {w:10, d:10, h:10}, algo: 'ffd',
-      items: [[3,3,3],[5,2,4],[2,2,2],[4,4,2],[3,5,1],[6,3,2],[2,4,3],[1,1,5]].map(([w,d,h]) => ({w,d,h})),
-    },
-    {
-      label: 'Weight limit (max 20 kg)',
-      bin: {w:10, d:10, h:10}, algo: 'ff',
-      constraints: [{scalar:'weight', op:'max', value:20}],
-      items: [
-        {w:5, d:5, h:5, s:{weight:12}}, {w:5, d:5, h:5, s:{weight:12}},
-        {w:4, d:4, h:4, s:{weight:8}},  {w:4, d:4, h:4, s:{weight:8}},
-        {w:3, d:3, h:3, s:{weight:5}},  {w:3, d:3, h:3, s:{weight:5}},
-        {w:2, d:2, h:2, s:{weight:2}},  {w:2, d:2, h:2, s:{weight:2}},
-      ],
-    },
-    {
-      label: 'Container catalog: pick the best box',
-      // Eight 5³ cubes: the 8³ box holds one each (8 boxes), the 10³ holds all
-      // eight in one box, the 12³ also fits one box but wastes more — so the
-      // catalog should choose 10×10×10.
-      catalog: [{w:8, d:8, h:8}, {w:10, d:10, h:10}, {w:12, d:12, h:12}],
-      bin: {w:10, d:10, h:10}, algo: 'ffd',
-      items: Array(8).fill({w:5, d:5, h:5}),
-    },
-    {
-      label: 'Nested + GBPP: optional extras in cartons',
-      // Carton level uses GBPP (carton cost 5): a 6³ item needs its own 10³ carton.
-      // 3 core items fill 3 cartons; the high-profit extra (50 ≥ 5) earns its
-      // carton; the low-profit extra (1 < 5) is rejected. Cartons → one pallet.
-      nested: true,
-      innerBin: {w:10, d:10, h:10}, innerAlgo: 'gbpp', innerBinCost: 5,
-      bin: {w:30, d:30, h:30}, algo: 'ffd',
-      items: [
-        {w:6, d:6, h:6}, {w:6, d:6, h:6}, {w:6, d:6, h:6},   // compulsory core
-        {w:6, d:6, h:6, s:{profit:50}},                       // optional, worth a carton
-        {w:6, d:6, h:6, s:{profit:1}},                        // optional, not worth a carton
-      ],
-    },
-    {
-      label: 'Nested: Goods → Cartons → Pallet',
-      nested: true,
-      innerBin: {w:8, d:8, h:8}, innerAlgo: 'ffd',
-      bin: {w:30, d:30, h:30}, algo: 'ffd',
-      items: [
-        {w:4, d:4, h:4}, {w:4, d:4, h:4},
-        {w:3, d:4, h:3}, {w:3, d:4, h:3},
-        {w:4, d:3, h:2}, {w:4, d:3, h:2},
-        {w:2, d:2, h:4}, {w:2, d:2, h:4},
-        {w:3, d:2, h:3}, {w:3, d:2, h:3},
-        {w:2, d:4, h:3}, {w:2, d:4, h:3},
-      ],
-    },
-    {
-      label: 'Keep stacks low (minimize height)',
-      bin: {w:10, d:10, h:10}, algo: 'pref',
-      preferences: [{scalar:'', mode:'minheight', weight:1}],
-      items: [
-        {w:8, d:10, h:8}, {w:10, d:10, h:5},
-        {w:6, d:6, h:2}, {w:6, d:6, h:2},
-        {w:5, d:5, h:3}, {w:5, d:5, h:3},
-      ],
-    },
-    {
-      label: 'Stable load (minimize CG)',
-      bin: {w:10, d:10, h:10}, algo: 'pref',
-      preferences: [{scalar:'weight', mode:'mincg', weight:1}],
-      items: [
-        {w:8, d:10, h:8, s:{weight:1}}, {w:10, d:10, h:5, s:{weight:100}},
-        {w:6, d:6, h:2, s:{weight:50}}, {w:6, d:6, h:2, s:{weight:50}},
-        {w:5, d:5, h:3, s:{weight:20}}, {w:5, d:5, h:3, s:{weight:20}},
-      ],
-    },
-    {
-      label: 'Perishables: no mixed temp zones',
-      bin: {w:12, d:12, h:12}, algo: 'ffd',
-      constraints: [
-        {scalar:'weight',   op:'max',     value:25},
-        {scalar:'temp_zone', op:'allsame', value:0},
-      ],
-      items: [
-        {w:4, d:4, h:4, s:{weight:8,  temp_zone:0}},  // ambient
-        {w:4, d:4, h:4, s:{weight:8,  temp_zone:0}},
-        {w:3, d:3, h:3, s:{weight:6,  temp_zone:1}},  // chilled
-        {w:3, d:3, h:3, s:{weight:6,  temp_zone:1}},
-        {w:5, d:3, h:2, s:{weight:4,  temp_zone:1}},
-        {w:5, d:3, h:2, s:{weight:4,  temp_zone:2}},  // frozen
-        {w:2, d:2, h:6, s:{weight:3,  temp_zone:2}},
-        {w:2, d:2, h:6, s:{weight:3,  temp_zone:0}},
-      ],
-    },
-    {
-      label: 'Large mixed (60 boxes)',
-      bin: {w:12, d:12, h:12}, algo: 'ffd',
-      items: bigMix('3d', 60, 33),
-    },
-    {
-      label: 'Stress test (1200 boxes)',
-      bin: {w:20, d:20, h:20}, algo: 'ffd',
-      items: bigMix('3d', 1200, 55),
-    },
-    {
-      label: 'Catalog stress test (1500 boxes, 3 container sizes)',
-      // Packs 1500 mixed boxes into each candidate container and keeps the best
-      // type — exercises the container catalog at scale (chooses 12×12×12).
-      catalog: [{w:8, d:8, h:8}, {w:10, d:10, h:10}, {w:12, d:12, h:12}],
-      bin: {w:12, d:12, h:12}, algo: 'ffd',
-      items: bigMix('3d', 1500, 77),
-    },
-    {
-      label: 'Mega stress test (10k boxes)',
-      // 100,000 mixed boxes into a large bin. Uses Next-Fit-Decreasing — the most
-      // scalable packer here (one open bin at a time, no re-scan of closed bins) —
-      // so the solve stays linear-ish even at this size. Streams as it packs.
-      // Heavy on the renderer: expect a busy view (and reload the page to stop).
-      bin: {w:75, d:75, h:75}, algo: 'nfd',
-      items: bigMix('3d', 10000, 99),
-    },
-    {
-      label: 'Benchmark: 3-D mixed (500 boxes)',
-      bin: {w:20, d:20, h:20}, algo: 'auto',
-      items: rotatable(bigMix('3d', 500, 33)),
-    },
-    {
-      label: 'Benchmark: 3-D mixed + anti-slosh (500 boxes)',
-      bin: {w:20, d:20, h:20}, algo: 'ffd',
-      contact: {bottom: 60, side_x: 50, side_y: 50},
-      items: rotatable(bigMix('3d', 500, 33)),
-    },
-    {
-      label: 'Benchmark: carton SKUs (400, single bin)',
-      bin: {w:12, d:12, h:12}, algo: 'blocks',
-      items: palletMix(400, 5),
-    },
-    {
-      label: 'Palletizing: cartons → pallets (nested)',
-      // True palletizing: products are packed into 6×6×6 cartons (inner level,
-      // block-building), then the cartons are loaded onto a 12×12×18 pallet (outer).
-      nested: true,
-      innerBin: {w:6, d:6, h:6}, innerAlgo: 'blocks',
-      bin: {w:12, d:12, h:18}, algo: 'ffd',
-      items: rotatable(bigMix('3d', 240, 5)),
-    },
-    {
-      label: 'Stable + anti-slosh (support 80%, sides 50%)',
-      bin: {w:10, d:10, h:10}, algo: 'ff',
-      contact: {bottom: 80, side_x: 50, side_y: 50},
-      items: [
-        {w:5, d:5, h:3}, {w:5, d:5, h:3}, {w:5, d:5, h:3}, {w:5, d:5, h:3},
-        {w:4, d:6, h:2}, {w:6, d:4, h:2}, {w:3, d:3, h:4}, {w:3, d:3, h:4},
-      ],
-    },
-  ],
-};
+// ── presets (served by the backend; see loadConfig / GET /api/presets) ───────
+// PRESETS is filled from the backend on load, so demo setups — including the
+// benchmark instances compiled in from benchmarks.json — live in one place and
+// the UI carries none of that data. Empty until loadConfig() populates it.
+let PRESETS = { '1d': [], '2d': [], '3d': [] };
 
 function buildPresetSelect() {
   const mode = document.getElementById('mode').value;
@@ -1993,7 +1606,7 @@ function buildPresetSelect() {
   });
 }
 
-function loadPreset(idx) {
+async function loadPreset(idx) {
   if (idx === '' || idx === undefined) return;
   const mode = document.getElementById('mode').value;
   const preset = PRESETS[mode][parseInt(idx)];
@@ -2065,8 +1678,14 @@ function loadPreset(idx) {
   renderInnerContainerList();
   onAlgorithmChange(); // refresh GBPP/lex panel visibility for outer + inner
 
-  // Items
-  for (const spec of preset.items) {
+  // Items: either listed explicitly, or materialised on demand from a generator
+  // spec the backend served (keeps large/benchmark presets out of the payload).
+  let specItems = preset.items || [];
+  if (preset.gen) {
+    try { specItems = await generateItems(mode, preset.gen); }
+    catch (e) { console.error('preset item generation failed:', e); specItems = []; }
+  }
+  for (const spec of specItems) {
     itemCounter++;
     items.push({
       id: 'i' + itemCounter,
@@ -4077,8 +3696,11 @@ window.addEventListener('resize', () => {
 });
 
 // ── boot ──────────────────────────────────────────────────────────────────────
-onModeChange();
-clearViz();
+// Self-configure from the backend (algorithms + presets) first, then build the UI.
+loadConfig().then(() => {
+  onModeChange();
+  clearViz();
+});
 </script>
 </body>
 </html>
