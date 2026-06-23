@@ -116,6 +116,30 @@ func TestRefineVoids_SpreadsTowerAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// The gravity pre-pass lowers a floating *sub-stack* — an item with another
+// resting on it — which the per-item refiner alone can't (it only moves leaves).
+// A floats at z=4 with B stacked on it; gravitySettle drops the pair so A rests
+// on the floor (z=0) and B stays on A (z=2).
+func TestGravitySettleLowersFloatingSubstack(t *testing.T) {
+	bin := []*Placement3D{
+		{binID: "b", itemID: "A", X: 0, Y: 0, Z: 4, W: 4, D: 4, H: 2}, // floating (gap 0..4 below)
+		{binID: "b", itemID: "B", X: 0, Y: 0, Z: 6, W: 4, D: 4, H: 2}, // resting on A
+	}
+	if !gravitySettle(bin) {
+		t.Fatal("expected gravitySettle to move the sub-stack")
+	}
+	if math.Abs(bin[0].Z) > 1e-6 {
+		t.Errorf("A at z=%v, want 0 (dropped to floor)", bin[0].Z)
+	}
+	if math.Abs(bin[1].Z-2) > 1e-6 {
+		t.Errorf("B at z=%v, want 2 (still resting on A)", bin[1].Z)
+	}
+	// An already-settled bin is a no-op.
+	if gravitySettle(bin) {
+		t.Error("gravitySettle moved an already-settled bin")
+	}
+}
+
 // The refiner must never raise ΣZ, drop items, overlap, or float — on an
 // arbitrary (suboptimal) grounded packing.
 func TestRefineVoids_NeverWorsens(t *testing.T) {

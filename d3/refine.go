@@ -57,7 +57,7 @@ func RefineVoids(ctx context.Context, ps []*Placement3D, orients map[string][][3
 // RefineOptions bounds the refiner's cost. Zero fields take sensible defaults.
 type RefineOptions struct {
 	MaxRounds   int // passes over each bin (default 4)
-	MaxBinItems int // skip bins with more items than this (default 1500)
+	MaxBinItems int // skip bins with more items than this (default 2000)
 	WidenVoids  int // sealed voids attempted per widening pass (default 8)
 	WidenAdj    int // adjoining items tried per void (default 4)
 	MaxSubtree  int // skip widening an item whose support sub-stack exceeds this (default 8)
@@ -68,7 +68,12 @@ func (o RefineOptions) withDefaults() RefineOptions {
 		o.MaxRounds = 4
 	}
 	if o.MaxBinItems <= 0 {
-		o.MaxBinItems = 1500
+		// Cost cap: per-item re-drop is ~O(k·local) with the extreme-point grid, so
+		// a few-thousand-item bin refines in ~a second, but a large bin with much
+		// slack (many accepted moves over several rounds) can still take minutes.
+		// 2000 keeps the worst case bounded; raise it (and pass a ctx deadline) to
+		// refine bigger bins.
+		o.MaxBinItems = 2000
 	}
 	if o.WidenVoids <= 0 {
 		o.WidenVoids = 8
@@ -85,6 +90,19 @@ func (o RefineOptions) withDefaults() RefineOptions {
 func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]float64, w, d, h float64, spec ContactSpec, opts RefineOptions) bool {
 	rs := ContactSpec{Bottom: spec.Bottom, NoFloating: true} // refiner never floats
 	moved := false
+
+	// Gravity pre-pass: cheaply drop every item straight down onto whatever is
+	// beneath it (Settle, O(k²), no lateral search). This both tightens the bin
+	// for free and settles things the per-item refiner cannot — it only relocates
+	// removable leaves, whereas Settle lowers a whole floating sub-stack. Skipped
+	// when a bottom-support fraction is required, since a straight drop can land a
+	// box on a partial support and violate that gate (the EP re-drop honours it).
+	if spec.Bottom <= compactEps {
+		if gravitySettle(bin) {
+			moved = true
+		}
+	}
+
 	for round := 0; round < opts.MaxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return moved
@@ -128,20 +146,23 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 // NoFloating); the J check guards against a re-orientation that would raise the
 // peak. Returns whether it moved the item.
 func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec) bool {
-	e := NewEmptyMaximalSpace(w, d, h)
-	e.contact = rs
+	// Extreme-point placement (grid-accelerated) finds the lowest feasible spot in
+	// ~O(k·local), vs the maximal-space prune's O(k²) — this is what lets the
+	// refiner scale to large bins. It commits the other boxes, then drops item i.
+	ep := NewExtremePoint(w, d, h)
+	ep.contact = rs
 	var otherPeak, otherSumZ float64
 	for j, p := range bin {
 		if j == i {
 			continue
 		}
-		e.Occupy(p.X, p.Y, p.Z, p.W, p.D, p.H)
+		ep.CommitCandidate(Candidate{X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H})
 		if t := p.Z + p.H; t > otherPeak {
 			otherPeak = t
 		}
 		otherSumZ += p.Z
 	}
-	x, y, z, pw, pd, ph, ok := e.TryInsert(orientsOf(orients, bin[i]))
+	x, y, z, pw, pd, ph, ok := ep.TryInsert(orientsOf(orients, bin[i]))
 	if !ok {
 		return false
 	}
@@ -154,6 +175,24 @@ func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, 
 	bin[i].X, bin[i].Y, bin[i].Z = x, y, z
 	bin[i].W, bin[i].D, bin[i].H = pw, pd, ph
 	return true
+}
+
+// gravitySettle drops every item in the bin straight down onto the floor or the
+// highest top beneath its footprint (the existing Settle), reporting whether any
+// item actually moved. It is the cheap vertical pre-pass: O(k²), no lateral
+// search, and it lowers whole sub-stacks the leaf-only refiner can't touch.
+func gravitySettle(bin []*Placement3D) bool {
+	old := make([]float64, len(bin))
+	for i, p := range bin {
+		old[i] = p.Z
+	}
+	Settle(bin)
+	for i, p := range bin {
+		if math.Abs(p.Z-old[i]) > compactEps {
+			return true
+		}
+	}
+	return false
 }
 
 // removable returns the indices of bin items with nothing resting on them (the
@@ -201,12 +240,12 @@ func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float
 		lifted[i] = true
 	}
 
-	// Free space from the items that stay put.
-	e := NewEmptyMaximalSpace(w, d, h)
-	e.contact = rs
+	// Free space from the items that stay put (extreme-point, grid-accelerated).
+	ep := NewExtremePoint(w, d, h)
+	ep.contact = rs
 	for i, p := range bin {
 		if !lifted[i] {
-			e.Occupy(p.X, p.Y, p.Z, p.W, p.D, p.H)
+			ep.CommitCandidate(Candidate{X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H})
 		}
 	}
 
@@ -225,11 +264,11 @@ func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float
 	type pos struct{ x, y, z, w, d, h float64 }
 	newPos := make(map[int]pos, len(order))
 	for _, i := range order {
-		x, y, z, pw, pd, ph, ok := e.TryInsert(orientsOf(orients, bin[i]))
+		x, y, z, pw, pd, ph, ok := ep.TryInsert(orientsOf(orients, bin[i]))
 		if !ok {
 			return false // a lifted item can't be re-placed — abort, bin unchanged
 		}
-		e.Occupy(x, y, z, pw, pd, ph)
+		ep.CommitCandidate(Candidate{X: x, Y: y, Z: z, W: pw, D: pd, H: ph})
 		newPos[i] = pos{x, y, z, pw, pd, ph}
 	}
 
