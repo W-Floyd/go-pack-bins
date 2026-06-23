@@ -172,7 +172,11 @@ func renderScenario(sc scenario, cell, cols int, timeout time.Duration) image.Im
 		if resp.BinsUsed > 0 && binCap > 0 {
 			fill = 100 * placedAmount(sc.mode, resp) / (float64(resp.BinsUsed) * binCap)
 		}
-		label := fmt.Sprintf("%s — %d bins, %.0f%% fill", algoLabel(algo), resp.BinsUsed, fill)
+		// compact% matches the benchmark table: packed volume ÷ the items'
+		// bounding-box envelope, averaged over bins (void-freeness, independent
+		// of how full the bin is).
+		compact := packapi.MeanCompactnessPct(resp, sc.mode)
+		label := fmt.Sprintf("%s — %d bins, %.0f%% fill, %.0f%% compact", algoLabel(algo), resp.BinsUsed, fill, compact)
 		if n := len(resp.Unplaced); n > 0 {
 			label += fmt.Sprintf(", %d unfit", n)
 		}
