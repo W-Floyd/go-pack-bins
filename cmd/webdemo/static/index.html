@@ -712,6 +712,9 @@
         <label class="checkbox-row" id="contact-nofloat-row" style="margin-top:8px">
           <input type="checkbox" id="contact-nofloat" onchange="scheduleAutoPack()"> No floating items (must rest on floor/box)
         </label>
+        <label class="checkbox-row" id="refine-voids-row" style="margin-top:8px">
+          <input type="checkbox" id="refine-voids" onchange="scheduleAutoPack()"> Tighten voids (post-pass: pull items down into gaps)
+        </label>
       </div>
 
       <!-- Lexicographic objectives: ordered priority list -->
@@ -1001,6 +1004,7 @@ function onModeChange() {
   const threeD = mode === '3d';
   document.getElementById('contact-section').style.display = (mode === '1d') ? 'none' : '';
   document.getElementById('contact-bottom-field').style.display = threeD ? '' : 'none';
+  document.getElementById('refine-voids-row').style.display = threeD ? '' : 'none';
   document.getElementById('contact-nofloat-row').style.display = threeD ? '' : 'none';
   setContact({});
   // min-height / min-CG preferences rely on 3D bin metrics — gate both panels
@@ -2106,6 +2110,7 @@ function currentConfig() {
     nested: nestedEnabled,
     bin: { width: num('bin-w', 10), height: num('bin-h', num('bin-w', 10)), depth: num('bin-d', num('bin-w', 10)) },
     contact: readContactPercent(),
+    refine_voids: document.getElementById('refine-voids')?.checked || false,
     constraints: constraints.map(c => ({ ...c })),
     preferences: preferences.map(p => ({ ...p })),
     innerPreferences: innerPreferences.map(p => ({ ...p })),
@@ -2193,6 +2198,7 @@ function applyState(s) {
   setVal('algorithm', s.algorithm);
   if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
   setContact(s.contact); // percentages, matching readContactPercent()
+  if (document.getElementById('refine-voids')) document.getElementById('refine-voids').checked = !!s.refine_voids;
 
   // GBPP bin cost + lexicographic objectives, with their panels shown to match.
   setVal('bin-cost', s.binCost != null ? s.binCost : 0);
@@ -2428,6 +2434,7 @@ async function runSinglePack(auto = false) {
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
     contact: readContact(),
   };
+  if (mode === '3d' && document.getElementById('refine-voids')?.checked) body.refine_voids = true;
   if (algo === 'gbpp') body.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (algo === 'lex') body.lex_objectives = lexObjectives.slice();
   const algoOpts = collectAlgoOptions('outer');
