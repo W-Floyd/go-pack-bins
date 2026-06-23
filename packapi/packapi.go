@@ -454,6 +454,10 @@ type PackRequest struct {
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 	Contact     ContactSpec      `json:"contact,omitempty"` // per-face support/anti-slosh
+	// RefineVoids enables the void-refiner post-pass (3-D only): after the solve,
+	// top-layer items are pulled down into voids to tighten each bin. Relocating,
+	// so it is delivered as a final reposition frame when streaming.
+	RefineVoids bool `json:"refine_voids,omitempty"`
 	// Containers, when non-empty, switches to container-catalog mode: the order is
 	// packed into each candidate container type and the best single type is chosen
 	// (see package catalog). Bin is ignored in this mode.
@@ -1043,6 +1047,10 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
 			compactResult3D(result, req.Bin.Width, req.Bin.Depth, req.Bin.Height, dx, dy, req.Contact.Bottom)
+			moved = true
+		}
+		if req.RefineVoids {
+			refineResult3D(ctx, result, req) // pull top items into voids (relocation → reposition frame)
 			moved = true
 		}
 	case "2d":
@@ -1811,6 +1819,14 @@ func searchDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64)
 
 func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
+	// respond optionally runs the void-refiner (relocating items in place) before
+	// converting the result, so every 3-D return path picks it up uniformly.
+	respond := func(result pack.Result) (PackResponse, error) {
+		if req.RefineVoids {
+			refineResult3D(ctx, result, req)
+		}
+		return buildResponse3D(result), nil
+	}
 	// The placement strategy follows the algorithm (extreme-point / blf / ems /
 	// heightmap); all read the contact spec (Bottom → hard support gate, SideX/SideY
 	// → contact-maximizing placement, used only by extreme-point).
@@ -1853,7 +1869,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
 		settleResult3D(result) // drop any items left floating over a short layer cell
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	// Column-building: the vertical counterpart of blocks — full-height columns of
@@ -1866,7 +1882,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: cerr.Error()}, nil
 		}
 		settleResult3D(result) // drop any item left floating over a gap in the slice below
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	// Assemble: fuse perfectly-fitting items into solid rectangular blocks, then
@@ -1877,7 +1893,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if aerr != nil && !errors.Is(aerr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: aerr.Error()}, nil
 		}
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	// LAFF (Largest-Area-Fit-First): layered packing; manages its own geometry
@@ -1887,7 +1903,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if lerr != nil {
 			return PackResponse{Error: lerr.Error()}, nil
 		}
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	// Brute-force: exhaustive item-order search for small orders (FFD fallback
@@ -1897,7 +1913,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	// Order-search metaheuristics (beam / ruin-recreate / GRASP): they search item
@@ -1911,13 +1927,13 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		})), req.Constraints)
 		switch req.Algorithm {
 		case "beam":
-			return buildResponse3D(offline.BeamSearch(ctx, items, dec, req.beamOptions(ctx))), nil
+			return respond(offline.BeamSearch(ctx, items, dec, req.beamOptions(ctx)))
 		case "rr":
-			return buildResponse3D(offline.RuinRecreate(ctx, items, dec, req.searchOptions(ctx))), nil
+			return respond(offline.RuinRecreate(ctx, items, dec, req.searchOptions(ctx)))
 		case "arr":
-			return buildResponse3D(offline.AdaptiveRuinRecreate(ctx, items, dec, req.searchOptions(ctx))), nil
+			return respond(offline.AdaptiveRuinRecreate(ctx, items, dec, req.searchOptions(ctx)))
 		case "grasp":
-			return buildResponse3D(offline.GRASP(ctx, items, dec, req.searchOptions(ctx))), nil
+			return respond(offline.GRASP(ctx, items, dec, req.searchOptions(ctx)))
 		}
 	}
 
@@ -1952,7 +1968,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		if jerr != nil && !errors.Is(jerr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: jerr.Error()}, nil
 		}
-		return buildResponse3D(result), nil
+		return respond(result)
 	}
 
 	var result pack.Result
@@ -2292,6 +2308,29 @@ func settleResult3D(r pack.Result) {
 	for _, ps := range byBin {
 		d3.Settle(ps)
 	}
+}
+
+// refineResult3D runs the void-refiner post-pass over a 3-D result when the
+// request opts in: it pulls top-layer items down into voids (and widens sealed
+// voids) to tighten each bin, relocating committed items in place. Like settle,
+// it relocates, so it is delivered as a reposition frame when streaming.
+func refineResult3D(ctx context.Context, r pack.Result, req PackRequest) {
+	ps := make([]*d3.Placement3D, 0, len(r.Placements))
+	for _, p := range r.Placements {
+		if pl, ok := p.(*d3.Placement3D); ok {
+			ps = append(ps, pl)
+		}
+	}
+	if len(ps) == 0 {
+		return
+	}
+	orients := make(map[string][][3]float64, len(req.Items))
+	for _, spec := range req.Items {
+		orients[spec.ID] = d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate).Orientations()
+	}
+	d3.RefineVoids(ctx, ps, orients, req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.ContactSpec{
+		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY, NoFloating: req.Contact.NoFloating,
+	}, d3.RefineOptions{})
 }
 
 // compactResult2D is the 2-D equivalent of compactResult3D.
