@@ -13,21 +13,22 @@ func TestFlattestTallestUsesFlattestOrientation(t *testing.T) {
 		{id: "skinny", orient: []orient{{1, 1, 10}, {1, 10, 1}, {10, 1, 1}}}, // rotatable: flat = 1
 	}
 	consumed := make([]bool, len(its))
+	live := []int{0, 1} // the live index-set the scans now iterate (consumed-skip still applies)
 
 	// Decisive height is the tall item's 9 — the skinny is counted by its flat
 	// height (1), not its standing height (10).
-	if got := bp.flattestTallest(its, consumed); got != 9 {
+	if got := bp.flattestTallest(its, live, consumed); got != 9 {
 		t.Errorf("flattestTallest = %v, want 9 (skinny judged by flat height 1, not 10)", got)
 	}
 	// Contrast: the layer-height selection still sees the skinny's tall (10)
 	// orientation — the two metrics genuinely differ.
-	if got := bp.maxHeight(its, consumed, 20); got != 10 {
+	if got := bp.maxHeight(its, live, consumed, 20); got != 10 {
 		t.Errorf("maxHeight = %v, want 10 (tallest orientation overall)", got)
 	}
 	// With only the skinny left, the decisive height drops to its flat height, so a
 	// shallow top tall enough for that (≥1) will be filled, not deferred.
 	consumed[0] = true
-	if got := bp.flattestTallest(its, consumed); got != 1 {
+	if got := bp.flattestTallest(its, live, consumed); got != 1 {
 		t.Errorf("flattestTallest(skinny only) = %v, want 1", got)
 	}
 }

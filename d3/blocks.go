@@ -143,17 +143,28 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 	var nextID int
 	var deferred []region // shallow tops parked until a short-enough item remains
 
+	// live holds the indices of still-unconsumed items, in ascending (original)
+	// order. The per-layer scans iterate it instead of all items, so their cost
+	// shrinks as the pack consumes items rather than staying O(total) every layer.
+	// It is recompacted (consumed entries dropped, order preserved) here and inside
+	// fillRegion; functions still consult consumed[] for items consumed mid-layer.
+	live := make([]int, len(its))
+	for i := range live {
+		live[i] = i
+	}
+
 	for remaining(its, consumed) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		live = compactLive(live, consumed)
 		// The decisive height: the largest, over remaining items, of each item's
 		// *flattest* orientation. A region (or fresh bin) may only be filled when its
 		// height can hold this — otherwise filling it is the shallow-top steal we
 		// avoid. Using the flattest orientation means a rotatable long-skinny item
 		// (which can lie flat) never forces a deferral; only items tall in every
 		// orientation do.
-		flat := bp.flattestTallest(its, consumed)
+		flat := bp.flattestTallest(its, live, consumed)
 		if flat <= 0 {
 			break // no remaining item fits any bin (pre-filtered; defensive)
 		}
@@ -162,7 +173,7 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		// first slot whatever fits into the voids/wells of the already-packed bins,
 		// then lay the rest flat (LAFF) — as flat as possible, even if a few items
 		// can't be fully flattened — rather than standing them up in tall stacks.
-		if bp.endgame(its, consumed) {
+		if bp.endgame(its, live, consumed) {
 			bp.finalStage(&result, its, consumed, &binIdx)
 			break
 		}
@@ -172,7 +183,8 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		if ri := pickDeferred(deferred, flat); ri >= 0 {
 			r := deferred[ri]
 			deferred = append(deferred[:ri], deferred[ri+1:]...)
-			rem, _ := bp.fillRegion(ctx, &result, r, its, consumed, &nextID)
+			rem, _, l := bp.fillRegion(ctx, &result, r, its, live, consumed, &nextID)
+			live = l
 			if err := ctx.Err(); err != nil {
 				return result, err
 			}
@@ -183,7 +195,8 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		}
 
 		binID := fmt.Sprintf("blocks-bin-%d", binIdx)
-		rem, placed := bp.fillRegion(ctx, &result, region{binID: binID, base: 0, cap: bp.h}, its, consumed, &nextID)
+		rem, placed, l := bp.fillRegion(ctx, &result, region{binID: binID, base: 0, cap: bp.h}, its, live, consumed, &nextID)
+		live = l
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -211,41 +224,57 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 // built only while its remaining height can hold the tallest unpacked item; the
 // first time it cannot, the rest of r is returned as a deferred region (a shallow
 // top) instead of being filled with short items. Returns the deferred remainder
-// (nil if the region was filled to its top / exhausted) and items placed.
-func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r region, its []*pitem, consumed []bool, nextID *int) (*region, int) {
+// (nil if the region was filled to its top / exhausted), items placed, and the
+// updated live index-set (recompacted as items are consumed; the caller must
+// adopt it so the shared backing array never accumulates duplicate indices).
+func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r region, its []*pitem, live []int, consumed []bool, nextID *int) (*region, int, []int) {
 	base := r.base
 	top := r.base + r.cap
 	placed := 0
 	for base < top-blockEps {
 		if err := ctx.Err(); err != nil {
-			return nil, placed
+			return nil, placed, live
 		}
+		live = compactLive(live, consumed) // drop items consumed by earlier layers
 		cap := top - base
-		H := bp.maxHeight(its, consumed, cap) // tallest item fitting this span
+		H := bp.maxHeight(its, live, consumed, cap) // tallest item fitting this span
 		if H <= 0 {
 			break // nothing left fits the remaining height of this region
 		}
-		if cap < bp.flattestTallest(its, consumed)-blockEps {
+		if cap < bp.flattestTallest(its, live, consumed)-blockEps {
 			// Shallow top: some remaining item can't fit this span even laid flat.
 			// Defer the rest of the region rather than steal short items for a thin
 			// layer; it will be revisited once the remaining items fit.
-			return &region{binID: r.binID, base: base, cap: cap}, placed
+			return &region{binID: r.binID, base: base, cap: cap}, placed, live
 		}
 		floor := d2.NewBin(r.binID, bp.w, bp.d, d2.NewMaxRectsDefault(bp.w, bp.d))
 		// First fill the layer with blocks exactly H tall (clean layer lines).
-		n := bp.placeOnFloor(floor, result, r.binID, bp.buildBlocks(its, consumed, H), consumed, base, nextID)
+		n := bp.placeOnFloor(floor, result, r.binID, bp.buildBlocks(its, live, consumed, H), consumed, base, nextID)
 		// Last resort: drop the tallest blocks that still fit the layer height into
 		// any leftover floor cells, so a gap becomes a short item with a small void
 		// above it rather than a full-height void. The layer top stays at base+H, so
 		// the layer lines are preserved.
-		n += bp.placeOnFloor(floor, result, r.binID, bp.buildFallbackBlocks(its, consumed, H), consumed, base, nextID)
+		n += bp.placeOnFloor(floor, result, r.binID, bp.buildFallbackBlocks(its, live, consumed, H), consumed, base, nextID)
 		if n == 0 {
 			break // safety: no block fit the floor (shouldn't happen at the base)
 		}
 		placed += n
 		base += H
 	}
-	return nil, placed
+	return nil, placed, live
+}
+
+// compactLive returns live with consumed indices dropped, preserving order. It
+// filters in place (reusing the backing array), so the caller must adopt the
+// returned slice and not keep the old header.
+func compactLive(live []int, consumed []bool) []int {
+	out := live[:0]
+	for _, i := range live {
+		if !consumed[i] {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // pickDeferred returns the index of the tightest deferred region whose height can
@@ -267,9 +296,10 @@ func pickDeferred(deferred []region, tallest float64) int {
 // remaining item when each is laid as flat as it can be — so the deferral test
 // ignores items that are only tall in some orientation (e.g. a rotatable
 // long-skinny box), treating them by their lie-flat height.
-func (bp *BlockPacker) flattestTallest(its []*pitem, consumed []bool) float64 {
+func (bp *BlockPacker) flattestTallest(its []*pitem, live []int, consumed []bool) float64 {
 	best := 0.0
-	for i, it := range its {
+	for _, i := range live {
+		it := its[i]
 		if consumed[i] || len(it.orient) == 0 {
 			continue
 		}
@@ -302,11 +332,11 @@ func remainingItems(its []*pitem, consumed []bool) []pack.Item {
 // (LAFF) rather than standing them up in tall stacks. A cheap volume check gates
 // the LAFF probe so it only runs once a bin's worth (or less) remains — keeping
 // huge multi-bin solves fast.
-func (bp *BlockPacker) endgame(its []*pitem, consumed []bool) bool {
+func (bp *BlockPacker) endgame(its []*pitem, live []int, consumed []bool) bool {
 	vol := 0.0
-	for i, it := range its {
+	for _, i := range live {
 		if !consumed[i] {
-			vol += orientVolume(it)
+			vol += orientVolume(its[i])
 		}
 	}
 	if vol <= 0 || vol > bp.w*bp.d*bp.h+blockEps {
@@ -444,13 +474,13 @@ func orientVolume(it *pitem) float64 {
 
 // maxHeight is the tallest item height (over available items' valid orientations)
 // that fits within cap — the height of the next layer.
-func (bp *BlockPacker) maxHeight(its []*pitem, consumed []bool, cap float64) float64 {
+func (bp *BlockPacker) maxHeight(its []*pitem, live []int, consumed []bool, cap float64) float64 {
 	best := 0.0
-	for i, it := range its {
+	for _, i := range live {
 		if consumed[i] {
 			continue
 		}
-		for _, o := range it.orient {
+		for _, o := range its[i].orient {
 			if o.fh <= cap+blockEps && o.fh > best+blockEps {
 				best = o.fh
 			}
@@ -464,11 +494,12 @@ func (bp *BlockPacker) maxHeight(its []*pitem, consumed []bool, cap float64) flo
 // blocks may share items; placeLayer resolves that by skipping any block whose
 // items were already consumed. Blocks are returned largest-footprint-first so the
 // layer floor seeds with big blocks (as LAFF does).
-func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []block {
+func (bp *BlockPacker) buildBlocks(its []*pitem, live []int, consumed []bool, H float64) []block {
 	var blocks []block
 
 	// Tier 1: an item already H tall.
-	for i, it := range its {
+	for _, i := range live {
+		it := its[i]
 		if consumed[i] {
 			continue
 		}
@@ -490,7 +521,8 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []b
 	}
 	groups := map[[2]float64][]ent{}
 	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
-	for i, it := range its {
+	for _, i := range live {
+		it := its[i]
 		if consumed[i] {
 			continue
 		}
@@ -593,14 +625,15 @@ func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID 
 // that fit — so leftover floor cells can be filled. Per footprint it greedily
 // fuses the tallest items whose heights sum to ≤ H (a short stack), then orders
 // the blocks tallest-first so the void left under the layer line is minimised.
-func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, consumed []bool, H float64) []block {
+func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, live []int, consumed []bool, H float64) []block {
 	type ent struct {
 		idx int
 		fh  float64
 	}
 	groups := map[[2]float64][]ent{}
 	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
-	for i, it := range its {
+	for _, i := range live {
+		it := its[i]
 		if consumed[i] {
 			continue
 		}
