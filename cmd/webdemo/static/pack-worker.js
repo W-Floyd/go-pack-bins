@@ -8,7 +8,7 @@
 // reqId so the page can discard frames from a superseded request.
 //
 // Message protocol:
-//   page → worker: { kind: 'pack'|'nested'|'packOnce'|'voids', reqId, body }
+//   page → worker: { kind: 'pack'|'nested'|'packOnce'|'voids'|'algos'|'presets'|'generate', reqId, body }
 //   worker → page: { kind: 'ready' }                       once, after wasm loads
 //                  { reqId, frame: <StreamFrame> }          per pack frame
 //                  { reqId, result: <NestedPackResponse> }  once per nested
@@ -72,6 +72,18 @@ function handle(m) {
       // Non-streaming single solve (used by container-catalog mode, which runs a
       // full solve per container type and has no honest partial state to stream).
       const result = JSON.parse(self.goPack(JSON.stringify(m.body)));
+      postMessage({ reqId: m.reqId, result });
+    } else if (m.kind === 'algos') {
+      // Algorithm-capabilities document for UI self-configuration (mirrors /api/algos).
+      const result = JSON.parse(self.goAlgos());
+      postMessage({ reqId: m.reqId, result });
+    } else if (m.kind === 'presets') {
+      // Demo presets for the "Load preset" menu (mirrors /api/presets).
+      const result = JSON.parse(self.goPresets());
+      postMessage({ reqId: m.reqId, result });
+    } else if (m.kind === 'generate') {
+      // On-demand items for a generator preset (mirrors /api/generate).
+      const result = JSON.parse(self.goGenerate(JSON.stringify(m.body)));
       postMessage({ reqId: m.reqId, result });
     }
   } catch (err) {

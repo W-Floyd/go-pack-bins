@@ -31,6 +31,9 @@ func main() {
 	js.Global().Set("goPackNested", js.FuncOf(packNestedFn))
 	js.Global().Set("goPackStream", js.FuncOf(packStreamFn))
 	js.Global().Set("goVoids", js.FuncOf(voidsFn))
+	js.Global().Set("goAlgos", js.FuncOf(algosFn))
+	js.Global().Set("goPresets", js.FuncOf(presetsFn))
+	js.Global().Set("goGenerate", js.FuncOf(generateFn))
 	// goPackReady lets the frontend feature-detect the bridge without poking at
 	// each function. Set last so it is only true once everything is registered.
 	js.Global().Set("goPackReady", true)
@@ -47,6 +50,31 @@ func packFn(this js.Value, args []js.Value) any {
 		return errResponse("goPack: " + err.Error())
 	}
 	return marshal(packapi.Pack(req))
+}
+
+// algosFn implements goAlgos() -> jsonPayload (mirrors GET /api/algos): the
+// algorithm-capabilities document the frontend uses to self-configure its UI.
+func algosFn(this js.Value, args []js.Value) any {
+	return marshal(packapi.AlgoCapabilities())
+}
+
+// presetsFn implements goPresets() -> jsonPayload (mirrors GET /api/presets): the
+// demo setups for the frontend's preset menu.
+func presetsFn(this js.Value, args []js.Value) any {
+	return marshal(packapi.Presets())
+}
+
+// generateFn implements goGenerate(jsonRequest) -> jsonItems (mirrors /api/generate):
+// materialises a generator preset's items on demand.
+func generateFn(this js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		return errResponse("goGenerate: missing request argument")
+	}
+	var req packapi.GenerateRequest
+	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
+		return errResponse("goGenerate: " + err.Error())
+	}
+	return marshal(packapi.GeneratePresetItems(req.Mode, req.Kind, req.N, req.Seed))
 }
 
 // voidsFn implements goVoids(jsonRequest) -> jsonResponse (mirrors POST /api/voids).
