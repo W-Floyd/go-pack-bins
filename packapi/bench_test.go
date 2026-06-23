@@ -53,7 +53,7 @@ func parseBenchTimeout() time.Duration {
 			return d
 		}
 	}
-	return time.Second
+	return 4*time.Second
 }
 
 var (
@@ -219,35 +219,6 @@ func writeBenchMarkdown() error {
 	return os.WriteFile(path, []byte(doc), 0o644)
 }
 
-// ─── instances ──────────────────────────────────────────────────────────────
-
-// benchMix builds n deterministic mixed-size items for a mode via a small LCG, so
-// the set is reproducible across runs (mirrors the webdemo's bigMix palette).
-func benchMix(mode string, n int, seed uint32) []ItemSpec {
-	s := seed
-	if s == 0 {
-		s = 1
-	}
-	next := func() float64 { s = s*1664525 + 1013904223; return float64(s>>8) / (1 << 24) }
-	pick := func(a []float64) float64 { return a[int(next()*float64(len(a)))%len(a)] }
-
-	out := make([]ItemSpec, n)
-	for i := range out {
-		switch mode {
-		case "1d":
-			w := pick([]float64{1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8})
-			out[i] = ItemSpec{ID: itoa(i), Width: w}
-		case "2d":
-			sz := []float64{10, 12, 15, 18, 20, 25, 30, 35, 40, 50}
-			out[i] = ItemSpec{ID: itoa(i), Width: pick(sz), Height: pick(sz), AllowRotate: true}
-		default:
-			sz := []float64{1, 2, 2, 3, 3, 4, 4, 5, 6}
-			out[i] = ItemSpec{ID: itoa(i), Width: pick(sz), Depth: pick(sz), Height: pick(sz), AllowRotate: true}
-		}
-	}
-	return out
-}
-
 // ─── runners ────────────────────────────────────────────────────────────────
 
 // scenario is one benchmark instance: a section heading (group), the solve mode,
@@ -386,98 +357,42 @@ func runScenario(b *testing.B, sc scenario) {
 	}
 }
 
-func BenchmarkAlgos3D(b *testing.B) {
-	runScenario(b, scenario{
-		group: "3D", mode: "3d", desc: "500 mixed boxes (sides 1–6) into a 20×20×20 bin",
-		bin:   BinSpec{Width: 20, Depth: 20, Height: 20},
-		items: benchMix("3d", 500, 33),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble", "rr", "arr", "auto"},
-	})
+// benchScenario fetches a shared scenario (from packapi's benchmarks.json — the
+// same instances cmd/render draws) by slug and adapts it to the runner's struct.
+func benchScenario(b *testing.B, slug string) scenario {
+	b.Helper()
+	s, ok := BenchScenarioBySlug(slug)
+	if !ok {
+		b.Fatalf("unknown bench scenario %q", slug)
+	}
+	return scenario{
+		group: s.Group, mode: s.Mode, desc: s.Desc,
+		bin: s.Bin, contact: s.Contact, items: s.Items, algos: s.Algos,
+	}
 }
+
+func BenchmarkAlgos3D(b *testing.B) { runScenario(b, benchScenario(b, "3d-mixed")) }
 
 // BenchmarkAlgos3DSlosh re-runs the 3-D instance under a contact spec: a 60%
 // bottom-support gate plus 50% lateral anti-slosh targets on both axes. The
 // anti-slosh drives a post-solve compaction pass, so this shows its quality and
 // time cost. (laff/joint manage their own geometry; the placement strategies —
 // extreme-point/blf/ems/heightmap — all honour the support gate.)
-func BenchmarkAlgos3DSlosh(b *testing.B) {
-	runScenario(b, scenario{
-		group: "3D · anti-slosh", mode: "3d",
-		desc:    "same 500 boxes with 60% bottom support + 50% side anti-slosh (X & Y)",
-		bin:     BinSpec{Width: 20, Depth: 20, Height: 20},
-		contact: ContactSpec{Bottom: 0.6, SideX: 0.5, SideY: 0.5},
-		items:   benchMix("3d", 500, 33),
-		algos:   []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks", "assemble"},
-	})
-}
-
-// benchCartons builds n boxes drawn from a small SKU palette whose footprints and
-// heights are divisors of a 12×12×12 bin — repeated, tile-friendly sizes (as in a
-// carton/pallet load) where fusing and stacking pay off, unlike the fully-random
-// instance above. This is a single-level packer comparison, not true (nested)
-// palletizing.
-func benchCartons(n int, seed uint32) []ItemSpec {
-	s := seed
-	if s == 0 {
-		s = 1
-	}
-	next := func() float64 { s = s*1664525 + 1013904223; return float64(s>>8) / (1 << 24) }
-	type sku struct{ w, d, h float64 }
-	skus := []sku{
-		{6, 6, 6}, {6, 6, 3}, {6, 6, 2}, {6, 3, 3}, {4, 4, 4},
-		{3, 3, 6}, {12, 6, 2}, {6, 12, 3}, {4, 4, 2}, {3, 6, 4},
-	}
-	out := make([]ItemSpec, n)
-	for i := range out {
-		k := skus[int(next()*float64(len(skus)))%len(skus)]
-		out[i] = ItemSpec{ID: itoa(i), Width: k.w, Depth: k.d, Height: k.h, AllowRotate: true}
-	}
-	return out
-}
+func BenchmarkAlgos3DSlosh(b *testing.B) { runScenario(b, benchScenario(b, "3d-slosh")) }
 
 // BenchmarkAlgos3DCartons is the case the block/assemble packers are built for:
 // repeated carton SKUs that tile and stack into a 12×12×12 bin. Fusion should match
 // or beat the free packers here, where on the fully-random instance it lags. (This
 // is a single-bin comparison; true cartons-into-pallets is nested mode.)
-func BenchmarkAlgos3DCartons(b *testing.B) {
-	runScenario(b, scenario{
-		group: "3D · carton SKUs", mode: "3d",
-		desc:  "400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12",
-		bin:   BinSpec{Width: 12, Depth: 12, Height: 12},
-		items: benchCartons(400, 5),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
-	})
-}
+func BenchmarkAlgos3DCartons(b *testing.B) { runScenario(b, benchScenario(b, "3d-cartons")) }
 
 // BenchmarkAlgos3DMega is the scalability stress test: 10 000 mixed boxes into a
 // large 75×75×75 bin. With the 1 s timebox, the O(k²)-per-insert placers (extreme-
 // point / EMS / heightmap) DNF on the huge per-bin item counts, while the layered
 // and block packers — which cap per-step work — finish. It's the case that
 // separates "scales" from "doesn't".
-func BenchmarkAlgos3DMega(b *testing.B) {
-	runScenario(b, scenario{
-		group: "3D · mega-stress", mode: "3d",
-		desc:  "10 000 mixed boxes (sides 1–6) into a 75×75×75 bin",
-		bin:   BinSpec{Width: 75, Depth: 75, Height: 75},
-		items: benchMix("3d", 10000, 99),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble", "auto"},
-	})
-}
+func BenchmarkAlgos3DMega(b *testing.B) { runScenario(b, benchScenario(b, "3d-mega")) }
 
-func BenchmarkAlgos2D(b *testing.B) {
-	runScenario(b, scenario{
-		group: "2D", mode: "2d", desc: "400 mixed rectangles (10–50) into a 300×300 bin",
-		bin:   BinSpec{Width: 300, Height: 300},
-		items: benchMix("2d", 400, 22),
-		algos: []string{"ff", "ffd", "bfd", "nfd", "skyline", "auto"},
-	})
-}
+func BenchmarkAlgos2D(b *testing.B) { runScenario(b, benchScenario(b, "2d")) }
 
-func BenchmarkAlgos1D(b *testing.B) {
-	runScenario(b, scenario{
-		group: "1D", mode: "1d", desc: "1000 mixed items (1–8) into capacity-10 bins",
-		bin:   BinSpec{Width: 10},
-		items: benchMix("1d", 1000, 11),
-		algos: []string{"ff", "bf", "wf", "ffd", "bfd", "wfd", "mffd", "auto"},
-	})
-}
+func BenchmarkAlgos1D(b *testing.B) { runScenario(b, benchScenario(b, "1d")) }

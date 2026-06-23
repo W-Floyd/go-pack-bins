@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"math"
 
+	"github.com/W-Floyd/go-pack-bins/packapi"
 	"github.com/fogleman/gg"
 )
 
@@ -25,10 +26,15 @@ type rbox struct {
 	col              color.RGBA
 }
 
-// drawBin renders one bin (its wireframe plus boxes) into dc, fit and centred in
-// the rectangle (ox,oy,bw,bh). Boxes are painted back-to-front (painter's
-// algorithm along the (1,1,1) view ray) so nearer boxes occlude farther ones.
-func drawBin(dc *gg.Context, ox, oy, bw, bh float64, dim [3]float64, boxes []rbox) {
+// drawBin3D renders one 3-D bin (its wireframe plus boxes) into dc, fit and
+// centred in the rectangle (ox,oy,bw,bh). Boxes are painted back-to-front
+// (painter's algorithm along the (1,1,1) view ray) so nearer boxes occlude
+// farther ones.
+func drawBin3D(dc *gg.Context, ox, oy, bw, bh float64, dim [3]float64, ps []packapi.PlacementResult, colorOf func(string) color.RGBA) {
+	boxes := make([]rbox, len(ps))
+	for i, p := range ps {
+		boxes[i] = rbox{p.X, p.Y, p.Z, p.W, p.D, p.H, colorOf(p.ItemID)}
+	}
 	X, Y, Z := dim[0], dim[1], dim[2]
 	wProj := (X + Y) * isoC
 	hProj := (X+Y)*isoS + Z
@@ -51,6 +57,67 @@ func drawBin(dc *gg.Context, ox, oy, bw, bh float64, dim [3]float64, boxes []rbo
 
 	for _, i := range painterOrder(boxes) {
 		drawBox(dc, P, boxes[i])
+	}
+}
+
+// drawBin2D renders one 2-D bin top-down: the W×H container framed, with each
+// placed rectangle filled in its item colour. The packing's y-axis points up, so
+// it is flipped to screen space (origin bottom-left).
+func drawBin2D(dc *gg.Context, ox, oy, bw, bh, W, H float64, ps []packapi.PlacementResult, colorOf func(string) color.RGBA) {
+	if W <= 0 || H <= 0 {
+		return
+	}
+	scale := math.Min(bw/W, bh/H) * 0.94
+	tx := ox + (bw-W*scale)/2
+	ty := oy + (bh-H*scale)/2
+	lw := math.Max(0.5, bw*0.004)
+
+	// Container frame.
+	dc.SetRGBA(0.16, 0.17, 0.22, 0.45)
+	dc.SetLineWidth(lw)
+	dc.DrawRectangle(tx, ty, W*scale, H*scale)
+	dc.Stroke()
+
+	for _, p := range ps {
+		// Flip y: a rect at packing-y in [y, y+h] sits (H-y-h) from the top.
+		x := tx + p.X*scale
+		y := ty + (H-p.Y-p.H)*scale
+		dc.DrawRectangle(x, y, p.W*scale, p.H*scale)
+		dc.SetColor(colorOf(p.ItemID))
+		dc.FillPreserve()
+		dc.SetRGBA(0, 0, 0, 0.3)
+		dc.SetLineWidth(lw)
+		dc.Stroke()
+	}
+}
+
+// drawBin1D renders one 1-D bin as a vertical capacity bar: the bin holds items
+// totalling up to cap, drawn as stacked coloured segments from the bottom. Each
+// placement's X is its cumulative offset along the bin, W its size.
+func drawBin1D(dc *gg.Context, ox, oy, bw, bh, cap float64, ps []packapi.PlacementResult, colorOf func(string) color.RGBA) {
+	if cap <= 0 {
+		return
+	}
+	colW := bw * 0.55
+	cx := ox + (bw-colW)/2
+	scaleY := bh / cap
+	lw := math.Max(0.5, bw*0.006)
+
+	// Capacity frame.
+	dc.SetRGBA(0.16, 0.17, 0.22, 0.45)
+	dc.SetLineWidth(lw)
+	dc.DrawRectangle(cx, oy, colW, cap*scaleY)
+	dc.Stroke()
+
+	for _, p := range ps {
+		// Segment [X, X+W] along capacity, measured from the bottom up.
+		top := oy + (cap-p.X-p.W)*scaleY
+		dc.DrawRectangle(cx, top, colW, p.W*scaleY)
+		dc.SetColor(colorOf(p.ItemID))
+		dc.FillPreserve()
+		dc.SetRGBA(0, 0, 0, 0.3)
+		dc.SetLineWidth(lw)
+		dc.Stroke()
 	}
 }
 
