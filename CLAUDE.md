@@ -21,6 +21,7 @@ GOOS=js GOARCH=wasm go build ./cmd/wasm     # wasm build check
 cd cmd/webdemo && go run .         # server at http://localhost:8082
 cd bench && go run .               # benchmark vs boxpacker3/bp3d (SEPARATE module)
 go test ./packapi/ -bench BenchmarkAlgos -run '^$' -benchmem   # algo-vs-algo: speed + bins/fill%
+./scripts/bench-wasm.sh            # same benchmarks under js/wasm (client-side runtime; needs node)
 ```
 
 CI runs build/vet/`test -race` on Go `stable`. Toolchain is Go ≥1.24 (wasm_exec.js
