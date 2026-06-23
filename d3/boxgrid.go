@@ -73,6 +73,30 @@ func (g *boxGrid) insert(idx int32, b box) {
 	}
 }
 
+// anyNear reports whether any placed box registered in the cells the query
+// region spans satisfies pred. It lets a strategy reuse the grid's broadphase
+// with its own overlap/support predicate (e.g. an eps-tolerant test). pred may
+// be called more than once for a box spanning several query cells; it returns on
+// the first match. The pred closure does not escape, so it stays stack-allocated.
+func (g *boxGrid) anyNear(x, y, z, w, d, h float64, placed []box, pred func(b box) bool) bool {
+	x0, x1 := clampIdx(x, g.csx, g.ncx), clampIdx(x+w, g.csx, g.ncx)
+	y0, y1 := clampIdx(y, g.csy, g.ncy), clampIdx(y+d, g.csy, g.ncy)
+	z0, z1 := clampIdx(z, g.csz, g.ncz), clampIdx(z+h, g.csz, g.ncz)
+	for iz := z0; iz <= z1; iz++ {
+		for iy := y0; iy <= y1; iy++ {
+			base := (iz*g.ncy + iy) * g.ncx
+			for ix := x0; ix <= x1; ix++ {
+				for _, bi := range g.cells[base+ix] {
+					if pred(placed[bi]) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 // conflict reports whether any placed box strictly overlaps the query box. The
 // open-interval test matches ExtremePoint.conflictsBrute exactly, so the grid is
 // a drop-in accelerator. A box spanning several query cells may be tested more
