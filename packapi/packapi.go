@@ -1521,154 +1521,31 @@ func pack1D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	sizeByID := make(map[string]float64, len(req.Items))
+	for _, spec := range req.Items {
+		sizeByID[spec.ID] = spec.Width
+	}
+
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto); this
+	// modifier wraps the chosen algorithm, so it runs before registry dispatch.
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
 		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
-		sizeByID := make(map[string]float64, len(req.Items))
-		for _, spec := range req.Items {
-			sizeByID[spec.ID] = spec.Width
-		}
-		resp := buildResponse1D(result, req.Bin.Width, sizeByID)
+		resp := buildResponse1D(result, cap, sizeByID)
 		resp.BestPacker = best
 		return resp, nil
 	}
 
-	sizeByID1 := make(map[string]float64, len(req.Items))
-	for _, spec := range req.Items {
-		sizeByID1[spec.ID] = spec.Width
-	}
-	if req.Algorithm == "gbpp" {
-		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
-		resp := buildResponse1D(g.Result, req.Bin.Width, sizeByID1)
-		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
-		return resp, nil
-	}
-	if req.Algorithm == "lex" {
-		r, winner, lerr := lexResult(ctx, req, factory, items)
-		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: lerr.Error()}, nil
-		}
-		resp := buildResponse1D(r, req.Bin.Width, sizeByID1)
-		resp.BestPacker = winner
-		return resp, nil
-	}
-
-	var result pack.Result
-	var err error
-	var bestPacker string
-
-	switch req.Algorithm {
-	case "nf":
-		p := online.NextFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "nkf":
-		p := online.NextKFit(3, factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "bf":
-		p := online.BestFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "wf":
-		p := online.WorstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "awf":
-		p := online.AlmostWorstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "rff":
-		p := online.NewRFF(cap, factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "hk":
-		p := online.NewHarmonicK(11, cap, factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "ss":
-		p := online.SumOfSquares(cap, factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "ffd":
-		p := offline.FirstFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "bfd":
-		p := offline.BestFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "nfd":
-		p := offline.NextFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "wfd":
-		p := offline.WorstFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "mffd":
-		p := offline.ModifiedFirstFitDecreasing(cap, factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "kk":
-		result, err = offline.KarmarkarKarpCtx(ctx, items, cap, factory)
-	case "bc":
-		result, err = offline.BinCompletionCtx(ctx, items, cap, d1.NewFactory(cap), buildConstraints(req.Constraints)...)
-	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey1D))
-	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
-	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
-	case "arr":
-		result = offline.AdaptiveRuinRecreate(ctx, items, factory, req.searchOptions(ctx))
-	case "grasp":
-		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
-	case "auto":
-		p := meta.BestOf(
-			offline.FirstFitDecreasing(factory),
-			offline.BestFitDecreasing(factory),
-			offline.WorstFitDecreasing(factory),
-			offline.ModifiedFirstFitDecreasing(cap, factory),
-			meta.NewFuncCtx("kk", func(ctx context.Context, it []pack.Item) (pack.Result, error) {
-				return offline.KarmarkarKarpCtx(ctx, it, cap, d1.NewFactory(cap))
-			}),
-		)
-		result, err = packAllCtx(ctx, p, items)
-		bestPacker = p.Winner()
-	default:
-		p := online.FirstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	}
-
+	sc := &solveCtx{ctx: ctx, req: req, cap: cap, bw: cap, items: items, factory: factory}
+	result, m, err := lookupSolve("1d", req.Algorithm)(sc)
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
-
-	// Build a lookup from item ID → size for offset tracking.
-	sizeByID := make(map[string]float64, len(req.Items))
-	for _, spec := range req.Items {
-		sizeByID[spec.ID] = spec.Width
-	}
-	resp := buildResponse1D(result, req.Bin.Width, sizeByID)
-	resp.BestPacker = bestPacker
+	resp := buildResponse1D(result, cap, sizeByID)
+	resp.BestPacker = m.bestPacker
+	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
 	return resp, nil
 }
 
@@ -1740,7 +1617,8 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto); this
+	// modifier wraps the chosen algorithm, so it runs before registry dispatch.
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
 		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
@@ -1754,101 +1632,18 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return resp, nil
 	}
 
-	if req.Algorithm == "gbpp" {
-		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
-		resp := buildResponse2D(g.Result, false)
-		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
-		return resp, nil
-	}
-	if req.Algorithm == "lex" {
-		r, winner, lerr := lexResult(ctx, req, factory, items)
-		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: lerr.Error()}, nil
-		}
-		resp := buildResponse2D(r, false)
-		resp.BestPacker = winner
-		return resp, nil
-	}
-
-	var result pack.Result
-	var err error
-	var bestPacker string
-
-	switch req.Algorithm {
-	case "ffd":
-		p := offline.FirstFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "bfd":
-		p := offline.BestFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "nfd":
-		p := offline.NextFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "nf":
-		p := online.NextFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "bf":
-		p := online.BestFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "wf":
-		p := online.WorstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "nfdh", "ffdh", "bfdh":
-		// Shelf packing: decreasing-height sort + the shelf-fit policy baked into
-		// the factory's strategy (set by strat2DFor).
-		p := offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory))
-		result, err = packAllCtx(ctx, p, items)
-	case "brute":
-		result, err = offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey2D))
-	case "beam":
-		result = offline.BeamSearch(ctx, items, factory, req.beamOptions(ctx))
-	case "rr":
-		result = offline.RuinRecreate(ctx, items, factory, req.searchOptions(ctx))
-	case "arr":
-		result = offline.AdaptiveRuinRecreate(ctx, items, factory, req.searchOptions(ctx))
-	case "grasp":
-		result = offline.GRASP(ctx, items, factory, req.searchOptions(ctx))
-	case "auto":
-		mrFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewMaxRectsDefault), req.Constraints)
-		gFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewGuillotineDefault), req.Constraints)
-		skyFactory := constrainedFactory(d2.NewFactory(bw, bh, d2.NewSkylineDefault), req.Constraints)
-		p := meta.BestOf(
-			offline.FirstFitDecreasing(mrFactory),
-			offline.BestFitDecreasing(mrFactory),
-			offline.NextFitDecreasing(mrFactory),
-			offline.FirstFitDecreasing(gFactory),
-			offline.BestFitDecreasing(gFactory),
-			offline.FirstFitDecreasing(skyFactory),
-		)
-		result, err = packAllCtx(ctx, p, items)
-		bestPacker = p.Winner()
-	default: // ff, maxrects, guillotine, skyline
-		p := online.FirstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	}
-
+	sc := &solveCtx{ctx: ctx, req: req, bw: bw, bh: bh, items: items, factory: factory}
+	result, m, err := lookupSolve("2d", req.Algorithm)(sc)
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
-
-	// Skip compaction for guillotine — it would desync the free-rect overlay.
+	// Lateral anti-slosh compaction; skip guillotine (it would desync the free-rect overlay).
 	if dx, dy, any := req.Contact.lateralAxes(); any && req.Algorithm != "guillotine" {
 		compactResult2D(result, bw, bh, dx, dy)
 	}
 	resp := buildResponse2D(result, req.Algorithm == "guillotine")
-	resp.BestPacker = bestPacker
+	resp.BestPacker = m.bestPacker
+	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
 	return resp, nil
 }
 
@@ -1943,17 +1738,9 @@ func searchDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64)
 
 func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
-	// respond optionally runs the void-refiner (relocating items in place) before
-	// converting the result, so every 3-D return path picks it up uniformly.
-	respond := func(result pack.Result) (PackResponse, error) {
-		if req.RefineVoids {
-			refineResult3D(ctx, result, req)
-		}
-		return buildResponse3D(result), nil
-	}
 	// The placement strategy follows the algorithm (extreme-point / blf / ems /
-	// heightmap); all read the contact spec (Bottom → hard support gate, SideX/SideY
-	// → contact-maximizing placement, used only by extreme-point).
+	// heightmap / layer); all read the contact spec (Bottom → hard support gate,
+	// SideX/SideY → contact-maximizing placement, used only by extreme-point).
 	stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
@@ -1969,7 +1756,8 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		items[i] = it
 	}
 
-	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto).
+	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto); this
+	// modifier wraps the chosen algorithm, so it runs before registry dispatch.
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
 		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
@@ -1983,211 +1771,16 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 		return resp, nil
 	}
 
-	// Block-building: layered packing that fuses items into solid layer-height
-	// blocks (direct + same-footprint vertical stacks). Manages its own geometry
-	// and bins, so it ignores the factory/contact settings.
-	if req.Algorithm == "blocks" {
-		bp := d3.NewBlockPacker(bw, bd, bh)
-		result, berr := bp.PackAllCtx(ctx, items)
-		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: berr.Error()}, nil
-		}
-		settleResult3D(result) // drop any items left floating over a short layer cell
-		return respond(result)
-	}
-
-	// Column-building: the vertical counterpart of blocks — full-height columns of
-	// a fixed XY footprint (largest profile first) tiled across the floor, then a
-	// best-effort void-fill on top. Self-managing geometry; ignores factory/contact.
-	if req.Algorithm == "columns" {
-		cp := d3.NewColumnPacker(bw, bd, bh)
-		result, cerr := cp.PackAllCtx(ctx, items)
-		if cerr != nil && !errors.Is(cerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: cerr.Error()}, nil
-		}
-		settleResult3D(result) // drop any item left floating over a gap in the slice below
-		return respond(result)
-	}
-
-	// Assemble: fuse perfectly-fitting items into solid rectangular blocks, then
-	// place those (and leftovers) with EMS. Self-managing geometry; ignores factory.
-	if req.Algorithm == "assemble" {
-		as := d3.NewAssembler(bw, bd, bh)
-		result, aerr := as.PackAllCtx(ctx, items)
-		if aerr != nil && !errors.Is(aerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: aerr.Error()}, nil
-		}
-		return respond(result)
-	}
-
-	// LAFF (Largest-Area-Fit-First): layered packing; manages its own geometry
-	// and containers, so it ignores the factory/contact settings.
-	if req.Algorithm == "laff" {
-		result, lerr := d3.LAFF(items, bw, bd, bh)
-		if lerr != nil {
-			return PackResponse{Error: lerr.Error()}, nil
-		}
-		return respond(result)
-	}
-
-	// Brute-force: exhaustive item-order search for small orders (FFD fallback
-	// above the cap). Identical boxes are pruned via a sorted-dimension key.
-	if req.Algorithm == "brute" {
-		result, berr := offline.BruteForce(ctx, items, factory, req.bruteForceOptions(ctx, shapeKey3D))
-		if berr != nil && !errors.Is(berr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: berr.Error()}, nil
-		}
-		return respond(result)
-	}
-
-	// Order-search metaheuristics (beam / ruin-recreate / GRASP): they search item
-	// orderings and decode each through a constructive strategy. Decode through the
-	// strong maximal-space packer (EMS by default, see searchDecoder3D) rather than
-	// the plain extreme-point factory, so the same search reaches tighter packings.
-	switch req.Algorithm {
-	case "beam", "rr", "arr", "grasp":
-		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
-		dec := constrainedFactory(d3.NewFactory(bw, bd, bh, searchDecoder3D(req, spec)), req.Constraints)
-		sopts := req.searchOptions(ctx)
-		// Option: drive the ruin-and-recreate search through a cheap extreme-point
-		// surrogate (far faster per placement than EMS) and re-decode only the single
-		// best ordering through the strong factory. With "search_fast_decode" the
-		// search completes many more iterations within an interactive budget; the
-		// returned placement still comes from EMS. Only meaningful when the strong
-		// decoder is the default (EMS) — an explicit req.Decoder is respected as-is.
-		if req.Decoder == "" && req.optInt("search_fast_decode", 1) >= 1 {
-			sopts.DecodeFactory = constrainedFactory(
-				d3.NewFactory(bw, bd, bh, d3.NewExtremePointStrategyContact(spec)), req.Constraints)
-		}
-		switch req.Algorithm {
-		case "beam":
-			return respond(offline.BeamSearch(ctx, items, dec, req.beamOptions(ctx)))
-		case "rr":
-			return respond(offline.RuinRecreate(ctx, items, dec, sopts))
-		case "arr":
-			return respond(offline.AdaptiveRuinRecreate(ctx, items, dec, sopts))
-		case "grasp":
-			return respond(offline.GRASP(ctx, items, dec, sopts))
-		}
-	}
-
-	// GBPP: optional items (profit scalar) + bin cost, net-cost minimisation.
-	if req.Algorithm == "gbpp" {
-		g := gbpp.Pack(ctx, items, factory, gbpp.Options{BinCost: req.BinCost, ProfitScalar: "profit", OptionalScalar: "profit"})
-		resp := buildResponse3D(g.Result)
-		resp.NetCost, resp.IncludedProfit, resp.Rejected = g.NetCost, g.IncludedProfit, g.Rejected
-		return resp, nil
-	}
-
-	// Lexicographic: pick the best of FFD/BFD/NFD under an ordered objective list.
-	if req.Algorithm == "lex" {
-		result, winner, lerr := lexResult(ctx, req, factory, items)
-		if lerr != nil && !errors.Is(lerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: lerr.Error()}, nil
-		}
-		resp := buildResponse3D(result)
-		resp.BestPacker = winner
-		return resp, nil
-	}
-
-	// Joint multi-objective: bin selection and placement under one score, in a
-	// single pass — no separate compaction (contact is handled at placement).
-	if req.Algorithm == "joint" {
-		prefs, weights := buildPreferences(req.Preferences)
-		jf := joint.New(bw, bd, bh, d3.ContactSpec{
-			Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
-			NoFloating: req.Contact.NoFloating,
-		}, prefs, weights, buildConstraints(req.Constraints))
-		result, jerr := jf.PackAllCtx(ctx, items)
-		if jerr != nil && !errors.Is(jerr, pack.ErrItemTooLarge) {
-			return PackResponse{Error: jerr.Error()}, nil
-		}
-		return respond(result)
-	}
-
-	var result pack.Result
-	var err error
-	var bestPacker string
-
-	switch req.Algorithm {
-	case "ffd":
-		p := offline.FirstFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "bfd":
-		p := offline.BestFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "nfd":
-		p := offline.NextFitDecreasing(factory)
-		result, err = packAllCtx(ctx, p, items)
-	case "nf":
-		p := online.NextFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "bf":
-		p := online.BestFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "wf":
-		p := online.WorstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	case "layer":
-		// Layered packing: lay items flat and sort tallest-flat-first; the factory
-		// carries the LayerStack strategy (via strat3DFor) that fills one layer at a
-		// time. Commits per item, so it streams its progress.
-		p := offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(factory))
-		result, err = packAllCtx(ctx, p, items)
-	case "auto":
-		// Mirror autoCandidates (the streamed race) so Pack() and StreamPack() pick
-		// the same winner. Corner/maximal-space methods over the constrained factory
-		// honour constraints; the self-managed block/fusion/LAFF packers ignore the
-		// factory, so they only join when no constraints are set.
-		gateSpec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
-		stratF := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor(algo, gateSpec)), req.Constraints)
-		}
-		cands := []pack.OfflinePacker{
-			offline.FirstFitDecreasing(factory),
-			offline.BestFitDecreasing(factory),
-			offline.NextFitDecreasing(factory),
-			offline.FirstFitDecreasing(stratF("blf")),
-			offline.FirstFitDecreasing(stratF("ems")),
-			offline.FirstFitDecreasing(stratF("fit")),
-			offline.FirstFitDecreasing(stratF("heightmap")),
-			offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(stratF("layer"))),
-		}
-		if len(req.Constraints) == 0 {
-			cands = append(cands, d3.NewBlockPacker(bw, bd, bh), d3.NewAssembler(bw, bd, bh), d3.NewLAFFPacker(bw, bd, bh))
-		}
-		p := meta.BestOf(cands...)
-		result, err = packAllCtx(ctx, p, items)
-		bestPacker = p.Winner()
-	default: // ff, blf
-		p := online.FirstFit(factory)
-		var e error
-		if result, e = runOnline(ctx, p, items); e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
-			return PackResponse{Error: e.Error()}, nil
-		}
-	}
-
+	// Each 3-D solver applies its own post-pass (void-refine vs lateral compaction),
+	// so dispatch here just runs it and converts the result.
+	sc := &solveCtx{ctx: ctx, req: req, bw: bw, bd: bd, bh: bh, items: items, factory: factory}
+	result, m, err := lookupSolve("3d", req.Algorithm)(sc)
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
 		return PackResponse{Error: err.Error()}, nil
 	}
-
-	if req.Algorithm == "layer" {
-		settleResult3D(result) // the layered packer can float items above short cells
-	}
-	if dx, dy, any := req.Contact.lateralAxes(); any {
-		compactResult3D(result, bw, bd, bh, dx, dy, req.Contact.Bottom)
-	}
 	resp := buildResponse3D(result)
-	resp.BestPacker = bestPacker
+	resp.BestPacker = m.bestPacker
+	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
 	return resp, nil
 }
 

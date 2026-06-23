@@ -24,6 +24,31 @@ func smallItems(mode string, n int) []ItemSpec {
 	return out
 }
 
+// TestRegistryMatchesCapabilities makes registry↔capabilities drift impossible:
+// every advertised (mode, algorithm) must have a dedicated registered solver, and
+// every registered solver must be advertised. "pref" is the one exception — it is
+// the preference-fit balance modifier, dispatched by the pre-check in pack1D/2D/3D
+// rather than the solve registry.
+func TestRegistryMatchesCapabilities(t *testing.T) {
+	advertised := map[string]bool{}
+	for mode, algos := range AlgoCapabilities().Modes {
+		for _, a := range algos {
+			advertised[mode+"/"+a.ID] = true
+			if a.ID == "pref" {
+				continue // dispatched by the balance pre-check, not solveReg
+			}
+			if _, ok := solveReg[mode+"/"+a.ID]; !ok {
+				t.Errorf("advertised %s/%s has no registered solver", mode, a.ID)
+			}
+		}
+	}
+	for key := range solveReg {
+		if !advertised[key] {
+			t.Errorf("registered solver %q is not advertised in AlgoCapabilities", key)
+		}
+	}
+}
+
 // TestAdvertisedAlgosSolve guards against drift between what the algorithm registry
 // (AlgoCapabilities, served to the front-ends) advertises and what dispatch can
 // actually solve: every advertised (mode, algorithm) must pack a small feasible
