@@ -75,6 +75,13 @@ type SearchOptions struct {
 	// Progress, if set, receives coarse progress: GRASP reports restarts completed
 	// out of the total; RuinRecreate reports iterations completed out of MaxIters.
 	Progress pack.ProgressObserver
+	// DecodeFactory, if set, is the cheap surrogate decoder the search evaluates
+	// candidate orderings through, instead of the (potentially expensive) primary
+	// factory. The single best ordering found is then re-decoded once through the
+	// primary factory for the returned placement — so the search runs many more
+	// iterations on a fast packer while the final answer still comes from the
+	// strong one. Nil means decode every candidate through the primary factory.
+	DecodeFactory pack.BinFactory
 }
 
 func (o SearchOptions) seed() int64 {
@@ -98,22 +105,50 @@ func (o SearchOptions) restarts() int {
 	return o.Restarts
 }
 
-// RuinRecreate improves a packing by repeated ruin-and-recreate: from the
-// decreasing-volume ordering it removes a random subset of items and reinserts
-// them at the front, repacks, and keeps the perturbed ordering whenever it packs
-// at least as well — the goal-driven ruin-and-recreate scheme of Gardeyn &
-// Wauters (2022) for the 2-D variable-sized BPP, generalised to any dimension.
-// It returns the best packing found and honours ctx as a deadline.
+// ruinCap bounds the ruin magnitude. Incremental ruin-and-recreate rebuilds only
+// the bins a ruin touches, so its per-iteration cost grows with the ruin size; a
+// small ruin keeps each step cheap (a handful of bins) and lets the search run far
+// more iterations within a budget — the regime R&R is designed for. We cap the
+// removed-item count at a small constant, not a fraction of n, so the step cost
+// stays bounded as the instance grows.
+const ruinCap = 12
+
+// ruinSize draws a ruin magnitude in [1, min(n, ruinCap)].
+func ruinSize(n int, rng *rand.Rand) int {
+	hi := n
+	if hi > ruinCap {
+		hi = ruinCap
+	}
+	if hi < 1 {
+		hi = 1
+	}
+	return 1 + rng.Intn(hi)
+}
+
+// RuinRecreate improves a packing by repeated ruin-and-recreate: starting from the
+// decreasing-volume packing it removes a random subset of items, repacks only the
+// bins those items touched, re-inserts the removed items, and keeps the result
+// whenever it packs at least as well — the goal-driven ruin-and-recreate scheme of
+// Gardeyn & Wauters (2022) for the 2-D variable-sized BPP, generalised to any
+// dimension. Each step costs work proportional to the disturbed region rather than
+// the whole instance (see incremental.go). It returns the best packing found and
+// honours ctx as a deadline.
 func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts SearchOptions) pack.Result {
 	if len(items) == 0 {
 		return pack.Result{}
 	}
 	rng := rand.New(rand.NewSource(opts.seed()))
 
-	bestOrder := append([]pack.Item(nil), items...)
-	sort.SliceStable(bestOrder, func(i, j int) bool { return bestOrder[i].Volume() > bestOrder[j].Volume() })
-	best := packOrdering(factory, bestOrder)
-	bestScore := scoreResult(best)
+	decode := factory
+	if opts.DecodeFactory != nil {
+		decode = opts.DecodeFactory
+	}
+
+	order := append([]pack.Item(nil), items...)
+	sort.SliceStable(order, func(i, j int) bool { return order[i].Volume() > order[j].Volume() })
+	best := buildPartial(decode, order)
+	bestScore := best.score()
+	n := len(items)
 
 	maxIters := opts.maxIters()
 	step := maxIters / 100 // throttle to ~100 progress updates over the run
@@ -124,52 +159,19 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 		if ctx.Err() != nil {
 			break
 		}
-		cand := ruin(bestOrder, rng)
-		r := packOrdering(factory, cand)
-		if s := scoreResult(r); s.better(bestScore) {
-			best, bestScore, bestOrder = r, s, cand
+		k := ruinSize(n, rng)
+		cand := ruinRecreateStep(decode, best, k, rng)
+		if s := cand.score(); s.better(bestScore) {
+			best, bestScore = cand, s
 		}
 		if opts.Progress != nil && (iter+1)%step == 0 {
 			opts.Progress(iter+1, maxIters)
 		}
 	}
-	return best
-}
-
-// ruin removes a random 10–35% of items from order and reinserts them (shuffled)
-// at the front, so the recreate pass packs them into a fresh arrangement.
-func ruin(order []pack.Item, rng *rand.Rand) []pack.Item {
-	n := len(order)
-	k := 1 + rng.Intn(1+n/3) // up to ~a third
-	return ruinK(order, rng, k)
-}
-
-// ruinK removes exactly k random items (clamped to [1,n]) and reinserts them
-// shuffled at the front. Splitting the size out of ruin lets the adaptive search
-// drive the ruin magnitude itself.
-func ruinK(order []pack.Item, rng *rand.Rand, k int) []pack.Item {
-	n := len(order)
-	if k < 1 {
-		k = 1
+	if opts.DecodeFactory != nil {
+		return finalDecode(factory, best, items)
 	}
-	if k > n {
-		k = n
-	}
-	remove := make(map[int]bool, k)
-	for len(remove) < k {
-		remove[rng.Intn(n)] = true
-	}
-	removed := make([]pack.Item, 0, k)
-	kept := make([]pack.Item, 0, n-k)
-	for i, it := range order {
-		if remove[i] {
-			removed = append(removed, it)
-		} else {
-			kept = append(kept, it)
-		}
-	}
-	rng.Shuffle(len(removed), func(i, j int) { removed[i], removed[j] = removed[j], removed[i] })
-	return append(removed, kept...)
+	return best.result()
 }
 
 // AdaptiveRuinRecreate is a stronger ruin-and-recreate that, unlike RuinRecreate's
@@ -195,17 +197,28 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 	}
 	rng := rand.New(rand.NewSource(opts.seed()))
 
-	bestOrder := append([]pack.Item(nil), items...)
-	sort.SliceStable(bestOrder, func(i, j int) bool { return bestOrder[i].Volume() > bestOrder[j].Volume() })
-	best := packOrdering(factory, bestOrder)
-	bestScore := scoreResult(best)
+	decode := factory
+	if opts.DecodeFactory != nil {
+		decode = opts.DecodeFactory
+	}
 
-	curOrder := append([]pack.Item(nil), bestOrder...)
+	order := append([]pack.Item(nil), items...)
+	sort.SliceStable(order, func(i, j int) bool { return order[i].Volume() > order[j].Volume() })
+	best := buildPartial(decode, order)
+	bestScore := best.score()
+
+	cur := best
 	curScore := bestScore
 
-	// Ruin magnitude in items: from ~5% up to ~50% of the order.
+	// Ruin magnitude in items: the adaptive walk grows k from 1 up to a small cap
+	// when stalled (diversify) and snaps back to 1 on a new best (intensify). The
+	// cap stays a small constant — incremental recreate rebuilds only the touched
+	// bins, so a bounded ruin keeps each step cheap regardless of instance size.
 	minK := 1
-	maxK := n/2 + 1
+	maxK := ruinCap
+	if maxK > n {
+		maxK = n
+	}
 	k := minK
 	// Deviation band for record-to-record acceptance: a fraction of the best
 	// fill (fill is summed bin utilization, so it scales with bin count).
@@ -221,18 +234,16 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 		if ctx.Err() != nil {
 			break
 		}
-		cand := ruinK(curOrder, rng, k)
-		r := packOrdering(factory, cand)
-		s := scoreResult(r)
+		cand := ruinRecreateStep(decode, cur, k, rng)
+		s := cand.score()
 
 		switch {
 		case s.better(bestScore):
-			best, bestScore = r, s
-			curOrder, curScore = cand, s
-			bestOrder = cand
+			best, bestScore = cand, s
+			cur, curScore = cand, s
 			k, stall = minK, 0 // new best → intensify, reset the walk's patience
 		case s.withinRecord(bestScore, dev) && !curScore.better(s):
-			curOrder, curScore = cand, s // accept lateral/near move
+			cur, curScore = cand, s // accept lateral/near move
 			stall++
 		default:
 			stall++
@@ -242,14 +253,17 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 			if k > maxK {
 				k = minK
 			}
-			curOrder, curScore = bestOrder, bestScore
+			cur, curScore = best, bestScore
 			stall = 0
 		}
 		if opts.Progress != nil && (iter+1)%step == 0 {
 			opts.Progress(iter+1, maxIters)
 		}
 	}
-	return best
+	if opts.DecodeFactory != nil {
+		return finalDecode(factory, best, items)
+	}
+	return best.result()
 }
 
 // GRASP runs a Greedy Randomized Adaptive Search Procedure: each restart builds
@@ -267,12 +281,18 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 	if localBudget < 1 {
 		localBudget = 1
 	}
+	n := len(items)
+
+	decode := factory
+	if opts.DecodeFactory != nil {
+		decode = opts.DecodeFactory
+	}
 
 	// Restarts are independent, so run them concurrently. Each draws from its own
 	// RNG seeded deterministically (base seed + restart index), keeping the run
 	// reproducible for a given Seed regardless of scheduling.
 	type restartResult struct {
-		res   pack.Result
+		sol   partial
 		score resultScore
 		have  bool
 	}
@@ -284,28 +304,27 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 		}
 		rng := rand.New(rand.NewSource(opts.seed() + int64(r)))
 		order := randomizedGreedyOrder(items, rng)
-		res := packOrdering(factory, order)
-		// Short local search around this start.
-		curScore := scoreResult(res)
-		curOrder := order
+		// Short incremental ruin-and-recreate local search around this start.
+		cur := buildPartial(decode, order)
+		curScore := cur.score()
 		for i := 0; i < localBudget; i++ {
 			if ctx.Err() != nil {
 				break
 			}
-			cand := ruin(curOrder, rng)
-			cr := packOrdering(factory, cand)
-			if s := scoreResult(cr); s.better(curScore) {
-				res, curScore, curOrder = cr, s, cand
+			k := ruinSize(n, rng)
+			cand := ruinRecreateStep(decode, cur, k, rng)
+			if s := cand.score(); s.better(curScore) {
+				cur, curScore = cand, s
 			}
 		}
-		outs[r] = restartResult{res: res, score: curScore, have: true}
+		outs[r] = restartResult{sol: cur, score: curScore, have: true}
 		if opts.Progress != nil {
 			opts.Progress(int(atomic.AddInt64(&completed, 1)), restarts)
 		}
 	})
 
 	// Reduce in restart order so the winner is deterministic.
-	var best pack.Result
+	var best partial
 	var bestScore resultScore
 	have := false
 	for _, o := range outs {
@@ -313,10 +332,16 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 			continue
 		}
 		if !have || o.score.better(bestScore) {
-			best, bestScore, have = o.res, o.score, true
+			best, bestScore, have = o.sol, o.score, true
 		}
 	}
-	return best
+	if !have {
+		return pack.Result{}
+	}
+	if opts.DecodeFactory != nil {
+		return finalDecode(factory, best, items)
+	}
+	return best.result()
 }
 
 // randomizedGreedyOrder sorts items by decreasing volume, then builds an ordering

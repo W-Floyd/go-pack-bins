@@ -38,7 +38,14 @@ type benchRow struct {
 	nsPerOp, bins, fill, compact float64
 	unfit                        int
 	dnf                          bool // did not finish within the time budget
+	budget                       bool // anytime algorithm: ran to the budget, reporting best-so-far
 }
+
+// anytimeAlgos are improvement searches that honour the context as a deadline and
+// return their best packing found so far when it fires. Unlike algorithms that run
+// to completion (and overrun → DNF), these always yield a valid result, so when
+// they consume the whole budget we report what they achieved rather than DNF.
+var anytimeAlgos = map[string]bool{"rr": true, "arr": true, "grasp": true, "beam": true}
 
 // benchTimeout is the per-solve budget; a solve that doesn't finish is reported
 // DNF. It defaults to 1s — an interactive-request budget, the regime in which a
@@ -53,7 +60,7 @@ func parseBenchTimeout() time.Duration {
 			return d
 		}
 	}
-	return 4*time.Second
+	return 4 * time.Second
 }
 
 var (
@@ -126,6 +133,7 @@ func benchTables() string {
 	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
 	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
 	fmt.Fprintf(&b, "Each solve is timeboxed to %s (an interactive-request budget; raise PACK_BENCH_TIMEOUT for an offline-planning table); **DNF** = did not finish in time. ", benchTimeout)
+	b.WriteString("A `≤`-prefixed time marks an anytime improvement search (rr/arr/grasp/beam) that ran to the budget and reports its best-so-far. ")
 	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
 	for _, g := range groups {
 		rows := byGroup[g]
@@ -134,6 +142,13 @@ func benchTables() string {
 		wCompact := winners(rows, false, func(r benchRow) float64 { return round1(r.compact) })
 		wUnfit := winners(rows, true, func(r benchRow) float64 { return float64(r.unfit) })
 		wTime := winners(rows, true, func(r benchRow) float64 { return usOf(r.nsPerOp) })
+		// Budget-bound rows always consume the full deadline by design, so they never
+		// "win" the time column — drop them from the time-winner highlighting.
+		for i, r := range rows {
+			if r.budget {
+				wTime[i] = false
+			}
+		}
 
 		fmt.Fprintf(&b, "\n### %s — %s\n\n", g, benchMeta[g])
 		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |\n")
@@ -143,12 +158,16 @@ func benchTables() string {
 				fmt.Fprintf(&b, "| %s | — | — | — | — | **DNF** |\n", r.algo)
 				continue
 			}
+			timeCell := cell(fmtDuration(r.nsPerOp), wTime[i])
+			if r.budget {
+				timeCell = "≤" + fmtDuration(r.nsPerOp) // ran to the budget; best-so-far reported
+			}
 			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", r.algo,
 				cell(fmt.Sprintf("%d", int(r.bins)), wBins[i]),
 				cell(fmt.Sprintf("%.1f", r.fill), wFill[i]),
 				cell(fmt.Sprintf("%.1f", r.compact), wCompact[i]),
 				cell(fmt.Sprintf("%d", r.unfit), wUnfit[i]),
-				cell(fmtDuration(r.nsPerOp), wTime[i]))
+				timeCell)
 		}
 	}
 	return b.String()
@@ -242,12 +261,16 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 	}
 
 	// Each solve is timeboxed: if it doesn't finish within benchTimeout the context
-	// deadline fires, the solver returns early, and ctx.Err() is set — we mark the
-	// row DNF and stop (no point timing an interrupted solve). Solvers that ignore
-	// the context (e.g. LAFF) simply run to completion; if that overruns the budget
-	// it still counts as DNF.
+	// deadline fires, the solver returns early, and ctx.Err() is set. For most
+	// algorithms that means DNF — we stop (no point timing an interrupted solve);
+	// solvers that ignore the context (e.g. LAFF) run to completion and likewise
+	// count as DNF if they overrun. The improvement searches (anytimeAlgos) are
+	// different: they are *designed* to run until the deadline and return their
+	// best-so-far, so consuming the budget is expected, not a failure — we record
+	// what they achieved and flag the row as budget-bound rather than DNF.
+	anytime := anytimeAlgos[algo]
 	var resp PackResponse
-	dnf := false
+	dnf, ranToBudget := false, false
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -256,7 +279,11 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 		timedOut := ctx.Err() != nil
 		cancel()
 		if timedOut {
-			dnf = true
+			if anytime {
+				ranToBudget = true // valid best-so-far in resp; one budget-length solve suffices
+			} else {
+				dnf = true
+			}
 			break
 		}
 	}
@@ -279,10 +306,15 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 	if n := len(resp.Unplaced); n > 0 {
 		b.ReportMetric(float64(n), "unfit")
 	}
+	nsPerOp := float64(b.Elapsed().Nanoseconds()) / float64(b.N)
+	if ranToBudget {
+		nsPerOp = float64(benchTimeout.Nanoseconds()) // ran to the deadline by design
+	}
 	recordBench(benchRow{
 		group: sc.group, algo: algo,
-		nsPerOp: float64(b.Elapsed().Nanoseconds()) / float64(b.N),
+		nsPerOp: nsPerOp,
 		bins:    float64(resp.BinsUsed), fill: fill, compact: compact, unfit: len(resp.Unplaced),
+		budget: ranToBudget,
 	})
 }
 
