@@ -19,7 +19,7 @@
       "bin": { "width": 20, "depth": 20, "height": 20 },
       "contact": { "bottom": 0.6, "side_x": 0.5, "side_y": 0.5 },
       "gen": { "kind": "mix", "n": 500, "seed": 33 },
-      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks", "assemble"]
+      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "layer", "blocks", "assemble", "rr", "arr"]
     },
     {
       "slug": "3d-cartons",
@@ -29,7 +29,7 @@
       "desc": "400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12",
       "bin": { "width": 12, "depth": 12, "height": 12 },
       "gen": { "kind": "cartons", "n": 400, "seed": 5 },
-      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble"]
+      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble", "rr", "arr"]
     },
     {
       "slug": "3d-mega",
@@ -39,7 +39,7 @@
       "desc": "10 000 mixed boxes (sides 1–6) into a 75×75×75 bin",
       "bin": { "width": 75, "depth": 75, "height": 75 },
       "gen": { "kind": "mix", "n": 10000, "seed": 99 },
-      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "heightmap", "laff", "layer", "blocks", "assemble"]
+      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble", "rr", "arr"]
     },
     {
       "slug": "2d",
