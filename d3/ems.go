@@ -22,6 +22,13 @@ type EmptyMaximalSpace struct {
 	placed           []box
 	usedVol          float64
 	contact          ContactSpec
+
+	// Scratch reused across commits to avoid per-step allocation. spare is a
+	// second backing array for the space set: commit reads e.spaces and writes
+	// the rebuilt set into spare, then swaps — so the two never alias mid-rebuild.
+	// isNewBuf is the parallel new-slab flag buffer.
+	spare    []box
+	isNewBuf []bool
 }
 
 // NewEmptyMaximalSpace creates an EMS strategy for a bin of the given dimensions.
@@ -135,20 +142,40 @@ func (e *EmptyMaximalSpace) Occupy(x, y, z, w, d, h float64) {
 
 // commit records the placed box and rebuilds the empty-space set: every space
 // the box intrudes on is split into its surrounding maximal slabs, then any
-// space contained in another is pruned.
+// newly-created slab contained in another space is pruned.
+//
+// The space set is always an antichain (no space contains another). When box b
+// is carved out, a space that does *not* overlap b is carried over unchanged —
+// and such a space can never become redundant: it cannot be contained by a new
+// slab (every slab is a sub-region of some overlapped space s, and if a carried
+// space were inside that slab it would have been inside s, contradicting the
+// antichain) nor by another carried space (antichain). So only the new slabs can
+// be dropped, which is what lets pruneNewSlabs skip the carried spaces and turn
+// the old whole-set O(S²) prune (→ O(S³) build-up over a pack) into O(slabs·S).
 func (e *EmptyMaximalSpace) commit(b box) {
 	e.placed = append(e.placed, b)
 	e.usedVol += b.w * b.d * b.h
 
-	var next []box
+	// Build the rebuilt set into the spare backing array (never aliasing e.spaces,
+	// which we are reading) and the reusable new-slab flag buffer.
+	next := e.spare[:0]
+	isNew := e.isNewBuf[:0]
 	for _, s := range e.spaces {
 		if !boxesOverlap(s, b) {
 			next = append(next, s)
+			isNew = append(isNew, false)
 			continue
 		}
-		next = append(next, splitSpace(s, b)...)
+		for _, sl := range splitSpace(s, b) {
+			next = append(next, sl)
+			isNew = append(isNew, true)
+		}
 	}
-	e.spaces = pruneContained(next)
+	kept := pruneNewSlabs(next, isNew)
+	// Swap buffers: the old space set's backing array becomes next round's spare.
+	e.spare = e.spaces[:0]
+	e.spaces = kept
+	e.isNewBuf = isNew
 }
 
 // splitSpace returns the up-to-six maximal empty slabs of space s left free
@@ -179,6 +206,41 @@ func pruneContained(spaces []box) []box {
 	}
 	for i := range spaces {
 		if !keep[i] {
+			continue
+		}
+		for j := range spaces {
+			if i == j || !keep[j] {
+				continue
+			}
+			if contains(spaces[j], spaces[i]) && !sameBox(spaces[i], spaces[j]) {
+				keep[i] = false
+				break
+			}
+		}
+	}
+	out := spaces[:0]
+	for i, s := range spaces {
+		if keep[i] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// pruneNewSlabs drops any newly-created slab (isNew[i]) wholly contained within
+// another space, leaving carried-over spaces (isNew[i]==false) untouched. Given
+// the antichain invariant a carried space is never contained by anything in the
+// set, so visiting only the slabs yields exactly the same result as a whole-set
+// pruneContained — see commit's comment — at a fraction of the cost. The inner
+// scan, containment test and !keep[j] short-circuit mirror pruneContained
+// exactly so the kept set (and its order) is identical.
+func pruneNewSlabs(spaces []box, isNew []bool) []box {
+	keep := make([]bool, len(spaces))
+	for i := range spaces {
+		keep[i] = true
+	}
+	for i := range spaces {
+		if !isNew[i] {
 			continue
 		}
 		for j := range spaces {
