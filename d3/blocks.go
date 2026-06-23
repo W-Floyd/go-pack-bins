@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 
 	"github.com/W-Floyd/go-pack-bins/d2"
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -488,11 +489,12 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []b
 		fh  float64
 	}
 	groups := map[[2]float64][]ent{}
+	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
 	for i, it := range its {
 		if consumed[i] {
 			continue
 		}
-		seen := map[[2]float64]bool{} // one (idx, height) per footprint key per item
+		clear(seen) // one (idx, height) per footprint key per item
 		for _, o := range it.orient {
 			if o.fh >= H-blockEps {
 				continue // H-tall handled by tier 1; taller can't go in this layer
@@ -509,9 +511,14 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, consumed []bool, H float64) []b
 		es := groups[key]
 		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first prunes the search
 		used := make([]bool, len(es))
+		// heights/pos are rebuilt from the not-yet-used entries each round; reuse
+		// the backing arrays (reset to [:0]) instead of reallocating per round —
+		// a big footprint group otherwise allocates O(entries × blocks) of them,
+		// which dominated the packer's bytes.
+		heights := make([]float64, 0, len(es))
+		pos := make([]int, 0, len(es))
 		for {
-			heights := make([]float64, 0, len(es))
-			pos := make([]int, 0, len(es))
+			heights, pos = heights[:0], pos[:0]
 			for j, e := range es {
 				if !used[j] {
 					heights = append(heights, e.fh)
@@ -552,7 +559,9 @@ func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID 
 			continue
 		}
 		*nextID++
-		p, err := floor.TryPlace(d2.NewItem(fmt.Sprintf("blk-%d", *nextID), blk.fw, blk.fd, true))
+		// The 2-D floor item id is throwaway (the real placement uses each sub's
+		// own id), so a plain Itoa avoids fmt.Sprintf's per-block formatting cost.
+		p, err := floor.TryPlace(d2.NewItem(strconv.Itoa(*nextID), blk.fw, blk.fd, true))
 		if err != nil {
 			continue // footprint doesn't fit the remaining floor — leave for a later layer
 		}
@@ -590,11 +599,12 @@ func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, consumed []bool, H floa
 		fh  float64
 	}
 	groups := map[[2]float64][]ent{}
+	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
 	for i, it := range its {
 		if consumed[i] {
 			continue
 		}
-		seen := map[[2]float64]bool{}
+		clear(seen)
 		for _, o := range it.orient {
 			if o.fh > H+blockEps {
 				continue // can't fit this layer's height
