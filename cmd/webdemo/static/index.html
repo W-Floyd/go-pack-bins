@@ -1419,12 +1419,15 @@ const REFINE_KNOBS = [
   { key: 'refine_max_items', label: 'Refine max items', def: 80 },
   { key: 'refine_eval_budget', label: 'Refine eval budget', def: 40000 },
 ];
+// Wall-clock cap for the anytime searches. The input is in seconds; scale converts
+// to the time_limit_ms key the server reads. Blank = run to the iteration cap.
+const TIME_LIMIT_KNOB = { key: 'time_limit_ms', label: 'Time limit (s)', def: 'none', scale: 1000, min: 0, step: 0.5 };
 const ALGO_TUNABLES = {
-  beam:  [ { key: 'beam_width', label: 'Beam width', def: 6 }, { key: 'beam_branch', label: 'Branch', def: 4 }, { key: 'beam_max_items', label: 'Max items', def: 200 } ],
+  beam:  [ { key: 'beam_width', label: 'Beam width', def: 6 }, { key: 'beam_branch', label: 'Branch', def: 4 }, { key: 'beam_max_items', label: 'Max items', def: 200 }, TIME_LIMIT_KNOB ],
   brute: [ { key: 'brute_max_items', label: 'Max items (n!)', def: 8 } ],
-  rr:    [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
-  arr:   [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
-  grasp: [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_restarts', label: 'Restarts', def: 16 }, { key: 'search_seed', label: 'Seed', def: 1 } ],
+  rr:    [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
+  arr:   [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
+  grasp: [ { key: 'search_max_iters', label: 'Max iters', def: 2000 }, { key: 'search_restarts', label: 'Restarts', def: 16 }, { key: 'search_seed', label: 'Seed', def: 1 }, TIME_LIMIT_KNOB ],
   bf:    REFINE_KNOBS,
   wf:    REFINE_KNOBS,
   pref:  REFINE_KNOBS,
@@ -1464,7 +1467,7 @@ function renderAlgoTuning(algo, which) {
   let html = (knobs || []).map(k =>
     `<div class="field" style="max-width:130px">
        <label style="font-size:11px">${k.label}</label>
-       <input type="number" class="algo-tune" data-key="${k.key}" min="1" step="1" placeholder="${k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
+       <input type="number" class="algo-tune" data-key="${k.key}" data-scale="${k.scale || 1}" min="${k.min ?? 1}" step="${k.step ?? 1}" placeholder="${k.def}" style="font-size:12px" oninput="scheduleAutoPack()">
      </div>`).join('');
   if (wantDecoder) {
     html += `<div class="field" style="max-width:160px">
@@ -1484,7 +1487,7 @@ function collectAlgoOptions(which) {
   const opts = {};
   document.querySelectorAll('#' + ids.inputs + ' .algo-tune').forEach(el => {
     const v = parseFloat(el.value);
-    if (!isNaN(v)) opts[el.dataset.key] = v;
+    if (!isNaN(v) && v > 0) opts[el.dataset.key] = v * (parseFloat(el.dataset.scale) || 1);
   });
   return Object.keys(opts).length ? opts : undefined;
 }
@@ -2513,6 +2516,27 @@ async function runSinglePack(auto = false) {
     endPackIndicator();
   };
 
+  // renderFullPlacements replaces the whole view with a complete placement set —
+  // used by the "reposition" (settled positions) and "snapshot" (anytime search
+  // best-so-far) frames. binsUsed, when given, is authoritative for the bin count.
+  const renderFullPlacements = (pls, binsUsed) => {
+    data.placements = pls;
+    if (is3D) {
+      let nb = binsUsed || 0;
+      for (const p of pls) if (p.bin_index + 1 > nb) nb = p.bin_index + 1;
+      ctl = beginScene3D(body.bin, Math.max(1, nb), count);
+      ctl.addItems(pls);
+      ctl.render();
+    } else {
+      let mx = binsUsed || 0;
+      for (const p of pls) if (p.bin_index + 1 > mx) mx = p.bin_index + 1;
+      data.bins_used = mx;
+      draw2D(data, mode, body.bin);
+    }
+    if (binsUsed) data.bins_used = binsUsed;
+    liveStats();
+  };
+
   // onFrame handles one StreamFrame (meta/batch/done/error). The frames arrive
   // either over the server's NDJSON stream or, in WASM mode, as messages from the
   // pack worker — the same protocol both ways, so this dispatch is shared.
@@ -2556,21 +2580,12 @@ async function runSinglePack(auto = false) {
       // A relocating post-pass (settle / lateral compaction) ran after the live
       // stream; f.placements is the final position of everything. Replace what we
       // streamed and rebuild the view at the settled positions.
-      const pls = f.placements || [];
-      data.placements = pls;
-      if (is3D) {
-        let nb = 0;
-        for (const p of pls) if (p.bin_index + 1 > nb) nb = p.bin_index + 1;
-        ctl = beginScene3D(body.bin, Math.max(1, nb), count);
-        ctl.addItems(pls);
-        ctl.render();
-      } else {
-        let mx = 0;
-        for (const p of pls) if (p.bin_index + 1 > mx) mx = p.bin_index + 1;
-        data.bins_used = mx;
-        draw2D(data, mode, body.bin);
-      }
-      liveStats();
+      renderFullPlacements(f.placements || []);
+    } else if (f.type === 'snapshot') {
+      // An anytime search (rr/arr) improved its best packing; f.placements is the
+      // complete current-best set. Render it as a full replacement of the view so
+      // the user watches the solution converge (bin count can drop between frames).
+      renderFullPlacements(f.placements || [], f.bins_used);
     } else if (f.type === 'done') {
       if (multi) { finishRace(f, mode, body.bin, auto); }
       else {

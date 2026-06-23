@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -82,6 +83,47 @@ type SearchOptions struct {
 	// iterations on a fast packer while the final answer still comes from the
 	// strong one. Nil means decode every candidate through the primary factory.
 	DecodeFactory pack.BinFactory
+	// Deadline, if non-zero, is a wall-clock cutoff: the search stops once it passes,
+	// returning the best packing found so far. It is checked directly in the loop
+	// (not via ctx) so it works even where ctx timer goroutines aren't scheduled
+	// during a tight solve — notably js/wasm. ctx still stops the search sooner.
+	Deadline time.Time
+	// Snapshot, if set, receives the current best packing each time it improves, so a
+	// caller can show the search converging live. Called synchronously from the solve
+	// goroutine (for GRASP, from a restart worker), so it must be cheap and safe to
+	// call concurrently; the packing it receives is not mutated afterwards.
+	Snapshot func(pack.Result)
+}
+
+// expired reports whether the wall-clock deadline (if any) has passed.
+func (o SearchOptions) expired() bool {
+	return !o.Deadline.IsZero() && time.Now().After(o.Deadline)
+}
+
+// snapshot delivers the current best to the Snapshot observer, if one is set.
+func (o SearchOptions) snapshot(r pack.Result) {
+	if o.Snapshot != nil {
+		o.Snapshot(r)
+	}
+}
+
+// emitProgress reports search progress. Under a wall-clock Deadline it reports
+// elapsed/total time (so the bar tracks the budget the user actually set, not the
+// huge iteration cap); otherwise it reports iterations completed out of MaxIters.
+func (o SearchOptions) emitProgress(iter, maxIters int, start time.Time) {
+	if o.Progress == nil {
+		return
+	}
+	if !o.Deadline.IsZero() {
+		total := o.Deadline.Sub(start)
+		done := time.Since(start)
+		if done > total {
+			done = total
+		}
+		o.Progress(int(done.Milliseconds()), int(total.Milliseconds()))
+		return
+	}
+	o.Progress(iter, maxIters)
 }
 
 func (o SearchOptions) seed() int64 {
@@ -144,28 +186,33 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 		decode = opts.DecodeFactory
 	}
 
+	stop := func() bool { return opts.expired() } // bound the initial build by the wall-clock budget; ctx-cancel keeps the FFD baseline (see TestSearchCancel)
 	order := append([]pack.Item(nil), items...)
 	sort.SliceStable(order, func(i, j int) bool { return order[i].Volume() > order[j].Volume() })
-	best := buildPartial(decode, order)
+	best := buildPartialLimited(decode, order, stop)
 	bestScore := best.score()
 	n := len(items)
+
+	opts.snapshot(best.result()) // show the starting packing immediately
 
 	maxIters := opts.maxIters()
 	step := maxIters / 100 // throttle to ~100 progress updates over the run
 	if step < 1 {
 		step = 1
 	}
+	start := time.Now()
 	for iter := 0; iter < maxIters; iter++ {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || opts.expired() {
 			break
 		}
 		k := ruinSize(n, rng)
 		cand := ruinRecreateStep(decode, best, k, rng)
 		if s := cand.score(); s.better(bestScore) {
 			best, bestScore = cand, s
+			opts.snapshot(best.result())
 		}
-		if opts.Progress != nil && (iter+1)%step == 0 {
-			opts.Progress(iter+1, maxIters)
+		if (iter+1)%step == 0 {
+			opts.emitProgress(iter+1, maxIters, start)
 		}
 	}
 	if opts.DecodeFactory != nil {
@@ -202,10 +249,13 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 		decode = opts.DecodeFactory
 	}
 
+	stop := func() bool { return opts.expired() } // bound the initial build by the wall-clock budget; ctx-cancel keeps the FFD baseline (see TestSearchCancel)
 	order := append([]pack.Item(nil), items...)
 	sort.SliceStable(order, func(i, j int) bool { return order[i].Volume() > order[j].Volume() })
-	best := buildPartial(decode, order)
+	best := buildPartialLimited(decode, order, stop)
 	bestScore := best.score()
+
+	opts.snapshot(best.result()) // show the starting packing immediately
 
 	cur := best
 	curScore := bestScore
@@ -230,8 +280,9 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 	if step < 1 {
 		step = 1
 	}
+	start := time.Now()
 	for iter := 0; iter < maxIters; iter++ {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || opts.expired() {
 			break
 		}
 		cand := ruinRecreateStep(decode, cur, k, rng)
@@ -242,6 +293,7 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 			best, bestScore = cand, s
 			cur, curScore = cand, s
 			k, stall = minK, 0 // new best → intensify, reset the walk's patience
+			opts.snapshot(best.result())
 		case s.withinRecord(bestScore, dev) && !curScore.better(s):
 			cur, curScore = cand, s // accept lateral/near move
 			stall++
@@ -256,8 +308,8 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 			cur, curScore = best, bestScore
 			stall = 0
 		}
-		if opts.Progress != nil && (iter+1)%step == 0 {
-			opts.Progress(iter+1, maxIters)
+		if (iter+1)%step == 0 {
+			opts.emitProgress(iter+1, maxIters, start)
 		}
 	}
 	if opts.DecodeFactory != nil {
@@ -299,16 +351,16 @@ func GRASP(ctx context.Context, items []pack.Item, factory pack.BinFactory, opts
 	outs := make([]restartResult, restarts)
 	var completed int64
 	parallelFor(restarts, func(r int) {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || opts.expired() {
 			return // leaves have=false; skipped in the reduction
 		}
 		rng := rand.New(rand.NewSource(opts.seed() + int64(r)))
 		order := randomizedGreedyOrder(items, rng)
 		// Short incremental ruin-and-recreate local search around this start.
-		cur := buildPartial(decode, order)
+		cur := buildPartialLimited(decode, order, func() bool { return opts.expired() })
 		curScore := cur.score()
 		for i := 0; i < localBudget; i++ {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || opts.expired() {
 				break
 			}
 			k := ruinSize(n, rng)

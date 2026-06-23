@@ -78,8 +78,22 @@ func (s partial) placedOrder() []pack.Item {
 // buildPartial packs order through factory with First-Fit and captures the
 // resulting bins and their placements as a partial.
 func buildPartial(factory pack.BinFactory, order []pack.Item) partial {
+	return buildPartialLimited(factory, order, nil)
+}
+
+// buildPartialLimited is buildPartial with an optional stop predicate, checked
+// periodically: when it fires, the remaining (un-attempted) items are recorded as
+// unplaced and construction returns early. This lets a wall-clock/ctx budget bound
+// even the initial decode — so a huge instance whose construction alone exceeds the
+// limit yields a partial best-so-far instead of overrunning. stop nil never stops.
+func buildPartialLimited(factory pack.BinFactory, order []pack.Item, stop func() bool) partial {
 	p := online.FirstFit(factory)
-	for _, it := range order {
+	stoppedAt := -1
+	for i, it := range order {
+		if stop != nil && i%64 == 0 && stop() {
+			stoppedAt = i
+			break
+		}
 		p.Pack(it)
 	}
 	res := p.Result()
@@ -93,6 +107,12 @@ func buildPartial(factory pack.BinFactory, order []pack.Item) partial {
 	}
 	for _, b := range res.Bins {
 		out.bins = append(out.bins, liveBin{bin: b, placements: byBin[b.ID()]})
+	}
+	// Items never attempted (construction was cut short) are unplaced for now.
+	if stoppedAt >= 0 {
+		for _, it := range order[stoppedAt:] {
+			out.tooLarge = append(out.tooLarge, it.ID())
+		}
 	}
 	return out
 }
