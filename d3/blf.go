@@ -14,11 +14,14 @@ type BottomLeftFill struct {
 	binW, binD, binH float64
 	placed           []box
 	usedVol          float64
+
+	grid   *boxGrid     // spatial index over placed for O(local) conflict/support
+	cnrBuf [][3]float64 // reused candidate-corner scratch
 }
 
 // NewBottomLeftFill creates a BLF strategy for a bin of the given dimensions.
 func NewBottomLeftFill(w, d, h float64) *BottomLeftFill {
-	return &BottomLeftFill{binW: w, binD: d, binH: h}
+	return &BottomLeftFill{binW: w, binD: d, binH: h, grid: newBoxGrid(w, d, h)}
 }
 
 // NewBottomLeftFillStrategy matches Factory3D's strategy-constructor signature.
@@ -65,15 +68,18 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 	if !bestSet {
 		return 0, 0, 0, 0, 0, 0, false
 	}
+	s.grid.insert(int32(len(s.placed)), best)
 	s.placed = append(s.placed, best)
 	s.usedVol += best.w * best.d * best.h
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }
 
 // corners returns candidate positions: the origin plus, for each placed box, the
-// points just past its +x, +y and +z faces.
+// points just past its +x, +y and +z faces. The backing array is reused across
+// inserts (the result is consumed within the calling TryInsert before the next
+// rebuild), avoiding an O(placed) allocation every insert.
 func (s *BottomLeftFill) corners() [][3]float64 {
-	pts := [][3]float64{{0, 0, 0}}
+	pts := append(s.cnrBuf[:0], [3]float64{0, 0, 0})
 	for _, b := range s.placed {
 		pts = append(pts,
 			[3]float64{b.x + b.w, b.y, b.z},
@@ -81,6 +87,7 @@ func (s *BottomLeftFill) corners() [][3]float64 {
 			[3]float64{b.x, b.y, b.z + b.h},
 		)
 	}
+	s.cnrBuf = pts
 	return pts
 }
 
@@ -98,30 +105,26 @@ func (s *BottomLeftFill) better(a, b box) bool {
 }
 
 func (s *BottomLeftFill) conflicts(x, y, z, w, d, h float64) bool {
-	for _, b := range s.placed {
-		if overlap1D(x, x+w, b.x, b.x+b.w) > compactEps &&
+	return s.grid.anyNear(x, y, z, w, d, h, s.placed, func(b box) bool {
+		return overlap1D(x, x+w, b.x, b.x+b.w) > compactEps &&
 			overlap1D(y, y+d, b.y, b.y+b.d) > compactEps &&
-			overlap1D(z, z+h, b.z, b.z+b.h) > compactEps {
-			return true
-		}
-	}
-	return false
+			overlap1D(z, z+h, b.z, b.z+b.h) > compactEps
+	})
 }
 
 // supported reports whether the box would rest on the floor or the top face of a
-// placed box (positive footprint overlap) — BLF never leaves a box floating.
+// placed box (positive footprint overlap) — BLF never leaves a box floating. A
+// supporting box's top face is at z, so it registers in the grid's z-cell at z;
+// a thin (h=0) query there finds the candidates.
 func (s *BottomLeftFill) supported(x, y, z, w, d float64) bool {
 	if z <= compactEps {
 		return true
 	}
-	for _, b := range s.placed {
-		if math.Abs(b.z+b.h-z) <= compactEps &&
+	return s.grid.anyNear(x, y, z, w, d, 0, s.placed, func(b box) bool {
+		return math.Abs(b.z+b.h-z) <= compactEps &&
 			overlap1D(x, x+w, b.x, b.x+b.w) > compactEps &&
-			overlap1D(y, y+d, b.y, b.y+b.d) > compactEps {
-			return true
-		}
-	}
-	return false
+			overlap1D(y, y+d, b.y, b.y+b.d) > compactEps
+	})
 }
 
 var _ PlacementStrategy3D = (*BottomLeftFill)(nil)
