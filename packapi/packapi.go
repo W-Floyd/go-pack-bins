@@ -1922,18 +1922,28 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// the plain extreme-point factory, so the same search reaches tighter packings.
 	switch req.Algorithm {
 	case "beam", "rr", "arr", "grasp":
-		dec := constrainedFactory(d3.NewFactory(bw, bd, bh, searchDecoder3D(req, d3.ContactSpec{
-			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
-		})), req.Constraints)
+		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+		dec := constrainedFactory(d3.NewFactory(bw, bd, bh, searchDecoder3D(req, spec)), req.Constraints)
+		sopts := req.searchOptions(ctx)
+		// Option: drive the ruin-and-recreate search through a cheap extreme-point
+		// surrogate (far faster per placement than EMS) and re-decode only the single
+		// best ordering through the strong factory. With "search_fast_decode" the
+		// search completes many more iterations within an interactive budget; the
+		// returned placement still comes from EMS. Only meaningful when the strong
+		// decoder is the default (EMS) — an explicit req.Decoder is respected as-is.
+		if req.Decoder == "" && req.optInt("search_fast_decode", 1) >= 1 {
+			sopts.DecodeFactory = constrainedFactory(
+				d3.NewFactory(bw, bd, bh, d3.NewExtremePointStrategyContact(spec)), req.Constraints)
+		}
 		switch req.Algorithm {
 		case "beam":
 			return respond(offline.BeamSearch(ctx, items, dec, req.beamOptions(ctx)))
 		case "rr":
-			return respond(offline.RuinRecreate(ctx, items, dec, req.searchOptions(ctx)))
+			return respond(offline.RuinRecreate(ctx, items, dec, sopts))
 		case "arr":
-			return respond(offline.AdaptiveRuinRecreate(ctx, items, dec, req.searchOptions(ctx)))
+			return respond(offline.AdaptiveRuinRecreate(ctx, items, dec, sopts))
 		case "grasp":
-			return respond(offline.GRASP(ctx, items, dec, req.searchOptions(ctx)))
+			return respond(offline.GRASP(ctx, items, dec, sopts))
 		}
 	}
 
