@@ -932,6 +932,7 @@ const ALGOS = {
     {v:'laff',l:'Largest-Area-Fit-First (layers)'},
     {v:'layer',l:'Layered (flat, sequential — streams)'},
     {v:'blocks',l:'Block-building (fused layers — streams)'},
+    {v:'columns',l:'Column-building (fused columns — streams)'},
     {v:'assemble',l:'Assemble blocks → EMS (streams)'},
     {v:'blf', l:'Bottom-Left Fill (BLF)'},
     {v:'ems', l:'Empty Maximal Space (EMS)'},
@@ -2453,22 +2454,40 @@ async function runSinglePack(auto = false) {
     if (now - lastStats > 150) { lastStats = now; renderStats(data, mode, body.bin); }
   };
 
+  // The expensive part of a batch is the visual refresh (a full three.js render
+  // or 2-D redraw). Building the model — appending meshes / pushing placements —
+  // is cheap and must run for every batch so the final state is complete. So we
+  // do the model work synchronously per batch but coalesce the refresh to at most
+  // one per animation frame: when frames stream in faster than the display
+  // refreshes, the queued renders collapse into a single draw of the latest
+  // accumulated shape, instead of the UI falling behind rendering every step.
+  let pendingRaf = 0;
+  const scheduleRender = () => {
+    if (pendingRaf) return; // a refresh is already queued for the next frame
+    pendingRaf = requestAnimationFrame(() => {
+      pendingRaf = 0;
+      if (seq !== packSeq) return; // superseded — drop the stale frame
+      if (is3D) { if (ctl) ctl.render(); } else { draw2D(data, mode, body.bin); }
+      liveStats();
+    });
+  };
+
   const drawBatch = (placements) => {
     if (!placements.length) return;
     for (const p of placements) data.placements.push(p);
     if (is3D) {
-      if (ctl) { ctl.addItems(placements); ctl.render(); }
+      if (ctl) ctl.addItems(placements);
     } else {
       let mx = data.bins_used - 1;
       for (const p of placements) if (p.bin_index > mx) mx = p.bin_index;
       data.bins_used = mx + 1;
-      draw2D(data, mode, body.bin);
     }
-    liveStats();
+    scheduleRender();
   };
 
   const finish = () => {
     if (seq !== packSeq) return;
+    if (pendingRaf) { cancelAnimationFrame(pendingRaf); pendingRaf = 0; } // final draw below supersedes it
     lastResult = { data, mode, bin: body.bin };
     renderShell(data, mode, body.bin);
     if (is3D) { if (ctl) ctl.render(); } else { draw2D(data, mode, body.bin); }

@@ -881,7 +881,7 @@ func isStreamable(req PackRequest) bool {
 	// These self-managing 3-D packers stream their commits; joint/assemble need no
 	// post-pass, while blocks/layer add a settle reposition frame at the end.
 	if req.Mode == "3d" && (req.Algorithm == "joint" || req.Algorithm == "assemble" ||
-		req.Algorithm == "blocks" || req.Algorithm == "layer") {
+		req.Algorithm == "blocks" || req.Algorithm == "columns" || req.Algorithm == "layer") {
 		return true
 	}
 	if prefs, _ := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
@@ -1037,8 +1037,8 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 	moved := false
 	switch req.Mode {
 	case "3d":
-		if req.Algorithm == "layer" || req.Algorithm == "blocks" {
-			settleResult3D(result) // drop items left floating above a short layer cell
+		if req.Algorithm == "layer" || req.Algorithm == "blocks" || req.Algorithm == "columns" {
+			settleResult3D(result) // drop items left floating above a short layer/slice cell
 			moved = true
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
@@ -1109,6 +1109,9 @@ func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFac
 	case "blocks": // 3-D block-building; manages its own bins, ignores factory
 		bp := d3.NewBlockPacker(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
 		return bp, func(items []pack.Item) pack.Result { r, _ := bp.PackAllCtx(ctx, items); return r }, true
+	case "columns": // 3-D column-building; manages its own bins, ignores factory
+		cp := d3.NewColumnPacker(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
+		return cp, func(items []pack.Item) pack.Result { r, _ := cp.PackAllCtx(ctx, items); return r }, true
 	case "assemble": // 3-D assemble-then-EMS; manages its own bins, ignores factory
 		as := d3.NewAssembler(req.Bin.Width, req.Bin.Depth, req.Bin.Height)
 		return as, func(items []pack.Item) pack.Result { r, _ := as.PackAllCtx(ctx, items); return r }, true
@@ -1850,6 +1853,19 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: berr.Error()}, nil
 		}
 		settleResult3D(result) // drop any items left floating over a short layer cell
+		return buildResponse3D(result), nil
+	}
+
+	// Column-building: the vertical counterpart of blocks — full-height columns of
+	// a fixed XY footprint (largest profile first) tiled across the floor, then a
+	// best-effort void-fill on top. Self-managing geometry; ignores factory/contact.
+	if req.Algorithm == "columns" {
+		cp := d3.NewColumnPacker(bw, bd, bh)
+		result, cerr := cp.PackAllCtx(ctx, items)
+		if cerr != nil && !errors.Is(cerr, pack.ErrItemTooLarge) {
+			return PackResponse{Error: cerr.Error()}, nil
+		}
+		settleResult3D(result) // drop any item left floating over a gap in the slice below
 		return buildResponse3D(result), nil
 	}
 

@@ -8,7 +8,7 @@
       "desc": "500 mixed boxes (sides 1–6) into a 20×20×20 bin",
       "bin": { "width": 20, "depth": 20, "height": 20 },
       "gen": { "kind": "mix", "n": 500, "seed": 33 },
-      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble", "rr", "arr"]
+      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble", "rr", "arr"]
     },
     {
       "slug": "3d-slosh",
@@ -29,7 +29,7 @@
       "desc": "400 boxes from a 10-SKU palette (sizes divide the bin) into 12×12×12",
       "bin": { "width": 12, "depth": 12, "height": 12 },
       "gen": { "kind": "cartons", "n": 400, "seed": 5 },
-      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "assemble"]
+      "algos": ["ff", "ffd", "bfd", "nfd", "blf", "ems", "fit", "heightmap", "laff", "layer", "blocks", "columns", "assemble"]
     },
     {
       "slug": "3d-mega",
