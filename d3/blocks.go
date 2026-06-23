@@ -668,11 +668,21 @@ func blockHeight(b block) float64 {
 // findStack returns indices into heights of a subset summing to target (within
 // eps), using at most maxStack items, or nil. heights must be sorted descending so
 // the sum>target cutoff prunes; a node budget bounds the worst case.
+//
+// The current subset is carried in a single reused buffer with push/pop
+// backtracking rather than a fresh append-copy per recursive call — the
+// len(pick) >= maxStack guard runs before every push and pick is pre-sized to
+// maxStack, so it never reallocates. This keeps the search allocation-free
+// (the only allocation is cloning a hit into found), which matters because the
+// block packer runs this per footprint-group per layer: on a 10k-item solve the
+// old per-call append dominated allocation (≈48M of 50M) and the GC churn that
+// followed. Search order, node budget and result are unchanged.
 func findStack(heights []float64, target float64, maxStack int) []int {
 	budget := 20000
 	var found []int
-	var dfs func(start int, sum float64, pick []int) bool
-	dfs = func(start int, sum float64, pick []int) bool {
+	pick := make([]int, 0, maxStack)
+	var dfs func(start int, sum float64) bool
+	dfs = func(start int, sum float64) bool {
 		if budget <= 0 {
 			return false
 		}
@@ -685,13 +695,15 @@ func findStack(heights []float64, target float64, maxStack int) []int {
 			return false
 		}
 		for i := start; i < len(heights); i++ {
-			if dfs(i+1, sum+heights[i], append(pick, i)) {
+			pick = append(pick, i)
+			if dfs(i+1, sum+heights[i]) {
 				return true
 			}
+			pick = pick[:len(pick)-1]
 		}
 		return false
 	}
-	dfs(0, 0, nil)
+	dfs(0, 0)
 	return found
 }
 
