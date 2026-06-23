@@ -10,11 +10,13 @@ type Item3D struct {
 	W, D, H     float64 // natural dimensions: width, depth, height
 	AllowRotate bool
 	scalars     map[string]float64
+	orient      [][3]float64 // distinct orientations, precomputed at construction
 }
 
 // NewItem creates a box item with the given dimensions.
 func NewItem(id string, w, d, h float64, allowRotate bool) *Item3D {
-	return &Item3D{id: id, W: w, D: d, H: h, AllowRotate: allowRotate}
+	return &Item3D{id: id, W: w, D: d, H: h, AllowRotate: allowRotate,
+		orient: computeOrientations(w, d, h, allowRotate)}
 }
 
 func (i *Item3D) ID() string      { return i.id }
@@ -32,13 +34,22 @@ func (i *Item3D) LayerHeight() float64 {
 }
 
 // Orientations returns the distinct (w, d, h) triplets obtainable by rotating
-// the item around axis-aligned axes. Returns 1 if AllowRotate is false, else up to 6.
+// the item around axis-aligned axes. Returns 1 if AllowRotate is false, else up
+// to 6. The set is precomputed at construction and returned as a shared,
+// read-only slice — callers must not mutate it. Precomputing (rather than lazy
+// caching) keeps it safe to call concurrently on the same item, as meta.BestOf
+// does when racing packers over a shared item set.
 func (i *Item3D) Orientations() [][3]float64 {
-	if !i.AllowRotate {
-		return [][3]float64{{i.W, i.D, i.H}}
+	return i.orient
+}
+
+// computeOrientations builds the distinct axis-aligned orientations of a box.
+func computeOrientations(w, d, h float64, allowRotate bool) [][3]float64 {
+	if !allowRotate {
+		return [][3]float64{{w, d, h}}
 	}
 	seen := map[[3]float64]bool{}
-	dims := [3]float64{i.W, i.D, i.H}
+	dims := [3]float64{w, d, h}
 	perms := [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
 	var result [][3]float64
 	for _, p := range perms {
