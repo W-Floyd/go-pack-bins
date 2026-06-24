@@ -71,6 +71,11 @@ type SearchOptions struct {
 	Seed int64
 	// MaxIters caps total evaluated orderings (default 2000). ctx can stop sooner.
 	MaxIters int
+	// TargetBins, if > 0, lets the search stop early once it finds a packing with no
+	// unplaced items in at most TargetBins bins — i.e. one that meets a known lower
+	// bound and is therefore provably bin-optimal, so spending the rest of the budget
+	// can't reduce the count further. Pass the volume/geometry lower bound here.
+	TargetBins int
 	// Restarts is the number of GRASP multistarts (default 16).
 	Restarts int
 	// Progress, if set, receives coarse progress: GRASP reports restarts completed
@@ -98,6 +103,12 @@ type SearchOptions struct {
 // expired reports whether the wall-clock deadline (if any) has passed.
 func (o SearchOptions) expired() bool {
 	return !o.Deadline.IsZero() && time.Now().After(o.Deadline)
+}
+
+// optimal reports whether score s meets the bin-count lower bound (TargetBins) with
+// nothing unplaced — a provably bin-optimal packing the search can stop at.
+func (o SearchOptions) optimal(s resultScore) bool {
+	return o.TargetBins > 0 && s.unplaced == 0 && s.bins <= o.TargetBins
 }
 
 // snapshot delivers the current best to the Snapshot observer, if one is set.
@@ -201,7 +212,7 @@ func RuinRecreate(ctx context.Context, items []pack.Item, factory pack.BinFactor
 		step = 1
 	}
 	start := time.Now()
-	for iter := 0; iter < maxIters; iter++ {
+	for iter := 0; iter < maxIters && !opts.optimal(bestScore); iter++ {
 		if ctx.Err() != nil || opts.expired() {
 			break
 		}
@@ -281,7 +292,7 @@ func AdaptiveRuinRecreate(ctx context.Context, items []pack.Item, factory pack.B
 		step = 1
 	}
 	start := time.Now()
-	for iter := 0; iter < maxIters; iter++ {
+	for iter := 0; iter < maxIters && !opts.optimal(bestScore); iter++ {
 		if ctx.Err() != nil || opts.expired() {
 			break
 		}

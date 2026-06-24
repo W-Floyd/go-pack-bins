@@ -121,7 +121,36 @@ func searchOpts3D(sc *solveCtx) offline.SearchOptions {
 		spec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
 		sopts.DecodeFactory = constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, d3.NewExtremePointStrategyContact(spec)), sc.req.Constraints)
 	}
+	// Stop the bin-count search as soon as it proves the volume lower bound — no
+	// budget is then spent failing to beat an already-optimal count.
+	sopts.TargetBins = offline.LowerBoundVolume(sc.items, sc.bw*sc.bd*sc.bh)
 	return sopts
+}
+
+// sweepMaxItems gates the multi-objective seed-sweep escalation to the small,
+// combinatorial regime where one-shot constructive packers strand bins or leave
+// loose, sloshy arrangements — and where re-packing thousands of shuffled orders is
+// cheap. Larger instances stay with the constructive race / order-search.
+const sweepMaxItems = 80
+
+// sweepRefine3D tries to improve a constructive packing on the full quality
+// objective (fewest unplaced → fewest bins → most compact → least lateral slosh) by
+// re-packing the items in many shuffled orders, and returns the better of the two
+// (with the winning packer name). It only runs for small instances; slosh is part
+// of the objective only when an anti-slosh contact target is set. Never a
+// regression: the base packing is kept unless a swept one scores strictly better.
+func sweepRefine3D(sc *solveCtx, base pack.Result, baseName string) (pack.Result, string) {
+	n := len(sc.items)
+	if n == 0 || n > sweepMaxItems {
+		return base, baseName
+	}
+	_, _, useSlosh := sc.req.Contact.lateralAxes()
+	const maxTries = 4000
+	swept, sq, ok := qualitySweep3D(sc.ctx, decoder3D(sc), sc.items, useSlosh, maxTries)
+	if ok && sq.better(scoreQuality3D(base, useSlosh), useSlosh) {
+		return swept, "sweep"
+	}
+	return base, baseName
 }
 
 func init() {
@@ -227,7 +256,14 @@ func init() {
 		}
 		p := meta.BestOf(cands...)
 		r, e := packAllCtx(sc.ctx, p, sc.items)
-		return r, p.Winner(), e
+		if fatal(e) {
+			return r, p.Winner(), e
+		}
+		// On small combinatorial instances, escalate to the multi-objective seed-sweep:
+		// the constructive race optimises bins, but a shuffled re-pack can match the bin
+		// count while tightening compactness and reducing slosh.
+		r, winner := sweepRefine3D(sc, r, p.Winner())
+		return r, winner, e
 	}))
 }
 

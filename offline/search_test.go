@@ -83,3 +83,27 @@ func TestSearchCancel(t *testing.T) {
 		t.Fatal("expected at least the initial FFD packing even when cancelled")
 	}
 }
+
+// TestSearchEarlyStopTargetBins verifies the lower-bound early-stop: items that
+// pack perfectly into 3 capacity-10 bins (volume bound = 3) must let RuinRecreate
+// and AdaptiveRuinRecreate return that 3-bin packing even with a huge iteration cap,
+// because reaching TargetBins is provably optimal — without early-stop a 5,000,000
+// iteration cap would run far longer than this test tolerates.
+func TestSearchEarlyStopTargetBins(t *testing.T) {
+	items := searchItems(6, 4, 6, 4, 6, 4) // three 6+4=10 bins
+	opts := offline.SearchOptions{Seed: 1, MaxIters: 5_000_000, TargetBins: 3}
+	for _, tc := range []struct {
+		name string
+		run  func() pack.Result
+	}{
+		{"rr", func() pack.Result { return offline.RuinRecreate(context.Background(), items, d1.NewFactory(10), opts) }},
+		{"arr", func() pack.Result {
+			return offline.AdaptiveRuinRecreate(context.Background(), items, d1.NewFactory(10), opts)
+		}},
+	} {
+		r := tc.run()
+		if len(r.Unplaced) != 0 || r.BinsUsed() != 3 {
+			t.Fatalf("%s: bins=%d unplaced=%d, want 3/0", tc.name, r.BinsUsed(), len(r.Unplaced))
+		}
+	}
+}
