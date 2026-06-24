@@ -34,12 +34,15 @@ import (
 // ─── markdown accumulation ──────────────────────────────────────────────────
 
 type benchRow struct {
-	group, algo                  string // group = section heading (e.g. "3D", "3D · anti-slosh")
+	slug, group, algo            string // slug = section marker key; group = heading (e.g. "3D · anti-slosh")
 	nsPerOp, bins, fill, compact float64
 	unfit                        int
 	dnf                          bool // did not finish within the time budget
 	budget                       bool // anytime algorithm: ran to the budget, reporting best-so-far
 }
+
+// benchSectionMeta is a section's heading and instance description, keyed by slug.
+type benchSectionMeta struct{ group, desc string }
 
 // anytimeAlgos are improvement searches that honour the context as a deadline and
 // return their best packing found so far when it fires. Unlike algorithms that run
@@ -65,18 +68,18 @@ func parseBenchTimeout() time.Duration {
 
 var (
 	benchMu    sync.Mutex
-	benchRows  = map[string]benchRow{} // keyed by "group/algo"; last write wins
-	benchOrder []string                // insertion order of keys
-	benchMeta  = map[string]string{}   // group → instance description
+	benchRows  = map[string]benchRow{}         // keyed by "slug/algo"; last write wins
+	benchOrder []string                        // insertion order of keys
+	benchMeta  = map[string]benchSectionMeta{} // slug → section heading + description
 )
 
 // recordBench stores one algorithm's result. Go may invoke a benchmark func
-// several times while sizing b.N; keying by group/algo and overwriting keeps just
+// several times while sizing b.N; keying by slug/algo and overwriting keeps just
 // the final run per algorithm.
 func recordBench(r benchRow) {
 	benchMu.Lock()
 	defer benchMu.Unlock()
-	k := r.group + "/" + r.algo
+	k := r.slug + "/" + r.algo
 	if _, ok := benchRows[k]; !ok {
 		benchOrder = append(benchOrder, k)
 	}
@@ -104,20 +107,45 @@ const (
 	benchMarkerEnd   = "<!-- BENCH:END -->"
 )
 
-// benchTables renders the per-mode comparison tables (the block that lives
-// between the README markers).
-func benchTables() string {
-	// Group rows by section, preserving the order groups first appeared.
-	var groups []string
-	byGroup := map[string][]benchRow{}
-	for _, k := range benchOrder {
-		r := benchRows[k]
-		if _, seen := byGroup[r.group]; !seen {
-			groups = append(groups, r.group)
-		}
-		byGroup[r.group] = append(byGroup[r.group], r)
-	}
+// Per-section markers let each scenario's table update independently: a run that
+// touches only some scenarios rewrites just their blocks and preserves the rest.
+func sectionStartMarker(slug string) string { return "<!-- BENCH:" + slug + ":START -->" }
+func sectionEndMarker(slug string) string   { return "<!-- BENCH:" + slug + ":END -->" }
 
+// sectionInner returns the content currently between a section's markers in doc
+// (trimmed of surrounding blank lines), so a section the current run didn't
+// regenerate can be carried over verbatim.
+func sectionInner(doc, slug string) (string, bool) {
+	start, end := sectionStartMarker(slug), sectionEndMarker(slug)
+	i := strings.Index(doc, start)
+	if i < 0 {
+		return "", false
+	}
+	rest := doc[i+len(start):]
+	j := strings.Index(rest, end)
+	if j < 0 {
+		return "", false
+	}
+	return strings.Trim(rest[:j], "\n"), true
+}
+
+// benchLegend is the explanatory paragraph shown once at the top of the comparison
+// block, above the per-section tables.
+func benchLegend() string {
+	var b strings.Builder
+	b.WriteString("_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better); the best value in each column is **bold** (all ties, unless every row matches). ")
+	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
+	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
+	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
+	fmt.Fprintf(&b, "Each solve is timeboxed to %s (an interactive-request budget; raise PACK_BENCH_TIMEOUT for an offline-planning table); **DNF** = did not finish in time. ", benchTimeout)
+	b.WriteString("A `≤`-prefixed time marks an anytime improvement search (rr/arr/grasp/beam) that ran to the budget and reports its best-so-far. ")
+	b.WriteString("Time is per solve; absolute numbers vary by machine._")
+	return b.String()
+}
+
+// renderSectionBody renders one scenario's heading and result table — the content
+// that lives between that section's BENCH:<slug> markers.
+func renderSectionBody(group, desc string, rows []benchRow) string {
 	round1 := func(v float64) float64 { return math.Round(v*10) / 10 }
 	usOf := func(ns float64) float64 { return float64(time.Duration(int64(ns)).Round(time.Microsecond)) }
 	cell := func(s string, win bool) string {
@@ -127,50 +155,40 @@ func benchTables() string {
 		return s
 	}
 
-	var b strings.Builder
-	b.WriteString("_Arrows mark the better direction (↓ lower-is-better, ↑ higher-is-better); the best value in each column is **bold** (all ties, unless every row matches). ")
-	b.WriteString("`fill%` = packed volume ÷ (bins × bin volume); higher is tighter. ")
-	b.WriteString("`compact%` = packed volume ÷ the items' bounding-box volume, averaged over bins — ")
-	b.WriteString("how void-free the occupied envelope is, *independent* of how full the bin is, so it isn't flattered by underfill. ")
-	fmt.Fprintf(&b, "Each solve is timeboxed to %s (an interactive-request budget; raise PACK_BENCH_TIMEOUT for an offline-planning table); **DNF** = did not finish in time. ", benchTimeout)
-	b.WriteString("A `≤`-prefixed time marks an anytime improvement search (rr/arr/grasp/beam) that ran to the budget and reports its best-so-far. ")
-	b.WriteString("Time is per solve; absolute numbers vary by machine._\n")
-	for _, g := range groups {
-		rows := byGroup[g]
-		wBins := winners(rows, true, func(r benchRow) float64 { return float64(int(r.bins)) })
-		wFill := winners(rows, false, func(r benchRow) float64 { return round1(r.fill) })
-		wCompact := winners(rows, false, func(r benchRow) float64 { return round1(r.compact) })
-		wUnfit := winners(rows, true, func(r benchRow) float64 { return float64(r.unfit) })
-		wTime := winners(rows, true, func(r benchRow) float64 { return usOf(r.nsPerOp) })
-		// Budget-bound rows always consume the full deadline by design, so they never
-		// "win" the time column — drop them from the time-winner highlighting.
-		for i, r := range rows {
-			if r.budget {
-				wTime[i] = false
-			}
-		}
-
-		fmt.Fprintf(&b, "\n### %s — %s\n\n", g, benchMeta[g])
-		b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |\n")
-		b.WriteString("|-----------|-------:|---------:|------------:|--------:|----------:|\n")
-		for i, r := range rows {
-			if r.dnf {
-				fmt.Fprintf(&b, "| %s | — | — | — | — | **DNF** |\n", r.algo)
-				continue
-			}
-			timeCell := cell(fmtDuration(r.nsPerOp), wTime[i])
-			if r.budget {
-				timeCell = "≤" + fmtDuration(r.nsPerOp) // ran to the budget; best-so-far reported
-			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", r.algo,
-				cell(fmt.Sprintf("%d", int(r.bins)), wBins[i]),
-				cell(fmt.Sprintf("%.1f", r.fill), wFill[i]),
-				cell(fmt.Sprintf("%.1f", r.compact), wCompact[i]),
-				cell(fmt.Sprintf("%d", r.unfit), wUnfit[i]),
-				timeCell)
+	wBins := winners(rows, true, func(r benchRow) float64 { return float64(int(r.bins)) })
+	wFill := winners(rows, false, func(r benchRow) float64 { return round1(r.fill) })
+	wCompact := winners(rows, false, func(r benchRow) float64 { return round1(r.compact) })
+	wUnfit := winners(rows, true, func(r benchRow) float64 { return float64(r.unfit) })
+	wTime := winners(rows, true, func(r benchRow) float64 { return usOf(r.nsPerOp) })
+	// Budget-bound rows always consume the full deadline by design, so they never
+	// "win" the time column — drop them from the time-winner highlighting.
+	for i, r := range rows {
+		if r.budget {
+			wTime[i] = false
 		}
 	}
-	return b.String()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "### %s — %s\n\n", group, desc)
+	b.WriteString("| Algorithm | Bins ↓ | Fill % ↑ | Compact % ↑ | Unfit ↓ | Time/op ↓ |\n")
+	b.WriteString("|-----------|-------:|---------:|------------:|--------:|----------:|\n")
+	for i, r := range rows {
+		if r.dnf {
+			fmt.Fprintf(&b, "| %s | — | — | — | — | **DNF** |\n", r.algo)
+			continue
+		}
+		timeCell := cell(fmtDuration(r.nsPerOp), wTime[i])
+		if r.budget {
+			timeCell = "≤" + fmtDuration(r.nsPerOp) // ran to the budget; best-so-far reported
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", r.algo,
+			cell(fmt.Sprintf("%d", int(r.bins)), wBins[i]),
+			cell(fmt.Sprintf("%.1f", r.fill), wFill[i]),
+			cell(fmt.Sprintf("%.1f", r.compact), wCompact[i]),
+			cell(fmt.Sprintf("%d", r.unfit), wUnfit[i]),
+			timeCell)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // winners marks which rows hold the best value of a column. key extracts the
@@ -208,10 +226,14 @@ func winners(rows []benchRow, lowerBetter bool, key func(benchRow) float64) []bo
 	return out
 }
 
-// writeBenchMarkdown rewrites the comparison tables in place between the
+// writeBenchMarkdown rewrites the comparison block in place between the
 // <!-- BENCH:START --> / <!-- BENCH:END --> markers of the target file (the repo
-// README by default; PACK_BENCH_MD overrides). The benchmark's cwd is the package
-// directory, so the README sits one level up.
+// README by default; PACK_BENCH_MD overrides). Each scenario's table is wrapped in
+// its own <!-- BENCH:<slug>:START/END --> markers, so a run that recorded only some
+// scenarios refreshes just those blocks and carries the rest over verbatim from the
+// existing file — letting individual benchmark sets update as they run. Section
+// order is the canonical scenario order, independent of which subset ran. The
+// benchmark's cwd is the package directory, so the README sits one level up.
 func writeBenchMarkdown() error {
 	path := os.Getenv("PACK_BENCH_MD")
 	if path == "" {
@@ -222,7 +244,43 @@ func writeBenchMarkdown() error {
 		return err
 	}
 	doc := string(existing)
-	block := benchMarkerStart + "\n\n" + benchTables() + "\n" + benchMarkerEnd
+
+	// Group this run's recorded rows by slug, preserving first-seen order.
+	benchMu.Lock()
+	bySlug := map[string][]benchRow{}
+	for _, k := range benchOrder {
+		r := benchRows[k]
+		bySlug[r.slug] = append(bySlug[r.slug], r)
+	}
+	meta := map[string]benchSectionMeta{}
+	for slug, m := range benchMeta {
+		meta[slug] = m
+	}
+	benchMu.Unlock()
+
+	var b strings.Builder
+	b.WriteString(benchMarkerStart + "\n\n")
+	b.WriteString(benchLegend() + "\n")
+	// Canonical section order from the shared scenario set keeps the table order
+	// stable no matter which subset of benchmarks ran.
+	for _, sc := range BenchScenarios() {
+		slug := sc.Slug
+		var inner string
+		switch rows, fresh := bySlug[slug]; {
+		case fresh:
+			m := meta[slug]
+			inner = renderSectionBody(m.group, m.desc, rows) // regenerated this run
+		default:
+			prev, ok := sectionInner(doc, slug)
+			if !ok {
+				continue // never benchmarked yet — no block to carry over
+			}
+			inner = prev // untouched this run — preserve the existing table
+		}
+		b.WriteString("\n" + sectionStartMarker(slug) + "\n" + inner + "\n" + sectionEndMarker(slug) + "\n")
+	}
+	b.WriteString("\n" + benchMarkerEnd)
+	block := b.String()
 
 	s := strings.Index(doc, benchMarkerStart)
 	e := strings.Index(doc, benchMarkerEnd)
@@ -244,6 +302,7 @@ func writeBenchMarkdown() error {
 // a human description, the bin, an optional contact spec (support + anti-slosh),
 // the items, and the algorithms to race.
 type scenario struct {
+	slug              string // section marker key (BENCH:<slug>:START/END)
 	group, mode, desc string
 	bin               BinSpec
 	contact           ContactSpec
@@ -301,7 +360,7 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 
 	if dnf {
 		b.ReportMetric(0, "DNF")
-		recordBench(benchRow{group: sc.group, algo: algo, dnf: true})
+		recordBench(benchRow{slug: sc.slug, group: sc.group, algo: algo, dnf: true})
 		return
 	}
 
@@ -321,7 +380,7 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 		nsPerOp = float64(benchTimeout.Nanoseconds()) // ran to the deadline by design
 	}
 	recordBench(benchRow{
-		group: sc.group, algo: algo,
+		slug: sc.slug, group: sc.group, algo: algo,
 		nsPerOp: nsPerOp,
 		bins:    float64(resp.BinsUsed), fill: fill, compact: compact, unfit: len(resp.Unplaced),
 		budget: ranToBudget,
@@ -330,11 +389,17 @@ func runScenarioAlgo(b *testing.B, sc scenario, algo string) {
 
 func runScenario(b *testing.B, sc scenario) {
 	benchMu.Lock()
-	benchMeta[sc.group] = sc.desc
+	benchMeta[sc.slug] = benchSectionMeta{group: sc.group, desc: sc.desc}
 	benchMu.Unlock()
 	for _, algo := range sc.algos {
 		algo := algo
 		b.Run(algo, func(b *testing.B) { runScenarioAlgo(b, sc, algo) })
+	}
+	// Refresh this section's table now (not only at TestMain), so each benchmark set
+	// updates the README as it finishes and a partial/interrupted run still lands its
+	// completed sections.
+	if err := writeBenchMarkdown(); err != nil {
+		b.Logf("bench markdown: %v", err)
 	}
 }
 
@@ -347,7 +412,7 @@ func benchScenario(b *testing.B, slug string) scenario {
 		b.Fatalf("unknown bench scenario %q", slug)
 	}
 	return scenario{
-		group: s.Group, mode: s.Mode, desc: s.Desc,
+		slug: s.Slug, group: s.Group, mode: s.Mode, desc: s.Desc,
 		bin: s.Bin, contact: s.Contact, items: s.Items, algos: s.Algos,
 	}
 }
