@@ -210,6 +210,11 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		}
 	}
 
+	// Finishing pass: lay every bin's ragged top region flat (independent of whether
+	// the one-flat-layer endgame fired — a dense single-bin pack never triggers it
+	// yet still has a standing-tall top to level).
+	bp.relevelTops(&result, its)
+
 	// Any item still unconsumed (e.g. after a non-progressing safety break) is
 	// reported unplaced rather than silently dropped.
 	for i, it := range its {
@@ -421,16 +426,143 @@ func flatFootprint(it *pitem) float64 {
 	return area
 }
 
+// relevelTops re-levels the ragged top region of every packed bin so the block
+// body's waste-free full-height layers — which force some items to stand in their
+// tallest orientation — do not leave pokes over the top layer (where nothing rests
+// above, so standing tall only wastes height). Everything above each bin's highest
+// fully-solid slab is ripped and re-laid with a min-top grid heightmap: each item
+// drops into the lowest part of the surface in its flattest orientation, filling
+// dips and laying pokes flat. The solid slab below is untouched, so the scan stays
+// cheap even for the thousand-plus boxes in a tall bin's top band. Resting support
+// is required, so nothing floats. It runs as an unconditional finishing pass (not
+// only in the one-flat-layer endgame), and is peak-safe: a bin keeps its re-level
+// only if the peak did not rise, else the original (denser) arrangement stands.
+func (bp *BlockPacker) relevelTops(result *pack.Result, its []*pitem) {
+	idxByID := make(map[string]int, len(its))
+	for i, it := range its {
+		idxByID[it.id] = i
+	}
+	byBin := map[string][]*Placement3D{}
+	for _, raw := range result.Placements {
+		if pl, ok := raw.(*Placement3D); ok {
+			byBin[pl.binID] = append(byBin[pl.binID], pl)
+		}
+	}
+	ripped := map[*Placement3D]bool{} // body boxes removed for re-levelling
+	for _, b := range result.Bins {
+		id := b.ID()
+		pls := byBin[id]
+		if len(pls) == 0 {
+			continue
+		}
+		// Original surface (full base) for the before/after flatness comparison.
+		og := newReGrid(bp.w, bp.d, bp.h, 0)
+		for _, p := range pls {
+			og.occupy(p.X, p.Y, p.W, p.D, p.Z+p.H)
+		}
+		bxs := make([]box, len(pls))
+		for i, p := range pls {
+			bxs[i] = box{p.X, p.Y, p.Z, p.W, p.D, p.H}
+		}
+		zCut := solidSlabTop(bxs, bp.w, bp.d)
+		// Grid surface = the solid slab as a flat floor at zCut, bumped up wherever a
+		// straddling box (starts in the slab, pokes above it) rises higher.
+		g := newReGrid(bp.w, bp.d, bp.h, zCut)
+		var rip []*Placement3D
+		for _, p := range pls {
+			if p.Z >= zCut-blockEps {
+				rip = append(rip, p) // entirely above the slab → re-lay flat
+				continue
+			}
+			if p.Z+p.H > zCut+blockEps { // straddler: bump the surface
+				g.occupy(p.X, p.Y, p.W, p.D, p.Z+p.H)
+			}
+		}
+		if len(rip) == 0 {
+			continue
+		}
+		// Re-place the ripped items largest-footprint first, lowest-top each.
+		sort.SliceStable(rip, func(a, b int) bool {
+			return rip[a].W*rip[a].D > rip[b].W*rip[b].D
+		})
+		newPls := make([]*Placement3D, 0, len(rip))
+		ok := true
+		for _, rp := range rip {
+			c, found := g.place(orientationsOf(its[idxByID[rp.itemID]]))
+			if !found {
+				ok = false
+				break
+			}
+			g.occupy(c.x, c.y, c.w, c.d, c.z+c.h)
+			newPls = append(newPls, &Placement3D{binID: id, itemID: rp.itemID, X: c.x, Y: c.y, Z: c.z, W: c.w, D: c.d, H: c.h})
+		}
+		// Keep the re-level only if it makes the top genuinely flatter — a lower peak,
+		// or the same peak hugged more tightly (less empty space beneath it). Otherwise
+		// the original (denser, if rougher) arrangement stands.
+		flatter := g.peak() < og.peak()-blockEps ||
+			(g.peak() <= og.peak()+blockEps && g.gapBelow() < og.gapBelow()-blockEps)
+		if !ok || !flatter {
+			continue
+		}
+		for _, rp := range rip {
+			ripped[rp] = true
+		}
+		result.Placements = append(result.Placements, asPlacements(newPls)...)
+	}
+	if len(ripped) > 0 { // drop the ripped originals (their items keep their new spots)
+		kept := result.Placements[:0]
+		for _, raw := range result.Placements {
+			if pl, ok := raw.(*Placement3D); ok && ripped[pl] {
+				continue
+			}
+			kept = append(kept, raw)
+		}
+		result.Placements = kept
+	}
+}
+
 // finalStage finishes the solve once the remaining items fit flat within one
-// layer. It reconstructs each packed bin's top surface as a heightmap and drops
-// the leftovers onto it minimising the peak (lowest resulting top, flattest
-// orientation) — so they fill surface dips and lie flat low, rather than standing
-// up over empty surface. Whatever still doesn't fit is laid out flat with LAFF
-// into a fresh bin. Resting support is required, so nothing floats. Bins with very
-// many boxes are skipped for the (super-linear) surface scan to keep huge
-// single-bin solves fast.
+// layer: it places those still-unplaced leftovers onto the packed surface
+// minimising the peak (lowest resulting top, flattest orientation) — filling
+// surface dips and wells rather than standing items up — then lays whatever still
+// does not fit flat with LAFF into fresh bins. The ragged body top is levelled
+// separately by relevelTops (an unconditional finishing pass). Resting support is
+// required, so nothing floats.
 func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []bool, binIdx *int) {
-	const voidScanMaxBoxes = 1200 // cap surface reconstruction cost per bin
+	idxByID := map[string]int{}
+	for i, it := range its {
+		idxByID[it.id] = i
+	}
+
+	// Rebuild a true-surface grid per bin from the packed body, and a parallel EMS
+	// that also sees enclosed wells under overhangs, so a leftover drops into a well
+	// (often below the surface) when that lands it lower than resting on top.
+	grids := map[string]*reGrid{}
+	emss := map[string]*EmptyMaximalSpace{}
+	byBin := map[string][]*Placement3D{}
+	for _, raw := range result.Placements {
+		if pl, ok := raw.(*Placement3D); ok {
+			byBin[pl.binID] = append(byBin[pl.binID], pl)
+		}
+	}
+	var binIDs []string
+	for _, b := range result.Bins {
+		id := b.ID()
+		pls := byBin[id]
+		if len(pls) == 0 {
+			continue
+		}
+		g := newReGrid(bp.w, bp.d, bp.h, 0)
+		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
+		e.contact = ContactSpec{NoFloating: true}
+		for _, p := range pls {
+			g.occupy(p.X, p.Y, p.W, p.D, p.Z+p.H)
+			e.Occupy(p.X, p.Y, p.Z, p.W, p.D, p.H)
+		}
+		grids[id] = g
+		emss[id] = e
+		binIDs = append(binIDs, id)
+	}
 
 	commit := func(binID, itemID string, x, y, z, w, d, h float64) {
 		p := &Placement3D{binID: binID, itemID: itemID, X: x, Y: y, Z: z, W: w, D: d, H: h}
@@ -438,66 +570,6 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		if bp.observer != nil {
 			bp.observer(p)
 		}
-	}
-
-	boxesByBin := map[string][]box{}
-	for _, raw := range result.Placements {
-		if pl, ok := raw.(*Placement3D); ok {
-			boxesByBin[pl.binID] = append(boxesByBin[pl.binID], box{pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H})
-		}
-	}
-
-	// Two complementary surface models per bin: a heightmap (true per-footprint
-	// resting height — the visible top surface) and an EMS (maximal empty spaces,
-	// which also see enclosed *wells* under overhangs the heightmap can't). Each
-	// leftover is placed wherever — surface or well, in any orientation — its top
-	// lands lowest, so a piece that fits a well drops into it (often disappearing
-	// below the surface) instead of sitting on top.
-	//
-	// Only the part of each bin ABOVE its highest fully-solid slab matters: below
-	// that everything is full, so it is replaced by a solid floor and its boxes
-	// ignored. That shrinks the reconstruction to the thin top layer, so the final
-	// fill stays cheap even on bins of many thousands of boxes (the cap then guards
-	// only against a pathologically jagged top).
-	var binIDs []string
-	hms := map[string]*Heightmap{}
-	emss := map[string]*EmptyMaximalSpace{}
-	for _, b := range result.Bins {
-		id := b.ID()
-		boxes := boxesByBin[id]
-		if len(boxes) == 0 {
-			continue
-		}
-		zCut := solidSlabTop(boxes, bp.w, bp.d)
-		kept := make([]box, 0, len(boxes))
-		for _, bx := range boxes {
-			if bx.z+bx.h > zCut+blockEps {
-				kept = append(kept, bx)
-			}
-		}
-		if len(kept) > voidScanMaxBoxes {
-			continue // top layer itself too large to scan cheaply
-		}
-		hm := NewHeightmap(bp.w, bp.d, bp.h)
-		hm.contact = ContactSpec{NoFloating: true} // rest on something, never float
-		hm.minTop = true                           // minimise the peak of the final layer
-		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
-		e.contact = ContactSpec{NoFloating: true}
-		if zCut > blockEps { // solid floor standing in for the ignored slab below
-			hm.Occupy(0, 0, 0, bp.w, bp.d, zCut)
-			e.Occupy(0, 0, 0, bp.w, bp.d, zCut)
-		}
-		for _, bx := range kept {
-			z, h := bx.z, bx.h
-			if z < zCut { // clip to the kept slab; its lower part is inside the floor
-				h, z = z+h-zCut, zCut
-			}
-			hm.Occupy(bx.x, bx.y, z, bx.w, bx.d, h)
-			e.Occupy(bx.x, bx.y, z, bx.w, bx.d, h)
-		}
-		hms[id] = hm
-		emss[id] = e
-		binIDs = append(binIDs, id)
 	}
 
 	idxByVol := make([]int, 0, len(its))
@@ -515,7 +587,7 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		var bestID string
 		found := false
 		for _, id := range binIDs {
-			if c, ok := hms[id].probeTop(orients); ok && (!found || lowerTop(c, best)) {
+			if c, ok := grids[id].place(orients); ok && (!found || lowerTop(c, best)) {
 				best, bestID, found = c, id, true
 			}
 			if c, ok := emss[id].probeTop(orients); ok && (!found || lowerTop(c, best)) {
@@ -523,7 +595,7 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 			}
 		}
 		if found {
-			hms[bestID].Occupy(best.x, best.y, best.z, best.w, best.d, best.h)
+			grids[bestID].occupy(best.x, best.y, best.w, best.d, best.z+best.h)
 			emss[bestID].Occupy(best.x, best.y, best.z, best.w, best.d, best.h)
 			commit(bestID, its[i].id, best.x, best.y, best.z, best.w, best.d, best.h)
 			consumed[i] = true
@@ -536,10 +608,6 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 	leftover := remainingItems(its, consumed)
 	if len(leftover) == 0 {
 		return
-	}
-	idxByID := map[string]int{}
-	for i, it := range its {
-		idxByID[it.id] = i
 	}
 	r, _ := LAFF(leftover, bp.w, bp.d, bp.h)
 	binMap := map[string]string{}
