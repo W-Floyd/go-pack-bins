@@ -68,6 +68,35 @@ func (e *EmptyMaximalSpace) Remaining() float64 {
 	return e.binW*e.binD*e.binH - e.usedVol
 }
 
+// probeTop returns, without committing, the lowest-top placement of an item (over
+// the given orientations) into a maximal empty space — including enclosed wells
+// the surface heightmap can't see. ok is false if none fits. Paired with the
+// heightmap surface probe so finalStage can drop a leftover into a well when that
+// lands lower than resting on the surface.
+func (e *EmptyMaximalSpace) probeTop(orientations [][3]float64) (box, bool) {
+	bestSet := false
+	var best box
+	for _, o := range orientations {
+		w, d, h := o[0], o[1], o[2]
+		if w > e.binW || d > e.binD || h > e.binH {
+			continue
+		}
+		for _, s := range e.spaces {
+			if w > s.w+compactEps || d > s.d+compactEps || h > s.h+compactEps {
+				continue
+			}
+			if e.gated(s.x, s.y, s.z, w, d) {
+				continue
+			}
+			c := box{s.x, s.y, s.z, w, d, h}
+			if !bestSet || lowerTop(c, best) {
+				best, bestSet = c, true
+			}
+		}
+	}
+	return best, bestSet
+}
+
 func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
 	bestSet := false
 	var best box
