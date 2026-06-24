@@ -8,7 +8,12 @@ overview and [ATTRIBUTION.md](ATTRIBUTION.md) for algorithm provenance.
 A pure-Go bin-packing library (1-D/2-D/3-D) with online/offline algorithms, exact
 solvers, metaheuristics, constraints, preferences, a container catalog, a
 Generalized-BPP objective, and a single-page web demo that also compiles to
-WebAssembly. **No external dependencies** in the main module (keep it that way).
+WebAssembly. **Minimise external dependencies** in the main module: the sole
+permitted dependency is `github.com/crillab/gophersat` (a pure-Go SAT/MaxSAT
+solver), used only by the SAT-based exact solver. Do **not** add other
+third-party deps without explicit sign-off, and keep gophersat confined to the
+SAT solver package so the rest of the library stays dependency-free and the
+`js/wasm` build keeps working.
 
 ## Commands
 

@@ -12,6 +12,13 @@ type Placement2D struct {
 	Rotated bool
 }
 
+// NewPlacement builds a Placement2D at the given bottom-left corner (x, y) with
+// placed dimensions (w, h). It lets packers that compute coordinates directly —
+// e.g. the SAT exact solver — emit placements without going through a strategy.
+func NewPlacement(binID, itemID string, x, y, w, h float64, rotated bool) *Placement2D {
+	return &Placement2D{binID: binID, itemID: itemID, X: x, Y: y, W: w, H: h, Rotated: rotated}
+}
+
 func (p *Placement2D) BinID() string  { return p.binID }
 func (p *Placement2D) ItemID() string { return p.itemID }
 

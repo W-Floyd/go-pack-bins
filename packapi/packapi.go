@@ -494,6 +494,14 @@ const (
 	maxSearchRestarts     = 1000
 	maxRefineMaxItems     = 2000
 	maxRefineEvalBudget   = 2000000
+	// SAT exact-solver formula-size caps. These bound how far the UI can raise the
+	// memory guard: a knob can trade RAM for exact certification, but not remove the
+	// guard entirely. Calibrated against the TestMemSweep measurement: gophersat peak
+	// heap is ≈300 bytes per clause, so 12M clauses ≈ 3.5 GB — a defensible ceiling
+	// for a 16 GB host. Raise only if you know the target machine has the RAM (and
+	// bump sat.MaxClauses to match, since this only caps what the UI can request).
+	maxSATClauses   = 12000000
+	maxSATGridCells = 5000000
 )
 
 // optInt reads a positive integer tunable from AlgorithmOptions, clamped to
@@ -634,6 +642,13 @@ type PackResponse struct {
 	NetCost        float64  `json:"net_cost,omitempty"`
 	IncludedProfit float64  `json:"included_profit,omitempty"`
 	Rejected       []string `json:"rejected,omitempty"`
+	// ProvenOptimal / LowerBound / UpperBound / OptimalityProof are set by the "sat"
+	// exact solver: ProvenOptimal is true when BinsUsed is certified minimal, with
+	// the bounds it squeezed and a short justification.
+	ProvenOptimal   bool   `json:"proven_optimal,omitempty"`
+	LowerBound      int    `json:"lower_bound,omitempty"`
+	UpperBound      int    `json:"upper_bound,omitempty"`
+	OptimalityProof string `json:"optimality_proof,omitempty"`
 }
 
 // ─── internal void inspection ─────────────────────────────────────────────────
@@ -729,28 +744,32 @@ const streamBatch = 64
 //   - "done":  terminal; carries the authoritative final summary.
 //   - "error": fatal error; terminal.
 type StreamFrame struct {
-	Type           string            `json:"type"`
-	Streaming      bool              `json:"streaming,omitempty"`  // meta: genuine mid-solve emission?
-	Count          int               `json:"count,omitempty"`      // meta: item count
-	Multi          bool              `json:"multi,omitempty"`      // meta: segmented multi-candidate race (auto)
-	Segments       []string          `json:"segments,omitempty"`   // meta: candidate labels, one per segment
-	Seg            int               `json:"seg,omitempty"`        // batch: segment this batch belongs to (0 default)
-	Done           int               `json:"done,omitempty"`       // progress: work units completed
-	Total          int               `json:"total,omitempty"`      // progress: total work units (<=0 = indeterminate)
-	WinnerSeg      *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
-	BinsUsed       int               `json:"bins_used,omitempty"`  // done
-	BestPacker     string            `json:"best_packer,omitempty"`
-	FreeRects      [][]FreeRect      `json:"free_rects,omitempty"`
-	ItemErrors     map[string]string `json:"item_errors,omitempty"`
-	Unplaced       []string          `json:"unplaced,omitempty"`
-	Placements     []PlacementResult `json:"placements,omitempty"`
-	Error          string            `json:"error,omitempty"`
-	Container      string            `json:"container,omitempty"`       // done: chosen container (catalog)
-	ContainerBin   *BinSpec          `json:"container_bin,omitempty"`   // done: chosen container dims (catalog)
-	BinDims        []BinSpec         `json:"bin_dims,omitempty"`        // done: per-bin dims (mixed catalog)
-	NetCost        float64           `json:"net_cost,omitempty"`        // done: GBPP net cost
-	IncludedProfit float64           `json:"included_profit,omitempty"` // done: GBPP profit packed
-	Rejected       []string          `json:"rejected,omitempty"`        // done: GBPP rejected optional items
+	Type            string            `json:"type"`
+	Streaming       bool              `json:"streaming,omitempty"`  // meta: genuine mid-solve emission?
+	Count           int               `json:"count,omitempty"`      // meta: item count
+	Multi           bool              `json:"multi,omitempty"`      // meta: segmented multi-candidate race (auto)
+	Segments        []string          `json:"segments,omitempty"`   // meta: candidate labels, one per segment
+	Seg             int               `json:"seg,omitempty"`        // batch: segment this batch belongs to (0 default)
+	Done            int               `json:"done,omitempty"`       // progress: work units completed
+	Total           int               `json:"total,omitempty"`      // progress: total work units (<=0 = indeterminate)
+	WinnerSeg       *int              `json:"winner_seg,omitempty"` // done: winning segment index (multi)
+	BinsUsed        int               `json:"bins_used,omitempty"`  // done
+	BestPacker      string            `json:"best_packer,omitempty"`
+	FreeRects       [][]FreeRect      `json:"free_rects,omitempty"`
+	ItemErrors      map[string]string `json:"item_errors,omitempty"`
+	Unplaced        []string          `json:"unplaced,omitempty"`
+	Placements      []PlacementResult `json:"placements,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Container       string            `json:"container,omitempty"`        // done: chosen container (catalog)
+	ContainerBin    *BinSpec          `json:"container_bin,omitempty"`    // done: chosen container dims (catalog)
+	BinDims         []BinSpec         `json:"bin_dims,omitempty"`         // done: per-bin dims (mixed catalog)
+	NetCost         float64           `json:"net_cost,omitempty"`         // done: GBPP net cost
+	IncludedProfit  float64           `json:"included_profit,omitempty"`  // done: GBPP profit packed
+	Rejected        []string          `json:"rejected,omitempty"`         // done: GBPP rejected optional items
+	ProvenOptimal   bool              `json:"proven_optimal,omitempty"`   // done: SAT exact — bin count certified minimal
+	LowerBound      int               `json:"lower_bound,omitempty"`      // done: SAT exact lower bound
+	UpperBound      int               `json:"upper_bound,omitempty"`      // done: SAT exact upper bound
+	OptimalityProof string            `json:"optimality_proof,omitempty"` // done: SAT exact certificate note
 }
 
 // StreamPack runs the same packing as Pack but delivers the result as a series
@@ -908,7 +927,9 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	}
 	send(StreamFrame{Type: "done", BinsUsed: resp.BinsUsed, BestPacker: resp.BestPacker,
 		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors,
-		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected})
+		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected,
+		ProvenOptimal: resp.ProvenOptimal, LowerBound: resp.LowerBound, UpperBound: resp.UpperBound,
+		OptimalityProof: resp.OptimalityProof})
 }
 
 // snapshotInterval throttles live "snapshot" frames so an early burst of small
@@ -1644,6 +1665,7 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	resp := buildResponse2D(result, req.Algorithm == "guillotine")
 	resp.BestPacker = m.bestPacker
 	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
+	resp.ProvenOptimal, resp.LowerBound, resp.UpperBound, resp.OptimalityProof = m.optimal, m.lowerBound, m.upperBound, m.proof
 	return resp, nil
 }
 
