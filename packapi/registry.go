@@ -25,12 +25,19 @@ type solveCtx struct {
 }
 
 // solveMeta carries the non-placement extras a solve produces: the winning packer
-// name (auto/lex) and the GBPP net-cost figures. Empty for ordinary algorithms.
+// name (auto/lex), the GBPP net-cost figures, and the SAT exact solver's optimality
+// certificate. Empty for ordinary algorithms.
 type solveMeta struct {
 	bestPacker     string
 	netCost        float64
 	includedProfit float64
 	rejected       []string
+	// optimal/lowerBound/upperBound/proof are set by the "sat" exact solver: optimal
+	// is true when the bin count is certified minimal.
+	optimal    bool
+	lowerBound int
+	upperBound int
+	proof      string
 }
 
 // solveFn runs one algorithm against a prepared context, returning the packing, any

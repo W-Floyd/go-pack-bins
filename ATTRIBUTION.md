@@ -94,3 +94,23 @@ Not yet implemented (larger, geometric — candidates for future work): load-bea
 al. 2018), and multi-drop / LIFO unload ordering (Gimenez-Palacios et al. 2023).
 The existing *incompatible-items* constraint already covers the conflict / type-
 compatibility line (Goldberg & Karhi 2019; Chen et al. 2025).
+
+## SAT-based exact 2-D bin packing (Soh et al. 2010; Kieu et al. 2026)
+
+Soh, T., Inoue, K., Tamura, N., Banbara, M., & Nabeshima, H. (2010). *A SAT-based
+method for solving the two-dimensional strip packing problem.* Fundamenta
+Informaticae, 102(3–4), 467–487.
+
+Kieu, T. V., Hoang, C. L., & To, K. V. (2026). *Solving the two-dimensional single
+stock size cutting stock problem with SAT and MaxSAT.* arXiv:2604.01732.
+
+[`sat/`](sat/) is a clean-room implementation of the order-encoding SAT
+formulation (order-encoded coordinates, conditional per-bin non-overlap, large-item
+and infeasible-orientation symmetry breaking), adapted from strip packing /
+cutting-stock back to plain 2-D rectangular bin packing, with a binary search over
+the bin count to certify optimality (k SAT, k-1 UNSAT, or k = area lower bound).
+The Boolean solving is delegated to the pure-Go SAT/MaxSAT solver
+[gophersat](https://github.com/crillab/gophersat) (CRIL) — the sole third-party
+dependency of the main module, confined to this package. The exact branch-and-price
+/ MILP methods and the demand-multiplicity (cutting-stock) layer of Kieu et al. are
+**not** ported.

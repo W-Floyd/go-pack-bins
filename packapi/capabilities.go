@@ -57,6 +57,7 @@ func AlgoCapabilities() algoreg.Payload {
 				{ID: "beam", Label: "Beam search"},
 				{ID: "rr", Label: "Ruin & recreate"},
 				{ID: "grasp", Label: "GRASP"},
+				{ID: "sat", Label: "SAT (exact, certified optimal)"},
 				{ID: "gbpp", Label: "GBPP (optional items + profit)"},
 				{ID: "lex", Label: "Lexicographic objectives"},
 				{ID: "pref", Label: "Preference-Fit"},
@@ -103,6 +104,11 @@ func AlgoCapabilities() algoreg.Payload {
 			"joint": {Balanceable: true},
 			"gbpp":  {Panel: "bincost"},
 			"lex":   {Panel: "lex"},
+			"sat": {Tunables: []algoreg.Tunable{
+				tTimeLimit,
+				{Key: "sat_max_clauses", Label: "Max clauses (M)", Def: 2, Scale: 1_000_000, Min: 1, Step: 1},
+				{Key: "sat_max_grid_cells", Label: "Max grid cells (M)", Def: 1, Scale: 1_000_000, Min: 1, Step: 1},
+			}},
 		},
 		Decoders: []algoreg.Option{
 			{Value: "", Label: "EMS (default, tight)"},

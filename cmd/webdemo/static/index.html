@@ -820,6 +820,7 @@
       <div class="stat">Placed: <strong id="stat-placed">—</strong></div>
       <div class="stat">Unplaced: <strong id="stat-unplaced">—</strong></div>
       <div class="stat" id="stat-best-wrap" style="display:none">Best: <strong id="stat-best">—</strong></div>
+      <div class="stat" id="stat-cert-wrap" style="display:none">Status: <strong id="stat-cert">—</strong></div>
       <button id="void-toggle" class="void-toggle" style="display:none" title="Highlight empty space fully enclosed by items">Internal voids</button>
       <span class="stat" id="void-stat" style="display:none"></span>
       <div style="flex:1"></div>
@@ -2072,7 +2073,7 @@ async function runSinglePack(auto = false) {
   // one shot. The 3-D scene grows its containers as new bin indices appear, since
   // the final bin count is not known until the solve completes.
   teardownRaceGrid(); // clear any prior auto-race grid
-  const data = { bins_used: 0, placements: [], unplaced: [], item_errors: {}, free_rects: undefined, best_packer: '' };
+  const data = { bins_used: 0, placements: [], unplaced: [], item_errors: {}, free_rects: undefined, best_packer: '', proven_optimal: false, lower_bound: 0, upper_bound: 0, optimality_proof: '' };
   const is3D = (mode === '3d');
   let count = 0, ctl = null, lastStats = 0, multi = false, progressMax = 0;
 
@@ -2214,6 +2215,10 @@ async function runSinglePack(auto = false) {
         data.item_errors = f.item_errors || {};
         data.unplaced = f.unplaced || [];
         data.rejected = f.rejected || [];
+        data.proven_optimal = f.proven_optimal || false;
+        data.lower_bound = f.lower_bound || 0;
+        data.upper_bound = f.upper_bound || 0;
+        data.optimality_proof = f.optimality_proof || '';
         if (f.net_cost !== undefined) {
           const r = x => Math.round(x * 100) / 100;
           data.best_packer = `net cost ${r(f.net_cost)} · profit ${r(f.included_profit || 0)}`;
@@ -2265,6 +2270,10 @@ async function runSinglePack(auto = false) {
     data.item_errors = result.item_errors || {};
     data.unplaced = result.unplaced || [];
     data.rejected = result.rejected || [];
+    data.proven_optimal = result.proven_optimal || false;
+    data.lower_bound = result.lower_bound || 0;
+    data.upper_bound = result.upper_bound || 0;
+    data.optimality_proof = result.optimality_proof || '';
     if (result.net_cost !== undefined) {
       const r = x => Math.round(x * 100) / 100;
       data.best_packer = `net cost ${r(result.net_cost)} · profit ${r(result.included_profit || 0)}`;
@@ -2586,6 +2595,26 @@ function renderShell(data, mode, bin, placedOverride) {
     bestWrap.style.display = '';
   } else {
     bestWrap.style.display = 'none';
+  }
+
+  // Certification badge — only the SAT exact solver sets optimality_proof. When the
+  // bin count is proven minimal show "✓ optimal" (green); otherwise the solver fell
+  // back / timed out, so show the best found with the lower bound it established
+  // (amber). The full proof string is the tooltip.
+  const certWrap = document.getElementById('stat-cert-wrap');
+  if (data.optimality_proof) {
+    const cert = document.getElementById('stat-cert');
+    if (data.proven_optimal) {
+      cert.textContent = '✓ optimal';
+      cert.style.color = '#2ecc71';
+    } else {
+      cert.textContent = data.lower_bound ? `best found (≥${data.lower_bound} bins)` : 'best found';
+      cert.style.color = '#e6a23c';
+    }
+    certWrap.title = data.optimality_proof;
+    certWrap.style.display = '';
+  } else {
+    certWrap.style.display = 'none';
   }
 
   // no tabs needed — 3D shows all bins side by side, like 2D/1D
