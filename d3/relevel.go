@@ -147,6 +147,7 @@ func (g *reGrid) gapBelow() float64 {
 func (g *reGrid) place(orients [][3]float64) (box, bool) {
 	var best box
 	found := false
+	bestTop := math.Inf(1)
 	for _, o := range orients {
 		w, d, h := o[0], o[1], o[2]
 		if w > g.binW+blockEps || d > g.binD+blockEps {
@@ -157,10 +158,18 @@ func (g *reGrid) place(orients [][3]float64) (box, bool) {
 			if x+w > g.binW+blockEps {
 				break
 			}
+			row := gx * g.ny
 			for gy := 0; gy < g.ny; gy++ {
 				y := float64(gy) * g.cy
 				if y+d > g.binD+blockEps {
 					break
+				}
+				// The corner cell lower-bounds rest (which is the max over the whole
+				// footprint), so if corner+h already exceeds the best top found, the
+				// full footprint scan can only be worse — skip it without paying for
+				// rest. This is the prune that makes the per-cell scan cheap.
+				if found && g.h[row+gy]+h > bestTop+blockEps {
+					continue
 				}
 				z := g.rest(x, y, w, d)
 				if z+h > g.binH+blockEps {
@@ -168,7 +177,7 @@ func (g *reGrid) place(orients [][3]float64) (box, bool) {
 				}
 				c := box{x, y, z, w, d, h}
 				if !found || lowerTop(c, best) {
-					best, found = c, true
+					best, found, bestTop = c, true, z+h
 				}
 			}
 		}
