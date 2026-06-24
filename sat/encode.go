@@ -243,27 +243,31 @@ func (e *enc) build() {
 			uab := e.relVar(e.ud, a, b)
 			uba := e.relVar(e.ud, b, a)
 
-			e.leftLink(a, b, lab)
-			e.leftLink(b, a, lba)
-			e.belowLink(a, b, uab)
-			e.belowLink(b, a, uba)
-
-			if e.sym {
-				if e.minW(e.items[a])+e.minW(e.items[b]) > e.W {
-					e.add(-lab)
-					e.add(-lba)
-				}
-				if e.minH(e.items[a])+e.minH(e.items[b]) > e.H {
-					e.add(-uab)
-					e.add(-uba)
-				}
-				// SB2 (same-size ordering): identical items are interchangeable, so the
-				// later one (b) may not sit strictly left of the earlier one (a) — WLOG
-				// it goes to a's right or is separated vertically. This prunes the d!
-				// permutation symmetry among duplicates without losing any packing.
-				if e.identical(a, b) {
-					e.add(-lba)
-				}
+			// SB1 (large item): if a and b cannot sit side by side in any orientation,
+			// fix the corresponding relations false and skip their link clauses
+			// entirely (those clauses would be tautologically satisfied by the unit).
+			fixLR := e.sym && e.minW(e.items[a])+e.minW(e.items[b]) > e.W
+			fixUD := e.sym && e.minH(e.items[a])+e.minH(e.items[b]) > e.H
+			if fixLR {
+				e.add(-lab)
+				e.add(-lba)
+			} else {
+				e.leftLink(a, b, lab)
+				e.leftLink(b, a, lba)
+			}
+			if fixUD {
+				e.add(-uab)
+				e.add(-uba)
+			} else {
+				e.belowLink(a, b, uab)
+				e.belowLink(b, a, uba)
+			}
+			// SB2 (same-size ordering): identical items are interchangeable, so the
+			// later one (b) may not sit strictly left of the earlier one (a) — WLOG it
+			// goes to a's right or is separated vertically. Prunes the d! duplicate
+			// permutation symmetry. Redundant (skip) if SB1 already fixed lba false.
+			if e.sym && !fixLR && e.identical(a, b) {
+				e.add(-lba)
 			}
 
 			// Non-overlap: on any shared bin, a and b must be separated.
@@ -349,8 +353,15 @@ type placement struct {
 	rotated bool
 }
 
-// problem builds the gophersat problem from the accumulated cardinality clauses.
-func (e *enc) problem() *solver.Problem { return solver.ParseCardConstrs(e.cards) }
+// problem builds the gophersat problem from the accumulated cardinality clauses,
+// then drops our copy: the Problem owns the data, so holding e.cards through the
+// solve would double the formula's memory footprint. decode needs only the var
+// index maps (sVar/pxVar/…), not the clauses.
+func (e *enc) problem() *solver.Problem {
+	pb := solver.ParseCardConstrs(e.cards)
+	e.cards = nil
+	return pb
+}
 
 // solve runs a one-shot SAT solve on the built formula. Returns (placements, true)
 // if satisfiable, (nil, false) if UNSAT. Used by the non-incremental search.

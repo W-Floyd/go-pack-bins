@@ -194,12 +194,20 @@ Order-encoding is defined for **integer** `W, H, w, h`. The library is `float64`
   (×2 under rotation) — *not* the n·(W+H) grid-cell count. `estimateFormula` bounds
   both before building, and `Pack2D` degrades to the FFD heuristic packing
   (`Optimal=false`, `ErrGridTooLarge`) when either cap is exceeded, so a large grid no
-  longer exhausts memory. Calibrated by `sat.TestMemSweep`: peak heap is ≈340
-  bytes/clause (near-constant). `MaxClauses` 2M ≈ 0.6 GB (default); the packapi UI
-  ceiling is 12M ≈ 3.5 GB (recalibrated down from 50M ≈ 15 GB). The "Max clauses (M)" /
-  "Max grid cells (M)" tunables let the user trade RAM for certification within those
-  ceilings. gophersat is correct but not Glucose-fast, so this stays a small/medium-
-  instance tool; `ctx`/time-limit bound runtime.
+  longer exhausts memory. Calibrated by `sat.TestMemSweep`: peak heap is ≈250
+  bytes/clause (near-constant, after dropping our clause copy once gophersat parses
+  it — `enc.problem`). `MaxClauses` 2M ≈ 0.5 GB (default); the packapi UI ceiling is
+  12M ≈ 3 GB (recalibrated down from 50M ≈ 15 GB). The "Max clauses (M)" / "Max grid
+  cells (M)" tunables let the user trade RAM for certification within those ceilings.
+  gophersat is correct but not Glucose-fast, so this stays a small/medium-instance
+  tool; `ctx`/time-limit bound runtime.
+- **Further memory levers (applied).** (1) `enc.problem` frees `e.cards` right after
+  `ParseCardConstrs`, so our clause slice and gophersat's copy don't coexist through
+  the solve (~340→~250 B/clause). (2) `build` skips generating the O(positions) link
+  clauses for pairs SB1 already proved can't sit side by side, fixing the relation
+  false instead (helps large-item instances). Net with normal patterns: the uniform
+  50×(100×100)-style case dropped from ~2 GB to ~0.17 GB at n=140, and the sweep now
+  reaches n≈400 under 2 GB.
 - **Normal-pattern position reduction *(memory win)*.** Coordinates range only over
   the reachable subset sums of item widths/heights (`normalPositions`), not the full
   integer grid — a packing can always be pushed toward the origin onto such positions,
