@@ -406,8 +406,15 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		count[bin3DID(p)]++
 	}
 
+	// Two complementary surface models per bin: a heightmap (true per-footprint
+	// resting height — the visible top surface) and an EMS (maximal empty spaces,
+	// which also see enclosed *wells* under overhangs the heightmap can't). Each
+	// leftover is placed wherever — surface or well, in any orientation — its top
+	// lands lowest, so a piece that fits a well drops into it (often disappearing
+	// below the surface) instead of sitting on top.
 	var binIDs []string
 	hms := map[string]*Heightmap{}
+	emss := map[string]*EmptyMaximalSpace{}
 	for _, b := range result.Bins {
 		id := b.ID()
 		if count[id] == 0 || count[id] > voidScanMaxBoxes {
@@ -417,12 +424,16 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		hm.contact = ContactSpec{NoFloating: true} // rest on something, never float
 		hm.minTop = true                           // minimise the peak of the final layer
 		hms[id] = hm
+		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
+		e.contact = ContactSpec{NoFloating: true}
+		emss[id] = e
 		binIDs = append(binIDs, id)
 	}
 	for _, raw := range result.Placements {
 		if pl, ok := raw.(*Placement3D); ok {
 			if hm := hms[pl.binID]; hm != nil {
 				hm.Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+				emss[pl.binID].Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
 			}
 		}
 	}
@@ -438,12 +449,22 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 	})
 	for _, i := range idxByVol {
 		orients := orientationsOf(its[i])
+		var best box
+		var bestID string
+		found := false
 		for _, id := range binIDs {
-			if x, y, z, w, d, h, ok := hms[id].TryInsert(orients); ok {
-				commit(id, its[i].id, x, y, z, w, d, h)
-				consumed[i] = true
-				break
+			if c, ok := hms[id].probeTop(orients); ok && (!found || lowerTop(c, best)) {
+				best, bestID, found = c, id, true
 			}
+			if c, ok := emss[id].probeTop(orients); ok && (!found || lowerTop(c, best)) {
+				best, bestID, found = c, id, true
+			}
+		}
+		if found {
+			hms[bestID].Occupy(best.x, best.y, best.z, best.w, best.d, best.h)
+			emss[bestID].Occupy(best.x, best.y, best.z, best.w, best.d, best.h)
+			commit(bestID, its[i].id, best.x, best.y, best.z, best.w, best.d, best.h)
+			consumed[i] = true
 		}
 	}
 

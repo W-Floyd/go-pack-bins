@@ -69,6 +69,41 @@ func (hm *Heightmap) Remaining() float64 {
 	return hm.binW*hm.binD*hm.binH - hm.usedVol
 }
 
+// probeTop returns, without committing, the lowest-top placement of an item (over
+// the given orientations) resting on the current surface — the candidate for a
+// final-layer fill. ok is false if none fits. Used alongside an EMS well probe so
+// finalStage can take whichever (surface vs well) lands lower.
+func (hm *Heightmap) probeTop(orientations [][3]float64) (box, bool) {
+	xs, ys := hm.anchors()
+	bestSet := false
+	var best box
+	for _, o := range orientations {
+		w, d, h := o[0], o[1], o[2]
+		if w > hm.binW || d > hm.binD || h > hm.binH {
+			continue
+		}
+		for _, x := range xs {
+			if x+w > hm.binW+compactEps {
+				continue
+			}
+			for _, y := range ys {
+				if y+d > hm.binD+compactEps {
+					continue
+				}
+				z := hm.restingHeight(x, y, w, d)
+				if z+h > hm.binH+compactEps || hm.gated(x, y, z, w, d) {
+					continue
+				}
+				c := box{x, y, z, w, d, h}
+				if !bestSet || lowerTop(c, best) {
+					best, bestSet = c, true
+				}
+			}
+		}
+	}
+	return best, bestSet
+}
+
 func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh float64, ok bool) {
 	xs, ys := hm.anchors()
 	bestSet := false
@@ -186,16 +221,19 @@ func lowerLanding(c, best box) bool {
 	return c.x < best.x
 }
 
-// lowerTop prefers the lowest resulting top (z+h), then the flattest orientation
-// (smallest height), then gravity (z, y, x). It minimises the peak of a final flat
-// layer: among spots at the same base it lays the item as flat as it can.
+// lowerTop ranks final-layer placements: first the lowest resulting top (z+h) to
+// minimise the peak, then — among placements tying on peak — the lowest centre of
+// gravity (z + h/2), which favours dropping a piece down into a well (a low,
+// possibly rotated, fit) over resting it high on the surface, and keeps the load
+// bottom-heavy. Remaining ties break by z, then y, then x for determinism.
 func lowerTop(c, best box) bool {
 	ct, bt := c.z+c.h, best.z+best.h
 	if math.Abs(ct-bt) > compactEps {
 		return ct < bt
 	}
-	if math.Abs(c.h-best.h) > compactEps {
-		return c.h < best.h
+	cc, bc := c.z+c.h/2, best.z+best.h/2 // centre height (CG proxy)
+	if math.Abs(cc-bc) > compactEps {
+		return cc < bc
 	}
 	if math.Abs(c.z-best.z) > compactEps {
 		return c.z < best.z
