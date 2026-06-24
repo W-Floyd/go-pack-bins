@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 
 	"github.com/W-Floyd/go-pack-bins/d2"
 	"github.com/W-Floyd/go-pack-bins/pack"
@@ -54,11 +53,70 @@ type BlockPacker struct {
 	w, d, h  float64
 	observer pack.PlaceObserver
 	maxStack int // cap on items fused into one vertical stack (bounds the search)
+
+	// Per-layer scratch reused across buildBlocks/buildFallbackBlocks calls so the
+	// hot block-building loop doesn't reallocate its working buffers every layer
+	// (that churn was ~80% of the packer's allocations and ~40% of its CPU in GC).
+	// A BlockPacker runs a single solve at a time, so sharing is safe; each build
+	// resets the buffers it uses to [:0]/clear before refilling, and every result is
+	// fully consumed (committed by placeOnFloor) before the next build overwrites it.
+	blockScratch []block
+	groupScratch map[[2]float64][]ent
+	seenScratch  map[[2]float64]bool
+	usedScratch  []bool
+	htScratch    []float64
+	posScratch   []int
+}
+
+// ent is one (item index, orientation height) candidate within a footprint group,
+// used by the tier-2 stack search and the fallback stacker.
+type ent struct {
+	idx int
+	fh  float64
 }
 
 // NewBlockPacker creates a block-building packer for a bin of the given dimensions.
 func NewBlockPacker(w, d, h float64) *BlockPacker {
-	return &BlockPacker{w: w, d: d, h: h, maxStack: 6}
+	return &BlockPacker{
+		// maxStack caps vertical fusion; it must not exceed maxBlockSubs (block uses
+		// fixed-size arrays of that length), so the two are kept equal.
+		w: w, d: d, h: h, maxStack: maxBlockSubs,
+		groupScratch: map[[2]float64][]ent{},
+		seenScratch:  map[[2]float64]bool{},
+	}
+}
+
+// groupByFootprint buckets the available items' orientations by footprint key
+// (min×max side), keeping one (index, height) entry per distinct footprint per
+// item, for orientations whose height passes keep(fh). It reuses the packer's
+// group/seen scratch (cleared here) and the per-key entry slices (reset to [:0]),
+// so repeated per-layer grouping does not reallocate. The returned map aliases the
+// scratch — valid only until the next grouping call.
+func (bp *BlockPacker) groupByFootprint(its []*pitem, live []int, consumed []bool, keep func(fh float64) bool) map[[2]float64][]ent {
+	groups := bp.groupScratch
+	for k, v := range groups {
+		groups[k] = v[:0] // keep the backing arrays, drop the contents
+	}
+	seen := bp.seenScratch
+	for _, i := range live {
+		it := its[i]
+		if consumed[i] {
+			continue
+		}
+		clear(seen)
+		for _, o := range it.orient {
+			if !keep(o.fh) {
+				continue
+			}
+			key := [2]float64{math.Min(o.fw, o.fd), math.Max(o.fw, o.fd)}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			groups[key] = append(groups[key], ent{i, o.fh})
+		}
+	}
+	return groups
 }
 
 // Observe registers a per-placement callback (pack.Observable), enabling streaming.
@@ -93,12 +151,20 @@ type sub struct {
 	dz, fh float64
 }
 
+// maxBlockSubs bounds how many items a vertical stack can fuse — it lets block use
+// fixed arrays instead of heap-allocated slices, so blocks live inline in the
+// reused blockScratch and cost zero per-block allocations (the per-block idxs/subs
+// slices were ~57% of the packer's allocation count). bp.maxStack must not exceed it.
+const maxBlockSubs = 6
+
 // block is a solid layer-height column: a footprint, the item indices it consumes,
-// and the stacked sub-items that realise it.
+// and the stacked sub-items that realise it. idxs/subs are fixed-size arrays; n is
+// how many entries are live.
 type block struct {
 	fw, fd float64
-	idxs   []int
-	subs   []sub
+	n      int
+	idxs   [maxBlockSubs]int
+	subs   [maxBlockSubs]sub
 }
 
 // region is a free vertical span [base, base+cap) within an already-opened bin
@@ -140,7 +206,6 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 
 	consumed := make([]bool, len(its))
 	binIdx := 0
-	var nextID int
 	var deferred []region // shallow tops parked until a short-enough item remains
 
 	// live holds the indices of still-unconsumed items, in ascending (original)
@@ -183,7 +248,7 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		if ri := pickDeferred(deferred, flat); ri >= 0 {
 			r := deferred[ri]
 			deferred = append(deferred[:ri], deferred[ri+1:]...)
-			rem, _, l := bp.fillRegion(ctx, &result, r, its, live, consumed, &nextID)
+			rem, _, l := bp.fillRegion(ctx, &result, r, its, live, consumed)
 			live = l
 			if err := ctx.Err(); err != nil {
 				return result, err
@@ -195,7 +260,7 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 		}
 
 		binID := fmt.Sprintf("blocks-bin-%d", binIdx)
-		rem, placed, l := bp.fillRegion(ctx, &result, region{binID: binID, base: 0, cap: bp.h}, its, live, consumed, &nextID)
+		rem, placed, l := bp.fillRegion(ctx, &result, region{binID: binID, base: 0, cap: bp.h}, its, live, consumed)
 		live = l
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -232,7 +297,7 @@ func (bp *BlockPacker) PackAllCtx(ctx context.Context, items []pack.Item) (pack.
 // (nil if the region was filled to its top / exhausted), items placed, and the
 // updated live index-set (recompacted as items are consumed; the caller must
 // adopt it so the shared backing array never accumulates duplicate indices).
-func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r region, its []*pitem, live []int, consumed []bool, nextID *int) (*region, int, []int) {
+func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r region, its []*pitem, live []int, consumed []bool) (*region, int, []int) {
 	base := r.base
 	top := r.base + r.cap
 	placed := 0
@@ -262,12 +327,12 @@ func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r re
 		}
 		floor := d2.NewBin(r.binID, bp.w, bp.d, d2.NewMaxRectsDefault(bp.w, bp.d))
 		// First fill the layer with blocks exactly H tall (clean layer lines).
-		n := bp.placeOnFloor(floor, result, r.binID, bp.buildBlocks(its, live, consumed, H), consumed, base, nextID)
+		n := bp.placeOnFloor(floor, result, r.binID, bp.buildBlocks(its, live, consumed, H), consumed, base)
 		// Last resort: drop the tallest blocks that still fit the layer height into
 		// any leftover floor cells, so a gap becomes a short item with a small void
 		// above it rather than a full-height void. The layer top stays at base+H, so
 		// the layer lines are preserved.
-		n += bp.placeOnFloor(floor, result, r.binID, bp.buildFallbackBlocks(its, live, consumed, H), consumed, base, nextID)
+		n += bp.placeOnFloor(floor, result, r.binID, bp.buildFallbackBlocks(its, live, consumed, H), consumed, base)
 		if n == 0 {
 			break // safety: no block fit the floor (shouldn't happen at the base)
 		}
@@ -679,7 +744,7 @@ func (bp *BlockPacker) maxHeight(its []*pitem, live []int, consumed []bool, cap 
 // items were already consumed. Blocks are returned largest-footprint-first so the
 // layer floor seeds with big blocks (as LAFF does).
 func (bp *BlockPacker) buildBlocks(its []*pitem, live []int, consumed []bool, H float64) []block {
-	var blocks []block
+	blocks := bp.blockScratch[:0]
 
 	// Tier 1: an item already H tall.
 	for _, i := range live {
@@ -689,50 +754,32 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, live []int, consumed []bool, H 
 		}
 		for _, o := range it.orient {
 			if math.Abs(o.fh-H) <= blockEps {
-				blocks = append(blocks, block{
-					fw: o.fw, fd: o.fd, idxs: []int{i},
-					subs: []sub{{id: it.id, dz: 0, fh: o.fh}},
-				})
+				blk := block{fw: o.fw, fd: o.fd, n: 1}
+				blk.idxs[0] = i
+				blk.subs[0] = sub{id: it.id, dz: 0, fh: o.fh}
+				blocks = append(blocks, blk)
 				break
 			}
 		}
 	}
 
 	// Tier 2: group shorter items by footprint, then carve exact height-sum stacks.
-	type ent struct {
-		idx int
-		fh  float64
-	}
-	groups := map[[2]float64][]ent{}
-	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
-	for _, i := range live {
-		it := its[i]
-		if consumed[i] {
-			continue
-		}
-		clear(seen) // one (idx, height) per footprint key per item
-		for _, o := range it.orient {
-			if o.fh >= H-blockEps {
-				continue // H-tall handled by tier 1; taller can't go in this layer
-			}
-			key := [2]float64{math.Min(o.fw, o.fd), math.Max(o.fw, o.fd)}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			groups[key] = append(groups[key], ent{i, o.fh})
-		}
-	}
+	// H-tall is handled by tier 1; taller can't go in this layer.
+	groups := bp.groupByFootprint(its, live, consumed, func(fh float64) bool { return fh < H-blockEps })
 	for _, key := range sortedKeys(groups) { // sorted for deterministic block order
 		es := groups[key]
+		if len(es) == 0 {
+			continue
+		}
 		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first prunes the search
-		used := make([]bool, len(es))
-		// heights/pos are rebuilt from the not-yet-used entries each round; reuse
-		// the backing arrays (reset to [:0]) instead of reallocating per round —
-		// a big footprint group otherwise allocates O(entries × blocks) of them,
-		// which dominated the packer's bytes.
-		heights := make([]float64, 0, len(es))
-		pos := make([]int, 0, len(es))
+		used := bp.usedScratch[:0]
+		for range es {
+			used = append(used, false)
+		}
+		// heights/pos are rebuilt from the not-yet-used entries each round; reuse the
+		// scratch backing arrays (reset to [:0]) so a big footprint group doesn't
+		// allocate O(entries × blocks) of them.
+		heights, pos := bp.htScratch[:0], bp.posScratch[:0]
 		for {
 			heights, pos = heights[:0], pos[:0]
 			for j, e := range es {
@@ -751,15 +798,18 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, live []int, consumed []bool, H 
 			for _, p := range pick {
 				e := es[pos[p]]
 				used[pos[p]] = true
-				blk.idxs = append(blk.idxs, e.idx)
-				blk.subs = append(blk.subs, sub{id: its[e.idx].id, dz: dz, fh: e.fh})
+				blk.idxs[blk.n] = e.idx
+				blk.subs[blk.n] = sub{id: its[e.idx].id, dz: dz, fh: e.fh}
+				blk.n++
 				dz += e.fh
 			}
 			blocks = append(blocks, blk)
 		}
+		bp.usedScratch, bp.htScratch, bp.posScratch = used, heights, pos
 	}
 
 	sort.SliceStable(blocks, func(a, b int) bool { return blocks[a].fw*blocks[a].fd > blocks[b].fw*blocks[b].fd })
+	bp.blockScratch = blocks
 	return blocks
 }
 
@@ -768,28 +818,30 @@ func (bp *BlockPacker) buildBlocks(its []*pitem, live []int, consumed []bool, H 
 // block referencing an already-consumed item is skipped. Called once for the
 // exact-height blocks and again for the fallback blocks, so both share the floor's
 // remaining free space. Returns items placed.
-func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID string, blocks []block, consumed []bool, baseZ float64, nextID *int) int {
+func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID string, blocks []block, consumed []bool, baseZ float64) int {
 	placed := 0
-	for _, blk := range blocks {
-		if anyConsumed(blk.idxs, consumed) {
+	strat := floor.Strategy()
+	for bi := range blocks {
+		blk := &blocks[bi]
+		if anyConsumed(blk.idxs[:blk.n], consumed) {
 			continue
 		}
-		*nextID++
-		// The 2-D floor item id is throwaway (the real placement uses each sub's
-		// own id), so a plain Itoa avoids fmt.Sprintf's per-block formatting cost.
-		p, err := floor.TryPlace(d2.NewItem(strconv.Itoa(*nextID), blk.fw, blk.fd, true))
-		if err != nil {
+		// Probe the 2-D floor strategy directly: the floor item is throwaway (the
+		// real placement uses each sub's own id) so this skips the per-block
+		// d2.Item/Placement2D/id allocations that TryPlace would make.
+		x, y, rotated, ok := strat.TryInsert(blk.fw, blk.fd, true)
+		if !ok {
 			continue // footprint doesn't fit the remaining floor — leave for a later layer
 		}
-		pl, ok := p.(*d2.Placement2D)
-		if !ok {
-			continue
+		w, d := blk.fw, blk.fd
+		if rotated {
+			w, d = blk.fd, blk.fw
 		}
-		for _, s := range blk.subs {
+		for _, s := range blk.subs[:blk.n] {
 			pl3 := &Placement3D{
 				binID: binID, itemID: s.id,
-				X: pl.X, Y: pl.Y, Z: baseZ + s.dz,
-				W: pl.W, D: pl.H, H: s.fh, // pl.W/H are the (possibly rotated) footprint extents
+				X: x, Y: y, Z: baseZ + s.dz,
+				W: w, D: d, H: s.fh,
 			}
 			result.Placements = append(result.Placements, pl3)
 			if bp.observer != nil {
@@ -797,7 +849,7 @@ func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID 
 			}
 			placed++
 		}
-		for _, idx := range blk.idxs {
+		for _, idx := range blk.idxs[:blk.n] {
 			consumed[idx] = true
 		}
 	}
@@ -810,54 +862,40 @@ func (bp *BlockPacker) placeOnFloor(floor *d2.Bin2D, result *pack.Result, binID 
 // fuses the tallest items whose heights sum to ≤ H (a short stack), then orders
 // the blocks tallest-first so the void left under the layer line is minimised.
 func (bp *BlockPacker) buildFallbackBlocks(its []*pitem, live []int, consumed []bool, H float64) []block {
-	type ent struct {
-		idx int
-		fh  float64
-	}
-	groups := map[[2]float64][]ent{}
-	seen := map[[2]float64]bool{} // reused per item (cleared) — footprint-key dedup
-	for _, i := range live {
-		it := its[i]
-		if consumed[i] {
-			continue
-		}
-		clear(seen)
-		for _, o := range it.orient {
-			if o.fh > H+blockEps {
-				continue // can't fit this layer's height
-			}
-			key := [2]float64{math.Min(o.fw, o.fd), math.Max(o.fw, o.fd)}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			groups[key] = append(groups[key], ent{i, o.fh})
-		}
-	}
-	var blocks []block
+	groups := bp.groupByFootprint(its, live, consumed, func(fh float64) bool { return fh <= H+blockEps })
+	blocks := bp.blockScratch[:0]
 	for _, key := range sortedKeys(groups) { // sorted for deterministic block order
 		es := groups[key]
+		if len(es) == 0 {
+			continue
+		}
 		sort.Slice(es, func(a, b int) bool { return es[a].fh > es[b].fh }) // tallest-first
-		used := make([]bool, len(es))
+		used := bp.usedScratch[:0]
+		for range es {
+			used = append(used, false)
+		}
 		for {
 			var blk block
 			blk.fw, blk.fd = key[0], key[1]
 			dz := 0.0
 			for j := range es { // greedily stack tallest-first up to H
-				if used[j] || len(blk.subs) >= bp.maxStack || dz+es[j].fh > H+blockEps {
+				if used[j] || blk.n >= bp.maxStack || dz+es[j].fh > H+blockEps {
 					continue
 				}
 				used[j] = true
-				blk.idxs = append(blk.idxs, es[j].idx)
-				blk.subs = append(blk.subs, sub{id: its[es[j].idx].id, dz: dz, fh: es[j].fh})
+				blk.idxs[blk.n] = es[j].idx
+				blk.subs[blk.n] = sub{id: its[es[j].idx].id, dz: dz, fh: es[j].fh}
+				blk.n++
 				dz += es[j].fh
 			}
-			if len(blk.subs) == 0 {
+			if blk.n == 0 {
 				break
 			}
 			blocks = append(blocks, blk)
 		}
+		bp.usedScratch = used
 	}
+	bp.blockScratch = blocks
 	sort.SliceStable(blocks, func(a, b int) bool {
 		if ha, hb := blockHeight(blocks[a]), blockHeight(blocks[b]); math.Abs(ha-hb) > blockEps {
 			return ha > hb // tallest block first — least wasted height under the line
@@ -886,7 +924,7 @@ func sortedKeys[V any](m map[[2]float64]V) [][2]float64 {
 // blockHeight is the total stacked height of a block.
 func blockHeight(b block) float64 {
 	h := 0.0
-	for _, s := range b.subs {
+	for _, s := range b.subs[:b.n] {
 		h += s.fh
 	}
 	return h
@@ -905,6 +943,11 @@ func blockHeight(b block) float64 {
 // old per-call append dominated allocation (≈48M of 50M) and the GC churn that
 // followed. Search order, node budget and result are unchanged.
 func findStack(heights []float64, target float64, maxStack int) []int {
+	n := len(heights)
+	if n == 0 {
+		return nil
+	}
+	minH := heights[n-1] // smallest (heights is sorted descending)
 	budget := 20000
 	var found []int
 	pick := make([]int, 0, maxStack)
@@ -921,7 +964,25 @@ func findStack(heights []float64, target float64, maxStack int) []int {
 		if sum > target+blockEps || len(pick) >= maxStack {
 			return false
 		}
-		for i := start; i < len(heights); i++ {
+		// Two lower-bound prunes cut the branches that made failed searches (no exact
+		// stack exists) burn 45–73% of CPU. Heights are sorted descending, so:
+		//   • Overshoot: if even the smallest remaining height pushes sum past target,
+		//     every addition overshoots — no exact stack down here. (Catches the
+		//     O(m²) explosion on uniform-tall groups, e.g. [4,4,4,…] seeking 6.)
+		//   • Undershoot: if the k≤maxStack largest remaining can't reach target, the
+		//     branch can never sum high enough. maxStack is small so summing inline
+		//     stays allocation-free.
+		if sum+minH > target+blockEps {
+			return false
+		}
+		maxAdd, slots := 0.0, maxStack-len(pick)
+		for i, c := start, 0; i < n && c < slots; i, c = i+1, c+1 {
+			maxAdd += heights[i]
+		}
+		if sum+maxAdd < target-blockEps {
+			return false
+		}
+		for i := start; i < n; i++ {
 			pick = append(pick, i)
 			if dfs(i+1, sum+heights[i]) {
 				return true
