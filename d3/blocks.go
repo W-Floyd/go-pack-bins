@@ -236,6 +236,14 @@ func (bp *BlockPacker) fillRegion(ctx context.Context, result *pack.Result, r re
 			return nil, placed, live
 		}
 		live = compactLive(live, consumed) // drop items consumed by earlier layers
+		// Last layer: if the remaining items now fit in a single flat layer, stop
+		// stacking full-height blocks and yield to the flat finish. The endgame is
+		// otherwise only checked between bins, so a single tall (strip) bin — filled
+		// top-to-bottom in one call — would never reach it, standing its final items
+		// up in a corner over empty surface instead of laying them flat and low.
+		if bp.endgame(its, live, consumed) {
+			return nil, placed, live
+		}
 		cap := top - base
 		H := bp.maxHeight(its, live, consumed, cap) // tallest item fitting this span
 		if H <= 0 {
@@ -333,28 +341,57 @@ func remainingItems(its []*pitem, consumed []bool) []pack.Item {
 // the LAFF probe so it only runs once a bin's worth (or less) remains — keeping
 // huge multi-bin solves fast.
 func (bp *BlockPacker) endgame(its []*pitem, live []int, consumed []bool) bool {
-	vol := 0.0
+	// The endgame is the *last layer*: lay the remaining items flat rather than
+	// standing them in tall blocks, since nothing rests above the top layer so
+	// flattening can only lower the height. The trigger is therefore "do the
+	// remaining items fit in a single flat layer?", detected directly — not a
+	// fraction of the (possibly huge) bin height. This makes it independent of how
+	// tall the bin is: a strip-tall container still block-builds its whole body and
+	// only flattens the genuine top layer, instead of satisfying "fits in one bin"
+	// from the first iteration and degenerating to one big LAFF pass.
+	//
+	// A cheap flat-footprint area gate keeps the LAFF probe off the hot path until
+	// barely a layer's floor remains; the probe then confirms a single flat layer
+	// actually holds them by packing into a one-layer-high bin (BinsUsed > 1 means
+	// they spilled into a second layer — still the body phase).
+	footprint, vol := 0.0, 0.0
 	for _, i := range live {
-		if !consumed[i] {
-			vol += orientVolume(its[i])
+		if consumed[i] {
+			continue
 		}
+		footprint += flatFootprint(its[i])
+		vol += orientVolume(its[i])
 	}
-	if vol <= 0 || vol > bp.w*bp.d*bp.h+blockEps {
-		return false // more than one bin's worth left — still the body phase
+	if vol <= 0 || footprint > bp.w*bp.d+blockEps {
+		return false
 	}
-	r, _ := LAFF(remainingItems(its, consumed), bp.w, bp.d, bp.h)
+	oneLayer := bp.flattestTallest(its, live, consumed)
+	r, _ := LAFF(remainingItems(its, consumed), bp.w, bp.d, oneLayer)
 	return len(r.Unplaced) == 0 && r.BinsUsed() <= 1
 }
 
-// finalStage finishes the solve once the remaining items fit flat within one bin.
-// First it slots whatever fits into the voids/wells of the already-packed bins
-// (reconstructing each bin's free space with EMS), then it lays the rest flat
-// with LAFF — as flat as possible, opening a fresh bin only for the leftovers.
-// Resting support is required for void placements, so nothing floats. Bins with
-// very many boxes are skipped for the (super-linear) void scan to keep huge
+// flatFootprint is the base area an item occupies laid as flat as it can be (its
+// smallest-height orientation) — the floor it needs in a single flat layer.
+func flatFootprint(it *pitem) float64 {
+	best, area := math.Inf(1), 0.0
+	for _, o := range it.orient {
+		if o.fh < best {
+			best, area = o.fh, o.fw*o.fd
+		}
+	}
+	return area
+}
+
+// finalStage finishes the solve once the remaining items fit flat within one
+// layer. It reconstructs each packed bin's top surface as a heightmap and drops
+// the leftovers onto it minimising the peak (lowest resulting top, flattest
+// orientation) — so they fill surface dips and lie flat low, rather than standing
+// up over empty surface. Whatever still doesn't fit is laid out flat with LAFF
+// into a fresh bin. Resting support is required, so nothing floats. Bins with very
+// many boxes are skipped for the (super-linear) surface scan to keep huge
 // single-bin solves fast.
 func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []bool, binIdx *int) {
-	const voidScanMaxBoxes = 1200 // cap EMS reconstruction cost per bin
+	const voidScanMaxBoxes = 1200 // cap surface reconstruction cost per bin
 
 	commit := func(binID, itemID string, x, y, z, w, d, h float64) {
 		p := &Placement3D{binID: binID, itemID: itemID, X: x, Y: y, Z: z, W: w, D: d, H: h}
@@ -364,36 +401,32 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		}
 	}
 
-	// Reconstruct each existing bin's free space from its committed boxes (skipping
-	// bins too full of boxes to scan cheaply).
 	count := map[string]int{}
 	for _, p := range result.Placements {
 		count[bin3DID(p)]++
 	}
+
 	var binIDs []string
-	ems := map[string]*EmptyMaximalSpace{}
+	hms := map[string]*Heightmap{}
 	for _, b := range result.Bins {
 		id := b.ID()
 		if count[id] == 0 || count[id] > voidScanMaxBoxes {
 			continue
 		}
-		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
-		e.contact = ContactSpec{NoFloating: true} // void placements must rest on something
-		ems[id] = e
+		hm := NewHeightmap(bp.w, bp.d, bp.h)
+		hm.contact = ContactSpec{NoFloating: true} // rest on something, never float
+		hm.minTop = true                           // minimise the peak of the final layer
+		hms[id] = hm
 		binIDs = append(binIDs, id)
 	}
 	for _, raw := range result.Placements {
-		pl, ok := raw.(*Placement3D)
-		if !ok {
-			continue
-		}
-		if e := ems[pl.binID]; e != nil {
-			e.Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+		if pl, ok := raw.(*Placement3D); ok {
+			if hm := hms[pl.binID]; hm != nil {
+				hm.Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
+			}
 		}
 	}
 
-	// Void-fill: largest items first into the first existing bin whose free space
-	// accepts them (even partial-height wells).
 	idxByVol := make([]int, 0, len(its))
 	for i := range its {
 		if !consumed[i] {
@@ -406,7 +439,7 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 	for _, i := range idxByVol {
 		orients := orientationsOf(its[i])
 		for _, id := range binIDs {
-			if x, y, z, w, d, h, ok := ems[id].TryInsert(orients); ok {
+			if x, y, z, w, d, h, ok := hms[id].TryInsert(orients); ok {
 				commit(id, its[i].id, x, y, z, w, d, h)
 				consumed[i] = true
 				break

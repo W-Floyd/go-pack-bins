@@ -33,24 +33,32 @@ func TestSATCertifiesOptimum(t *testing.T) {
 	}
 }
 
-// TestSATMaxClausesForcesFallback confirms the "Max clauses" UI tunable is honoured:
-// a tiny cap makes even a small instance exceed it, so the solver degrades to the
-// heuristic packing (uncertified) instead of certifying.
-func TestSATMaxClausesForcesFallback(t *testing.T) {
-	items := make([]ItemSpec, 4)
+// TestSATMemoryBudgetForcesFallback confirms the "Memory budget" UI tunable is
+// honoured: a tiny budget shrinks the derived clause cap so the instance exceeds it,
+// and the solver degrades to the heuristic packing (uncertified) instead of
+// certifying. The same instance certifies at the default budget.
+func TestSATMemoryBudgetForcesFallback(t *testing.T) {
+	items := make([]ItemSpec, 20)
 	for i := range items {
-		items[i] = ItemSpec{ID: string(rune('a' + i)), Width: 6, Height: 6}
+		items[i] = ItemSpec{ID: string(rune('a' + i)), Width: 5, Height: 5}
 	}
-	req := PackRequest{
-		Mode: "2d", Algorithm: "sat", Bin: BinSpec{Width: 10, Height: 10}, Items: items,
-		AlgorithmOptions: map[string]float64{"sat_max_clauses": 1}, // scaled value, as the UI sends it
+	bin := BinSpec{Width: 50, Height: 50}
+
+	// Default budget: certifies.
+	base := PackRequest{Mode: "2d", Algorithm: "sat", Bin: bin, Items: items}
+	if resp := PackCtx(context.Background(), base); resp.Error != "" || !resp.ProvenOptimal {
+		t.Fatalf("default budget should certify: error=%q optimal=%v", resp.Error, resp.ProvenOptimal)
 	}
-	resp := PackCtx(context.Background(), req)
+
+	// 1 MB budget: clause cap ≈4k < this instance's clauses → fallback, uncertified.
+	tiny := base
+	tiny.AlgorithmOptions = map[string]float64{"sat_max_memory_mb": 1}
+	resp := PackCtx(context.Background(), tiny)
 	if resp.Error != "" {
 		t.Fatalf("unexpected error: %s", resp.Error)
 	}
 	if resp.ProvenOptimal {
-		t.Errorf("with a 1-clause cap the solve must not certify optimality")
+		t.Errorf("with a 1 MB budget the solve must not certify optimality")
 	}
 	if len(resp.Placements) != len(items) {
 		t.Errorf("expected a heuristic packing of all items, got %d placements", len(resp.Placements))

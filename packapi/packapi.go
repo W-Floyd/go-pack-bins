@@ -494,14 +494,13 @@ const (
 	maxSearchRestarts     = 1000
 	maxRefineMaxItems     = 2000
 	maxRefineEvalBudget   = 2000000
-	// SAT exact-solver formula-size caps. These bound how far the UI can raise the
-	// memory guard: a knob can trade RAM for exact certification, but not remove the
-	// guard entirely. Calibrated against the TestMemSweep measurement: gophersat peak
-	// heap is ≈250 bytes per clause, so 12M clauses ≈ 3 GB — a defensible ceiling for
-	// a 16 GB host. Raise only if you know the target machine has the RAM (and bump
-	// sat.MaxClauses to match, since this only caps what the UI can request).
-	maxSATClauses   = 12000000
-	maxSATGridCells = 5000000
+	// SAT exact solver: the UI exposes a single "memory budget" (MB), from which the
+	// solver's clause/var caps are derived via the measured peak-heap cost per clause
+	// (satBytesPerClause, from TestMemSweep). defaultSATMemoryMB applies when the knob
+	// is left unset. A user-set value is honoured as-is (not clamped): the budget is
+	// the guard, and the user owns the trade-off if they set it very high.
+	satBytesPerClause  = 250
+	defaultSATMemoryMB = 4096 // 4 GB default budget (≈16M clauses)
 )
 
 // optInt reads a positive integer tunable from AlgorithmOptions, clamped to
@@ -642,13 +641,22 @@ type PackResponse struct {
 	NetCost        float64  `json:"net_cost,omitempty"`
 	IncludedProfit float64  `json:"included_profit,omitempty"`
 	Rejected       []string `json:"rejected,omitempty"`
-	// ProvenOptimal / LowerBound / UpperBound / OptimalityProof are set by the "sat"
-	// exact solver: ProvenOptimal is true when BinsUsed is certified minimal, with
-	// the bounds it squeezed and a short justification.
+	// ProvenOptimal / LowerBound / UpperBound / OptimalityProof carry optimality
+	// information. The "sat" exact solver sets all four (UpperBound and
+	// OptimalityProof are SAT-only). For every other 2-D/3-D algorithm LowerBound
+	// is the geometric lower bound on bin count (area/volume + big-item), so
+	// BinsUsed − LowerBound is a real optimality gap; ProvenOptimal is then true
+	// when BinsUsed equals that bound (all items placed), certifying minimality.
 	ProvenOptimal   bool   `json:"proven_optimal,omitempty"`
 	LowerBound      int    `json:"lower_bound,omitempty"`
 	UpperBound      int    `json:"upper_bound,omitempty"`
 	OptimalityProof string `json:"optimality_proof,omitempty"`
+	// ReturnedHeight is the achieved open-axis extent of a "strip" solve (the
+	// minimised height); the container should be rendered at this height, not the
+	// requested one. TotalValue is the summed value of the packed subset for a
+	// "knapsack" solve.
+	ReturnedHeight float64 `json:"returned_height,omitempty"`
+	TotalValue     float64 `json:"total_value,omitempty"`
 }
 
 // ─── internal void inspection ─────────────────────────────────────────────────
@@ -770,6 +778,8 @@ type StreamFrame struct {
 	LowerBound      int               `json:"lower_bound,omitempty"`      // done: SAT exact lower bound
 	UpperBound      int               `json:"upper_bound,omitempty"`      // done: SAT exact upper bound
 	OptimalityProof string            `json:"optimality_proof,omitempty"` // done: SAT exact certificate note
+	ReturnedHeight  float64           `json:"returned_height,omitempty"`  // done: strip — minimised open-axis extent
+	TotalValue      float64           `json:"total_value,omitempty"`      // done: knapsack — packed subset value
 }
 
 // StreamPack runs the same packing as Pack but delivers the result as a series
@@ -929,7 +939,7 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 		FreeRects: resp.FreeRects, Unplaced: resp.Unplaced, ItemErrors: resp.ItemErrors,
 		NetCost: resp.NetCost, IncludedProfit: resp.IncludedProfit, Rejected: resp.Rejected,
 		ProvenOptimal: resp.ProvenOptimal, LowerBound: resp.LowerBound, UpperBound: resp.UpperBound,
-		OptimalityProof: resp.OptimalityProof})
+		OptimalityProof: resp.OptimalityProof, ReturnedHeight: resp.ReturnedHeight, TotalValue: resp.TotalValue})
 }
 
 // snapshotInterval throttles live "snapshot" frames so an early burst of small
@@ -1666,7 +1676,31 @@ func pack2D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	resp.BestPacker = m.bestPacker
 	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
 	resp.ProvenOptimal, resp.LowerBound, resp.UpperBound, resp.OptimalityProof = m.optimal, m.lowerBound, m.upperBound, m.proof
+	resp.ReturnedHeight, resp.TotalValue = m.extent, m.totalValue
+	// When the solver didn't already certify (only SAT does), attach the geometric
+	// lower bound on bin count so callers get a real optimality gap; if the packing
+	// uses exactly that many bins it is provably optimal. Skipped for the single-
+	// container objectives (strip/knapsack), where a bin-count bound is meaningless.
+	if m.lowerBound == 0 && req.Algorithm != "strip" && req.Algorithm != "knapsack" {
+		if lb := geomLowerBound2D(items, bw, bh); lb > 0 {
+			resp.LowerBound = lb
+			if !resp.ProvenOptimal && len(result.Unplaced) == 0 && result.BinsUsed() == lb {
+				resp.ProvenOptimal = true
+			}
+		}
+	}
 	return resp, nil
+}
+
+// geomLowerBound2D computes d2.LowerBound over the converted 2-D items.
+func geomLowerBound2D(items []pack.Item, bw, bh float64) int {
+	d2items := make([]*d2.Item2D, 0, len(items))
+	for _, it := range items {
+		if i2, ok := it.(*d2.Item2D); ok {
+			d2items = append(d2items, i2)
+		}
+	}
+	return d2.LowerBound(d2items, bw, bh)
 }
 
 func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackResponse {
@@ -1803,7 +1837,30 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	resp := buildResponse3D(result)
 	resp.BestPacker = m.bestPacker
 	resp.NetCost, resp.IncludedProfit, resp.Rejected = m.netCost, m.includedProfit, m.rejected
+	resp.ReturnedHeight, resp.TotalValue = m.extent, m.totalValue
+	// Attach the geometric lower bound on bin count for gap reporting / self-
+	// certification (3-D has no exact solver, so the solver never sets one). Skipped
+	// for the single-container objectives (strip/knapsack).
+	if req.Algorithm != "strip" && req.Algorithm != "knapsack" {
+		if lb := geomLowerBound3D(items, bw, bd, bh); lb > 0 {
+			resp.LowerBound = lb
+			if len(result.Unplaced) == 0 && result.BinsUsed() == lb {
+				resp.ProvenOptimal = true
+			}
+		}
+	}
 	return resp, nil
+}
+
+// geomLowerBound3D computes d3.LowerBound over the converted 3-D items.
+func geomLowerBound3D(items []pack.Item, bw, bd, bh float64) int {
+	d3items := make([]*d3.Item3D, 0, len(items))
+	for _, it := range items {
+		if i3, ok := it.(*d3.Item3D); ok {
+			d3items = append(d3items, i3)
+		}
+	}
+	return d3.LowerBound(d3items, bw, bd, bh)
 }
 
 func buildResponse3D(result pack.Result) PackResponse {

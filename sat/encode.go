@@ -81,6 +81,12 @@ type enc struct {
 	cards []solver.CardConstr
 	vTrue int
 
+	// maxVars/maxClauses bound the formula as it is built (0 = unlimited). When the
+	// actual count crosses a bound, overflow is set and building stops — so we only
+	// bail on instances that genuinely exceed the budget, not on a worst-case estimate.
+	maxVars, maxClauses int
+	overflow            bool
+
 	sVar  [][]int
 	pxVar [][]int
 	pyVar [][]int
@@ -90,20 +96,30 @@ type enc struct {
 	ud    map[[2]int]int
 }
 
-func newEnc(W, H int, items []scaledItem, k int, rotate, sym bool, posX, posY []int) *enc {
-	e := &enc{W: W, H: H, items: items, k: k, rotate: rotate, sym: sym, posX: posX, posY: posY, lr: map[[2]int]int{}, ud: map[[2]int]int{}}
+func newEnc(W, H int, items []scaledItem, k int, rotate, sym bool, posX, posY []int, maxVars, maxClauses int) *enc {
+	e := &enc{W: W, H: H, items: items, k: k, rotate: rotate, sym: sym, posX: posX, posY: posY,
+		maxVars: maxVars, maxClauses: maxClauses, lr: map[[2]int]int{}, ud: map[[2]int]int{}}
 	e.vTrue = e.newVar()
 	e.add(e.vTrue) // force the TRUE constant true
 	e.build()
 	return e
 }
 
-func (e *enc) newVar() int { e.nVars++; return e.nVars }
+func (e *enc) newVar() int {
+	e.nVars++
+	if e.maxVars > 0 && e.nVars > e.maxVars {
+		e.overflow = true
+	}
+	return e.nVars
+}
 
 // add records a clause, simplifying against the TRUE/FALSE constants:
 // a clause containing TRUE (vTrue) is a tautology and dropped; FALSE (-vTrue)
 // literals are removed; an emptied clause forces the formula UNSAT.
 func (e *enc) add(lits ...int) {
+	if e.overflow {
+		return // budget exceeded — stop accumulating; build() will abort
+	}
 	out := make([]int, 0, len(lits))
 	for _, l := range lits {
 		if l == e.vTrue {
@@ -119,6 +135,9 @@ func (e *enc) add(lits ...int) {
 		return
 	}
 	e.cards = append(e.cards, solver.AtLeast1(out...))
+	if e.maxClauses > 0 && len(e.cards) > e.maxClauses {
+		e.overflow = true
+	}
 }
 
 // maxBin returns the highest bin index item c may occupy under the symmetry rule.
@@ -235,8 +254,12 @@ func (e *enc) build() {
 		e.domainFit(c)
 	}
 
-	// Relation vars, links, SB1, and per-bin non-overlap.
+	// Relation vars, links, SB1, and per-bin non-overlap. This is the dominant
+	// (O(n²·positions)) phase, so bail out promptly once the budget is hit.
 	for a := 0; a < n; a++ {
+		if e.overflow {
+			return
+		}
 		for b := a + 1; b < n; b++ {
 			lab := e.relVar(e.lr, a, b)
 			lba := e.relVar(e.lr, b, a)

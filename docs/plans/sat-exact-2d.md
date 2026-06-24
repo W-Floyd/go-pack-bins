@@ -191,14 +191,22 @@ Order-encoding is defined for **integer** `W, H, w, h`. The library is `float64`
   brute-forceable instances, equals the true optimum.
 - **Formula-size / runtime blow-up.** *(Addressed.)* The binding cost is the
   **clause count**, dominated by the O(n²·(W+H)) pairwise position-link clauses
-  (×2 under rotation) — *not* the n·(W+H) grid-cell count. `estimateFormula` bounds
-  both before building, and `Pack2D` degrades to the FFD heuristic packing
-  (`Optimal=false`, `ErrGridTooLarge`) when either cap is exceeded, so a large grid no
-  longer exhausts memory. Calibrated by `sat.TestMemSweep`: peak heap is ≈250
+  (×2 under rotation) — *not* the n·(W+H) grid-cell count. Rather than reject on an
+  a-priori worst-case estimate (which overcounts when link clauses turn out
+  tautological), the encoder **builds and aborts on the actual count**: `enc` tracks
+  live var/clause counts and sets `overflow` the moment a cap is crossed, so `Pack2D`
+  degrades to the FFD heuristic packing (`Optimal=false`, `ErrGridTooLarge`) only when
+  the real formula exceeds the budget — instances whose formula is smaller than the
+  estimate still solve. The bound is enforced at build time (where the formula memory
+  is committed); gophersat's solve is not cancellable mid-run, and the ≈250 B/clause
+  calibration already includes the solve-phase peak. (`estimateFormula` remains as an
+  informational helper for `TestMemSweep`.) Calibrated by `sat.TestMemSweep`: peak heap is ≈250
   bytes/clause (near-constant, after dropping our clause copy once gophersat parses
   it — `enc.problem`). `MaxClauses` 2M ≈ 0.5 GB (default); the packapi UI ceiling is
-  12M ≈ 3 GB (recalibrated down from 50M ≈ 15 GB). The "Max clauses (M)" / "Max grid
-  cells (M)" tunables let the user trade RAM for certification within those ceilings.
+  ≈250 B/clause. The UI exposes a single "Memory budget (MB)" knob (default 4 GB);
+  packapi derives the clause/var caps from it via that figure, so the user picks an
+  allowable RAM figure rather than opaque clause counts. A user-set budget is *not*
+  clamped — the budget itself is the guard, and a very high value is the user's call.
   gophersat is correct but not Glucose-fast, so this stays a small/medium-instance
   tool; `ctx`/time-limit bound runtime.
 - **Further memory levers (applied).** (1) `enc.problem` frees `e.cards` right after

@@ -5,11 +5,52 @@ import (
 
 	"github.com/W-Floyd/go-pack-bins/d3"
 	"github.com/W-Floyd/go-pack-bins/joint"
+	"github.com/W-Floyd/go-pack-bins/knapsack"
 	"github.com/W-Floyd/go-pack-bins/meta"
 	"github.com/W-Floyd/go-pack-bins/offline"
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
+	"github.com/W-Floyd/go-pack-bins/strip"
 )
+
+// solveStrip3D minimises the strip height for the fixed base footprint (bw×bd),
+// building its own open-height container; it cannot apply scalar constraints and
+// rejects a request with any. The achieved height is reported via solveMeta.extent.
+func solveStrip3D(sc *solveCtx) (pack.Result, solveMeta, error) {
+	if len(sc.req.Constraints) > 0 {
+		return pack.Result{}, solveMeta{}, errors.New("strip: open-height packing cannot apply constraints; choose another algorithm")
+	}
+	items := make([]*d3.Item3D, 0, len(sc.items))
+	for _, it := range sc.items {
+		if i3, ok := it.(*d3.Item3D); ok {
+			items = append(items, i3)
+		}
+	}
+	r := strip.Pack3D(items, sc.bw, sc.bd)
+	return r.Result, solveMeta{extent: r.Height}, nil
+}
+
+// solveKnapsack3D packs the most valuable subset into a single container. It
+// takes the best (highest total value) of greedy one-at-a-time placement and
+// dense block/column building, since fusing same-size items into layers/columns
+// often fits more — and so more value. The block/column packers ignore scalar
+// constraints, so they are only tried when the request has none; with
+// constraints, only the (constrained-factory) greedy path runs. Value is the
+// "value" scalar, defaulting to volume. Rejected items are reported.
+func solveKnapsack3D(sc *solveCtx) (pack.Result, solveMeta, error) {
+	best := knapsack.Pack(sc.ctx, sc.items, sc.factory.Open(), knapsack.Options{})
+	if len(sc.req.Constraints) == 0 {
+		for _, p := range []pack.CtxOfflinePacker{
+			d3.NewBlockPacker(sc.bw, sc.bd, sc.bh),
+			d3.NewColumnPacker(sc.bw, sc.bd, sc.bh),
+		} {
+			if cand := knapsack.PackWith(sc.ctx, sc.items, p, knapsack.Options{}); cand.TotalValue > best.TotalValue {
+				best = cand
+			}
+		}
+	}
+	return best.Result, solveMeta{totalValue: best.TotalValue, rejected: best.Rejected}, nil
+}
 
 // 3-D algorithm dispatch. Unlike 1-D/2-D, the post-pass differs per algorithm —
 // the self-managing/search packers run the void-refiner (when requested) while the
@@ -158,6 +199,8 @@ func init() {
 	// GBPP / lex: no post-pass; carry their extra result metadata.
 	reg("gbpp", solveGBPP)
 	reg("lex", solveLex)
+	reg("strip", solveStrip3D)
+	reg("knapsack", solveKnapsack3D)
 
 	// auto: mirror autoCandidates so Pack and StreamPack pick the same winner.
 	reg("auto", compact3D2(func(sc *solveCtx) (pack.Result, string, error) {

@@ -72,7 +72,7 @@ func TestMemSweep(t *testing.T) {
 		}()
 
 		t0 := time.Now()
-		e := newEnc(W, H, items, k, true, true, posX, posY)
+		e := newEnc(W, H, items, k, true, true, posX, posY, 0, 0)
 		var ab runtime.MemStats
 		runtime.ReadMemStats(&ab)
 		clauses := len(e.cards) // capture before solve(); problem() frees e.cards

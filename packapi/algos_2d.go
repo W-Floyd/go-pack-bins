@@ -5,12 +5,41 @@ import (
 	"errors"
 
 	"github.com/W-Floyd/go-pack-bins/d2"
+	"github.com/W-Floyd/go-pack-bins/knapsack"
 	"github.com/W-Floyd/go-pack-bins/meta"
 	"github.com/W-Floyd/go-pack-bins/offline"
 	"github.com/W-Floyd/go-pack-bins/online"
 	"github.com/W-Floyd/go-pack-bins/pack"
 	"github.com/W-Floyd/go-pack-bins/sat"
+	"github.com/W-Floyd/go-pack-bins/strip"
 )
+
+// solveStrip2D minimises the strip height for the fixed bin width, building its
+// own (open-height) container — so it cannot apply the scalar-aggregate
+// constraints the constrained factory would, and rejects a request with any.
+// The achieved height is reported via solveMeta.extent.
+func solveStrip2D(sc *solveCtx) (pack.Result, solveMeta, error) {
+	if len(sc.req.Constraints) > 0 {
+		return pack.Result{}, solveMeta{}, errors.New("strip: open-height packing cannot apply constraints; choose another algorithm")
+	}
+	items := make([]*d2.Item2D, 0, len(sc.items))
+	for _, it := range sc.items {
+		if i2, ok := it.(*d2.Item2D); ok {
+			items = append(items, i2)
+		}
+	}
+	r := strip.Pack2D(items, sc.bw)
+	return r.Result, solveMeta{extent: r.Height}, nil
+}
+
+// solveKnapsack2D packs the most valuable subset into a single container (from
+// the constrained factory, so constraints are honoured). Item value is the
+// "value" scalar, defaulting to area. Rejected items are reported.
+func solveKnapsack2D(sc *solveCtx) (pack.Result, solveMeta, error) {
+	bin := sc.factory.Open()
+	r := knapsack.Pack(sc.ctx, sc.items, bin, knapsack.Options{})
+	return r.Result, solveMeta{totalValue: r.TotalValue, rejected: r.Rejected}, nil
+}
 
 // 2-D algorithm dispatch. The factory's placement strategy is chosen by
 // strat2DFor(algo) in pack2D, so ff/maxrects/guillotine/skyline and the shelf
@@ -52,15 +81,18 @@ func solveSAT(sc *solveCtx) (pack.Result, solveMeta, error) {
 		defer cancel()
 	}
 
-	// The "Max clauses / grid cells" tunables (in millions) let the UI trade memory
-	// for exact certification. optInt returns 0 when absent (sat uses its package
-	// defaults) and clamps to a safe ceiling so the guard can never be removed.
-	r, err := sat.Pack2D(ctx, items, sc.bw, sc.bh, sat.Options{
-		AllowRotation: true,
-		SymmetryBreak: true,
-		MaxClauses:    sc.req.optInt("sat_max_clauses", maxSATClauses),
-		MaxGridCells:  sc.req.optInt("sat_max_grid_cells", maxSATGridCells),
-	})
+	// The "Memory budget (MB)" tunable lets the UI trade RAM for exact certification.
+	// Derive the solver's clause/var caps from it via the measured ≈250 bytes/clause
+	// (vars are cheaper, so reusing the same per-unit cap for them is conservative).
+	// Unset → the default budget; otherwise the user's value is honoured as-is and
+	// NOT clamped — if they want to push their luck with a huge budget, that's on them.
+	mb := defaultSATMemoryMB
+	if v := sc.req.AlgorithmOptions["sat_max_memory_mb"]; v >= 1 {
+		mb = int(v)
+	}
+	budgetCap := int(int64(mb) << 20 / satBytesPerClause)
+	opts := sat.Options{AllowRotation: true, SymmetryBreak: true, MaxClauses: budgetCap, MaxGridCells: budgetCap}
+	r, err := sat.Pack2D(ctx, items, sc.bw, sc.bh, opts)
 	m := solveMeta{optimal: r.Optimal, lowerBound: r.LowerBound, upperBound: r.UpperBound, proof: r.Proof}
 	switch {
 	case errors.Is(err, sat.ErrItemTooLarge):
@@ -106,6 +138,8 @@ func init() {
 	reg("gbpp", solveGBPP)
 	reg("lex", solveLex)
 	reg("sat", solveSAT)
+	reg("strip", solveStrip2D)
+	reg("knapsack", solveKnapsack2D)
 
 	reg("auto", func(sc *solveCtx) (pack.Result, solveMeta, error) {
 		mrFactory := constrainedFactory(d2.NewFactory(sc.bw, sc.bh, d2.NewMaxRectsDefault), sc.req.Constraints)
