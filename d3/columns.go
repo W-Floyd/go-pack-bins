@@ -262,7 +262,7 @@ func (cp *ColumnPacker) buildLevel(its []*pitem, binID string, cx, cy, base, pw,
 	covered := 0.0
 	for _, blk := range blocks {
 		skip := false
-		for _, idx := range blk.idxs {
+		for _, idx := range blk.idxs[:blk.n] {
 			if consumed[idx] || usedSet[idx] {
 				skip = true
 				break
@@ -279,14 +279,14 @@ func (cp *ColumnPacker) buildLevel(its []*pitem, binID string, cx, cy, base, pw,
 		if !ok {
 			continue
 		}
-		for _, s := range blk.subs {
+		for _, s := range blk.subs[:blk.n] {
 			placements = append(placements, &Placement3D{
 				binID: binID, itemID: s.id,
 				X: cx + pl.X, Y: cy + pl.Y, Z: base + s.dz,
 				W: pl.W, D: pl.H, H: s.fh,
 			})
 		}
-		for _, idx := range blk.idxs {
+		for _, idx := range blk.idxs[:blk.n] {
 			usedSet[idx] = true
 			used = append(used, idx)
 		}
