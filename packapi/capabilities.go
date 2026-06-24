@@ -104,6 +104,7 @@ func AlgoCapabilities() algoreg.Payload {
 			"bf":       {Tunables: refineKnobs(), Balanceable: true},
 			"wf":       {Tunables: refineKnobs(), Balanceable: true},
 			"pref":     {Tunables: refineKnobs(), Balanceable: true},
+			"blocks":   {Tunables: []algoreg.Tunable{tCount("block_max_stack", "Max stack", 6)}},
 			"auto":     {Balanceable: true},
 			"joint":    {Balanceable: true},
 			"gbpp":     {Panel: "bincost"},
