@@ -534,6 +534,12 @@
           </div>
           <div style="font-size:11px;color:var(--muted);margin-top:4px">Items with a <code>profit</code> scalar are optional; rejected if profit can't cover a bin.</div>
         </div>
+        <div id="strip-field" style="display:none; margin-top:6px">
+          <div style="font-size:11px;color:var(--muted)">Strip packing: the width (and depth, in 3-D) is fixed; the <strong>height is minimised</strong> and shown in the results. The height input is ignored.</div>
+        </div>
+        <div id="knapsack-field" style="display:none; margin-top:6px">
+          <div style="font-size:11px;color:var(--muted)">Knapsack: packs the most valuable subset into a single container; the rest are rejected. Give items a <code>value</code> scalar (e.g. <code>value=100</code>); defaults to maximising packed volume.</div>
+        </div>
       </div>
 
       <!-- container catalog: choose the best container type for the order -->
@@ -988,6 +994,8 @@ function onModeChange() {
   renderLexObjectives();
   document.getElementById('bin-cost-field').style.display = 'none';
   document.getElementById('lex-section').style.display = 'none';
+  document.getElementById('strip-field').style.display = 'none';
+  document.getElementById('knapsack-field').style.display = 'none';
   innerCatalog = [];
   innerCatalogEnabled = false;
   innerLexObjectives = [];
@@ -1478,6 +1486,8 @@ function onAlgorithmChange() {
   renderAlgoTuning(document.getElementById('inner-algorithm')?.value, 'inner');
   document.getElementById('bin-cost-field').style.display = (algoCaps(algo).panel === 'bincost') ? '' : 'none';
   document.getElementById('lex-section').style.display = (algoCaps(algo).panel === 'lex') ? '' : 'none';
+  document.getElementById('strip-field').style.display = (algoCaps(algo).panel === 'strip') ? '' : 'none';
+  document.getElementById('knapsack-field').style.display = (algoCaps(algo).panel === 'knapsack') ? '' : 'none';
   const ialgo = document.getElementById('inner-algorithm')?.value;
   document.getElementById('inner-bin-cost-field').style.display = (algoCaps(ialgo).panel === 'bincost') ? '' : 'none';
   document.getElementById('inner-lex-section').style.display = (algoCaps(ialgo).panel === 'lex') ? '' : 'none';
@@ -2227,6 +2237,47 @@ async function runSinglePack(auto = false) {
       }
     }
   };
+
+  // Strip / knapsack: single-container objectives that solve fully (not
+  // incremental), so do a one-shot request. Strip reports the minimised height
+  // (render the container at it); knapsack reports the packed-subset value and
+  // rejects the items it left out.
+  if (algo === 'strip' || algo === 'knapsack') {
+    let result;
+    try {
+      if (WASM_MODE) {
+        result = await new Promise((resolve, reject) => {
+          packFrameHandler = (msg) => {
+            if (msg.result) resolve(msg.result);
+            else if (msg.frame && msg.frame.type === 'error') reject(new Error(msg.frame.error));
+          };
+          packWorkerRef().postMessage({ kind: 'packOnce', reqId: seq, body });
+        });
+      } else {
+        result = await (await fetch('/api/pack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: packController && packController.signal })).json();
+      }
+    } catch (e) {
+      if (seq === packSeq) { if (!auto) showError(e.message); endPackIndicator(); }
+      return;
+    }
+    if (seq !== packSeq) return;
+    if (result.error) { if (!auto) showError(result.error); endPackIndicator(); return; }
+    const r = x => Math.round(x * 100) / 100;
+    // Strip: render the container at the minimised height (the open axis).
+    if (algo === 'strip' && result.returned_height) body.bin = { ...body.bin, height: result.returned_height };
+    data.bins_used = result.bins_used || 0;
+    data.free_rects = result.free_rects;
+    data.item_errors = result.item_errors || {};
+    data.unplaced = result.unplaced || [];
+    data.rejected = result.rejected || [];
+    if (algo === 'strip') data.best_packer = `height ${r(result.returned_height || 0)} (≥ area bound)`;
+    else data.best_packer = `value ${r(result.total_value || 0)}` + ((result.rejected || []).length ? ` · ${result.rejected.length} rejected` : '');
+    renderShell(data, mode, body.bin, 0);
+    if (is3D) ctl = beginScene3D(body.bin, Math.max(1, data.bins_used), body.items.length);
+    drawBatch(result.placements || []);
+    finish();
+    return;
+  }
 
   // Container catalog: pick the best container type. A full solve runs per type,
   // so this is not streamed — do a one-shot request and render the result with

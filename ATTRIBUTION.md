@@ -114,3 +114,27 @@ The Boolean solving is delegated to the pure-Go SAT/MaxSAT solver
 dependency of the main module, confined to this package. The exact branch-and-price
 / MILP methods and the demand-multiplicity (cutting-stock) layer of Kieu et al. are
 **not** ported.
+
+## Strip packing, lower bounds, and single-container knapsack (classical)
+
+These three additions implement classical, public-domain formulations over the
+library's existing placement strategies; no third-party code is used.
+
+- **Strip packing** ([`strip/`](strip/)) — fix the base dimensions, minimise the
+  open extent (2-D: fixed width, minimise height; 3-D: fixed base, minimise
+  height). The level/shelf origins are Baker, Coffman & Rivest (1980) and Coffman,
+  Garey, Johnson & Tarjan (1980) (NFDH/FFDH); the package adds no new heuristic, it
+  minimises the achieved extent over the existing d2/d3 strategies.
+
+- **Lower bounds** ([`offline.LowerBoundVolume`](offline/bounds.go),
+  [`d2.LowerBound`](d2/bounds.go), [`d3.LowerBound`](d3/bounds.go)) — the continuous
+  area/volume bound (the L1 bound, Martello & Toth 1990) plus the "large item"
+  counting bound for 2-D/3-D. Surfaced through the packapi response so every
+  heuristic reports a real optimality gap and self-certifies when it meets the
+  bound. Complements the 1-D L2/DFF plan in
+  [`docs/plans/exact-1d-lower-bounds.md`](docs/plans/exact-1d-lower-bounds.md).
+
+- **Single-container knapsack** ([`knapsack/`](knapsack/)) — maximise the value of
+  the subset packed into one container (the geometric 0/1 knapsack). A greedy
+  value-density heuristic with a leftover-fill pass over any `pack.Bin`; reports the
+  achieved value, not a bound.

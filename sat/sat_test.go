@@ -184,6 +184,27 @@ func TestNormalPatternsShrinksUniformGrid(t *testing.T) {
 	validate(t, r, items, 1000, 1000)
 }
 
+func TestBuildAbortsOnActualCount(t *testing.T) {
+	// The same instance must certify under a generous clause cap and fall back under
+	// a tiny one — the decision is made on the actual count reached while building,
+	// not on an a-priori estimate.
+	items := make([]*d2.Item2D, 24)
+	for i := range items {
+		items[i] = d2.NewItem(string(rune('a'+i)), 5, 5, false)
+	}
+	big, err := Pack2D(context.Background(), items, 50, 50, Options{SymmetryBreak: true, MaxClauses: 50_000_000})
+	if err != nil || !big.Optimal {
+		t.Fatalf("generous cap should certify: err=%v optimal=%v", err, big.Optimal)
+	}
+	small, err := Pack2D(context.Background(), items, 50, 50, Options{SymmetryBreak: true, MaxClauses: 100})
+	if !errors.Is(err, ErrGridTooLarge) {
+		t.Fatalf("tiny cap should overflow: got err=%v", err)
+	}
+	if small.Optimal || len(small.Placements) != len(items) {
+		t.Errorf("tiny-cap result should be an uncertified heuristic packing of all items")
+	}
+}
+
 func TestLargeGridDegradesGracefully(t *testing.T) {
 	// Distinct item sizes (1..60) make the subset-sum position sets dense (≈1830 per
 	// axis), so even after the normal-pattern reduction the link clauses (~13M)

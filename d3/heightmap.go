@@ -20,6 +20,10 @@ type Heightmap struct {
 	placed           []box
 	usedVol          float64
 	contact          ContactSpec
+	// minTop ranks candidates by the lowest resulting TOP (z+h) and prefers the
+	// flattest orientation, rather than the lowest base z. Used for a final flat
+	// layer where nothing rests above, so the peak — not the base — is what matters.
+	minTop bool
 }
 
 // NewHeightmap creates a heightmap strategy for a bin of the given dimensions.
@@ -30,6 +34,15 @@ func NewHeightmap(w, d, h float64) *Heightmap {
 // NewHeightmapStrategy matches Factory3D's strategy-constructor signature.
 func NewHeightmapStrategy(w, d, h float64) PlacementStrategy3D {
 	return NewHeightmap(w, d, h)
+}
+
+// Occupy seeds the surface with an already-placed box (mirrors EMS.Occupy), so a
+// heightmap can be reconstructed from an existing packing and then asked to land
+// further items on its true per-footprint surface — used to place a block pack's
+// final-layer leftovers at their lowest resting height rather than high.
+func (hm *Heightmap) Occupy(x, y, z, w, d, h float64) {
+	hm.placed = append(hm.placed, box{x, y, z, w, d, h})
+	hm.usedVol += w * d * h
 }
 
 // NewHeightmapStrategyContact returns a Factory3D-compatible constructor that
@@ -82,7 +95,11 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 					continue
 				}
 				c := box{x, y, z, w, d, h}
-				if !bestSet || lowerLanding(c, best) {
+				improved := lowerLanding(c, best)
+				if hm.minTop {
+					improved = lowerTop(c, best)
+				}
+				if !bestSet || improved {
 					best, bestSet = c, true
 				}
 			}
@@ -160,6 +177,26 @@ func (hm *Heightmap) gated(x, y, z, w, d float64) bool {
 // lowerLanding prefers the lowest resting height (z), then back-most (y), then
 // left-most (x) — gravity first, like the other strategies' tie-breaks.
 func lowerLanding(c, best box) bool {
+	if math.Abs(c.z-best.z) > compactEps {
+		return c.z < best.z
+	}
+	if math.Abs(c.y-best.y) > compactEps {
+		return c.y < best.y
+	}
+	return c.x < best.x
+}
+
+// lowerTop prefers the lowest resulting top (z+h), then the flattest orientation
+// (smallest height), then gravity (z, y, x). It minimises the peak of a final flat
+// layer: among spots at the same base it lays the item as flat as it can.
+func lowerTop(c, best box) bool {
+	ct, bt := c.z+c.h, best.z+best.h
+	if math.Abs(ct-bt) > compactEps {
+		return ct < bt
+	}
+	if math.Abs(c.h-best.h) > compactEps {
+		return c.h < best.h
+	}
 	if math.Abs(c.z-best.z) > compactEps {
 		return c.z < best.z
 	}

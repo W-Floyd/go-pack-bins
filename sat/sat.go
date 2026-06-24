@@ -144,21 +144,16 @@ func Pack2D(ctx context.Context, items []*d2.Item2D, W, H float64, opts Options)
 	posX := normalPositions(sitems, iW, opts.AllowRotation)
 	posY := normalPositions(sitems, iH, opts.AllowRotation)
 
-	// Size guard: estimate the formula built per candidate k and bail out to the
-	// heuristic packing before allocating, so a large instance degrades gracefully
-	// instead of exhausting memory. The clause estimate is the binding term.
-	gridCap, clauseCap := opts.MaxGridCells, opts.MaxClauses
-	if gridCap == 0 {
-		gridCap = MaxGridCells
+	// Memory budget → formula caps. Rather than reject up front on a worst-case
+	// estimate, we build the real formula and abort only if the *actual* clause/var
+	// count crosses the cap (enc.overflow) — so an instance whose formula turns out
+	// smaller than the estimate (e.g. many tautological link clauses) still solves.
+	varCap, clauseCap := opts.MaxGridCells, opts.MaxClauses
+	if varCap == 0 {
+		varCap = MaxGridCells
 	}
 	if clauseCap == 0 {
 		clauseCap = MaxClauses
-	}
-	estVars, estClauses := estimateFormula(len(items), len(posX), len(posY), ub, opts.AllowRotation)
-	if estVars > int64(gridCap) || estClauses > int64(clauseCap) {
-		r := Result{Result: ubPlacements, LowerBound: lb, UpperBound: ub,
-			Proof: fmt.Sprintf("formula too large (~%d vars, ~%d clauses); heuristic only", estVars, estClauses)}
-		return r, ErrGridTooLarge
 	}
 
 	// Search for the minimum feasible bin count. The incremental strategy builds the
@@ -166,11 +161,16 @@ func Pack2D(ctx context.Context, items []*d2.Item2D, W, H float64, opts Options)
 	// solves; the non-incremental one rebuilds a fresh formula per candidate k.
 	var best []placement
 	var bestK int
-	var completed bool
+	var completed, overflow bool
 	if opts.NonIncremental {
-		best, bestK, completed = solveBinarySearch(ctx, iW, iH, sitems, lb, ub, opts, posX, posY)
+		best, bestK, completed, overflow = solveBinarySearch(ctx, iW, iH, sitems, lb, ub, opts, posX, posY, varCap, clauseCap)
 	} else {
-		best, bestK, completed = solveIncremental(ctx, iW, iH, sitems, lb, ub, opts, posX, posY)
+		best, bestK, completed, overflow = solveIncremental(ctx, iW, iH, sitems, lb, ub, opts, posX, posY, varCap, clauseCap)
+	}
+	if overflow {
+		// The actual formula exceeded the budget mid-build; fall back, uncertified.
+		return Result{Result: ubPlacements, LowerBound: lb, UpperBound: ub,
+			Proof: "formula exceeds the memory budget; heuristic only"}, ErrGridTooLarge
 	}
 
 	if best == nil {
@@ -200,20 +200,23 @@ func Pack2D(ctx context.Context, items []*d2.Item2D, W, H float64, opts Options)
 // each step reuses the work of the previous one. Returns (placements, k, completed);
 // completed is false only if ctx was cancelled mid-search (then k is the best found
 // so far and the caller treats it as uncertified).
-func solveIncremental(ctx context.Context, iW, iH int, items []scaledItem, lb, ub int, opts Options, posX, posY []int) ([]placement, int, bool) {
-	e := newEnc(iW, iH, items, ub, opts.AllowRotation, opts.SymmetryBreak, posX, posY)
+func solveIncremental(ctx context.Context, iW, iH int, items []scaledItem, lb, ub int, opts Options, posX, posY []int, varCap, clauseCap int) (best []placement, bestK int, completed, overflow bool) {
+	e := newEnc(iW, iH, items, ub, opts.AllowRotation, opts.SymmetryBreak, posX, posY, varCap, clauseCap)
+	if e.overflow {
+		return nil, -1, true, true // formula exceeded the budget mid-build
+	}
 	s := solver.New(e.problem())
 	if s.Solve() != solver.Sat {
-		return nil, -1, true // upper bound infeasible (shouldn't happen — FFD achieved it)
+		return nil, -1, true, false // upper bound infeasible (shouldn't happen — FFD achieved it)
 	}
-	best, bestK := e.decode(s.Model()), ub
+	best, bestK = e.decode(s.Model()), ub
 
 	// Walk down: at step m we disable bin m (bins m+1..ub-1 already disabled), so the
 	// active bins are 0..m-1, i.e. exactly m bins. The first UNSAT proves m infeasible,
 	// certifying the previous (m+1) as optimal.
 	for m := ub - 1; m >= lb; m-- {
 		if ctx.Err() != nil {
-			return best, bestK, false
+			return best, bestK, false, false
 		}
 		s.AppendClause(solver.NewClause(solver.IntsToLits(int32(-e.aVar[m]))))
 		if s.Solve() == solver.Sat {
@@ -222,24 +225,26 @@ func solveIncremental(ctx context.Context, iW, iH int, items []scaledItem, lb, u
 			break // m bins infeasible → bestK (= m+1) is optimal
 		}
 	}
-	return best, bestK, true
+	return best, bestK, true, false
 }
 
 // solveBinarySearch is the non-incremental strategy: binary search over the bin
 // count, rebuilding a fresh formula for each probe. Slower on large formulas (it
 // re-encodes repeatedly) but kept as a reference/escape hatch.
-func solveBinarySearch(ctx context.Context, iW, iH int, items []scaledItem, lb, ub int, opts Options, posX, posY []int) ([]placement, int, bool) {
-	var best []placement
-	bestK := -1
+func solveBinarySearch(ctx context.Context, iW, iH int, items []scaledItem, lb, ub int, opts Options, posX, posY []int, varCap, clauseCap int) (best []placement, bestK int, completed, overflow bool) {
+	bestK = -1
 	lo, hi := lb, ub
-	completed := true
+	completed = true
 	for lo < hi {
 		if ctx.Err() != nil {
 			completed = false
 			break
 		}
 		mid := (lo + hi) / 2
-		e := newEnc(iW, iH, items, mid, opts.AllowRotation, opts.SymmetryBreak, posX, posY)
+		e := newEnc(iW, iH, items, mid, opts.AllowRotation, opts.SymmetryBreak, posX, posY, varCap, clauseCap)
+		if e.overflow {
+			return nil, -1, true, true
+		}
 		if pl, sat := e.solve(); sat {
 			best, bestK = pl, mid
 			hi = mid
@@ -252,13 +257,16 @@ func solveBinarySearch(ctx context.Context, iW, iH int, items []scaledItem, lb, 
 		if ctx.Err() != nil {
 			completed = false
 		} else {
-			e := newEnc(iW, iH, items, lo, opts.AllowRotation, opts.SymmetryBreak, posX, posY)
+			e := newEnc(iW, iH, items, lo, opts.AllowRotation, opts.SymmetryBreak, posX, posY, varCap, clauseCap)
+			if e.overflow {
+				return nil, -1, true, true
+			}
 			if pl, sat := e.solve(); sat {
 				best, bestK = pl, lo
 			}
 		}
 	}
-	return best, bestK, completed
+	return best, bestK, completed, false
 }
 
 // detectScale finds the smallest integer s in [1, MaxScale] such that s·v is

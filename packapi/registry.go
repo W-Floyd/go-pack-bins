@@ -38,6 +38,10 @@ type solveMeta struct {
 	lowerBound int
 	upperBound int
 	proof      string
+	// extent is the minimised open-axis size of a "strip" solve; totalValue is the
+	// packed-subset value of a "knapsack" solve.
+	extent     float64
+	totalValue float64
 }
 
 // solveFn runs one algorithm against a prepared context, returning the packing, any
