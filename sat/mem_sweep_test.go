@@ -75,13 +75,13 @@ func TestMemSweep(t *testing.T) {
 		e := newEnc(W, H, items, k, true, true, posX, posY)
 		var ab runtime.MemStats
 		runtime.ReadMemStats(&ab)
+		clauses := len(e.cards) // capture before solve(); problem() frees e.cards
 		_, sat := e.solve()
 		dt := time.Since(t0)
 
 		close(stop)
 		<-done
 
-		clauses := len(e.cards)
 		vars := e.nVars
 		buildMB := mb(int64(ab.HeapAlloc) - int64(base.HeapAlloc))
 		peakMB := mb(int64(peak) - int64(base.HeapAlloc))

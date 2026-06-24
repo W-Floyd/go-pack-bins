@@ -49,9 +49,11 @@ var ErrGridTooLarge = errors.New("sat: scaled grid exceeds the size cap")
 //     pairwise "left/below" position-link clauses (doubled again under rotation).
 //     This is the term that actually blows up memory, so it is the binding cap.
 //
-// Calibration (see TestMemSweep): gophersat's peak heap is ≈300 bytes per clause,
-// roughly constant across instance sizes. So MaxClauses = 2M ≈ 0.6 GB peak — a
-// safe default. Scale linearly to size a different budget (e.g. 4 GB ≈ 13M clauses).
+// Calibration (see TestMemSweep): peak heap is ≈250 bytes per clause, roughly
+// constant across instance sizes (after freeing our clause copy once gophersat
+// parses it). So MaxClauses = 2M ≈ 0.5 GB peak — a safe default. Scale linearly to
+// size a different budget (e.g. 4 GB ≈ 16M clauses). The clause count itself is
+// further reduced by the normal-pattern position sets (see normalPositions).
 const (
 	MaxScale     = 100000
 	MaxGridCells = 1_000_000

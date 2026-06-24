@@ -497,9 +497,9 @@ const (
 	// SAT exact-solver formula-size caps. These bound how far the UI can raise the
 	// memory guard: a knob can trade RAM for exact certification, but not remove the
 	// guard entirely. Calibrated against the TestMemSweep measurement: gophersat peak
-	// heap is ≈300 bytes per clause, so 12M clauses ≈ 3.5 GB — a defensible ceiling
-	// for a 16 GB host. Raise only if you know the target machine has the RAM (and
-	// bump sat.MaxClauses to match, since this only caps what the UI can request).
+	// heap is ≈250 bytes per clause, so 12M clauses ≈ 3 GB — a defensible ceiling for
+	// a 16 GB host. Raise only if you know the target machine has the RAM (and bump
+	// sat.MaxClauses to match, since this only caps what the UI can request).
 	maxSATClauses   = 12000000
 	maxSATGridCells = 5000000
 )
