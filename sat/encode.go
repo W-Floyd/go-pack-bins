@@ -1,6 +1,7 @@
 package sat
 
 import (
+	"math/bits"
 	"sort"
 
 	"github.com/crillab/gophersat/solver"
@@ -20,32 +21,79 @@ type scaledItem struct {
 // until its edge sits at such a position, so restricting coordinates to this set
 // loses no feasible packing while shrinking the grid from `limit` points to the
 // (often far fewer) reachable sums. The result is sorted and includes 0.
+//
+// The reachable-sum set is a bitset (one bit per position) and "extend every
+// reachable position by an item's width" is a single word-parallel shift-or
+// (reach |= reach<<w) — 64 positions per machine word, vs the position-at-a-time
+// scalar loop. Each item contributes 0 or 1 times (one orientation): both the w and
+// h shifts read the pre-item bitset, so neither stacks on the other.
 func normalPositions(items []scaledItem, limit int, rotate bool) []int {
-	reach := make([]bool, limit+1)
-	reach[0] = true
+	nbits := limit + 1
+	nwords := (nbits + 63) >> 6
+	top := topMaskBits(nbits)
+
+	reach := make([]uint64, nwords)
+	reach[0] = 1                 // position 0 is reachable (empty subset)
+	tw := make([]uint64, nwords) // scratch for reach<<w
+	th := make([]uint64, nwords) // scratch for reach<<h
+
 	for _, it := range items {
-		// 0/1 subset sum: process high→low so each item contributes at most once.
-		for p := limit; p >= 0; p-- {
-			if !reach[p] {
-				continue
-			}
-			if w := p + it.w; w <= limit {
-				reach[w] = true
-			}
-			if rotate && it.rotate {
-				if h := p + it.h; h <= limit {
-					reach[h] = true
-				}
+		shlInto(tw, reach, it.w, top)
+		rot := rotate && it.rotate && it.h != it.w
+		if rot {
+			shlInto(th, reach, it.h, top)
+		}
+		for i := range reach {
+			reach[i] |= tw[i]
+		}
+		if rot {
+			for i := range reach {
+				reach[i] |= th[i]
 			}
 		}
 	}
+
 	out := make([]int, 0, 16)
-	for p := 0; p <= limit; p++ {
-		if reach[p] {
-			out = append(out, p)
+	for wi, word := range reach {
+		base := wi << 6
+		for word != 0 {
+			out = append(out, base+bits.TrailingZeros64(word))
+			word &= word - 1 // clear lowest set bit
 		}
 	}
 	return out
+}
+
+// shlInto writes the bitset src shifted left by n bit positions into dst (same
+// length), masking bits beyond the valid range with top (the last-word mask).
+func shlInto(dst, src []uint64, n int, top uint64) {
+	nw := len(dst)
+	ws := n >> 6       // whole-word shift
+	bs := uint(n & 63) // sub-word shift
+	for i := nw - 1; i >= 0; i-- {
+		if i < ws {
+			dst[i] = 0
+			continue
+		}
+		v := src[i-ws]
+		if bs != 0 {
+			v <<= bs
+			if i-ws-1 >= 0 {
+				v |= src[i-ws-1] >> (64 - bs)
+			}
+		}
+		dst[i] = v
+	}
+	dst[nw-1] &= top
+}
+
+// topMaskBits returns the mask of valid bits in the last word of an nbits-wide
+// bitset (all-ones when nbits is a multiple of 64).
+func topMaskBits(nbits int) uint64 {
+	if r := nbits & 63; r != 0 {
+		return (uint64(1) << uint(r)) - 1
+	}
+	return ^uint64(0)
 }
 
 // enc builds the SAT formula for "do these items fit in k bins of W×H?".
