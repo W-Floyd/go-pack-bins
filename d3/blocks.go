@@ -78,12 +78,25 @@ type ent struct {
 // NewBlockPacker creates a block-building packer for a bin of the given dimensions.
 func NewBlockPacker(w, d, h float64) *BlockPacker {
 	return &BlockPacker{
-		// maxStack caps vertical fusion; it must not exceed maxBlockSubs (block uses
-		// fixed-size arrays of that length), so the two are kept equal.
-		w: w, d: d, h: h, maxStack: maxBlockSubs,
+		w: w, d: d, h: h, maxStack: defaultMaxStack,
 		groupScratch: map[[2]float64][]ent{},
 		seenScratch:  map[[2]float64]bool{},
 	}
+}
+
+// WithMaxStack sets how many items may be fused into one vertical stack (tier-2
+// block building), clamped to [1, MaxBlockSubs], and returns the packer for
+// chaining. Higher values fuse deeper columns — denser layers at the cost of a
+// larger exact-height stack search; 1 disables vertical fusion entirely.
+func (bp *BlockPacker) WithMaxStack(n int) *BlockPacker {
+	if n < 1 {
+		n = 1
+	}
+	if n > MaxBlockSubs {
+		n = MaxBlockSubs
+	}
+	bp.maxStack = n
+	return bp
 }
 
 // groupByFootprint buckets the available items' orientations by footprint key
@@ -151,20 +164,26 @@ type sub struct {
 	dz, fh float64
 }
 
-// maxBlockSubs bounds how many items a vertical stack can fuse — it lets block use
-// fixed arrays instead of heap-allocated slices, so blocks live inline in the
+// MaxBlockSubs is the hard ceiling on vertical-fusion depth. block stores its
+// sub-items in fixed-size arrays of this length, so blocks live inline in the
 // reused blockScratch and cost zero per-block allocations (the per-block idxs/subs
-// slices were ~57% of the packer's allocation count). bp.maxStack must not exceed it.
-const maxBlockSubs = 6
+// slices were ~57% of the packer's allocation count). WithMaxStack clamps the
+// tunable stack depth to it; raise this constant to allow deeper stacks.
+const MaxBlockSubs = 16
+
+// defaultMaxStack is the out-of-the-box vertical-fusion cap. It is kept modest
+// because the exact-height stack search grows with depth and deeper stacks rarely
+// improve packing enough to justify the cost — tune it via WithMaxStack.
+const defaultMaxStack = 6
 
 // block is a solid layer-height column: a footprint, the item indices it consumes,
 // and the stacked sub-items that realise it. idxs/subs are fixed-size arrays; n is
-// how many entries are live.
+// how many entries are live (n ≤ maxStack ≤ MaxBlockSubs).
 type block struct {
 	fw, fd float64
 	n      int
-	idxs   [maxBlockSubs]int
-	subs   [maxBlockSubs]sub
+	idxs   [MaxBlockSubs]int
+	subs   [MaxBlockSubs]sub
 }
 
 // region is a free vertical span [base, base+cap) within an already-opened bin

@@ -468,6 +468,7 @@ type PackRequest struct {
 	// are clamped to safe ceilings (see optInt) so a UI knob can never remove a
 	// guardrail and hang the solve. Recognised keys:
 	//   beam_width, beam_branch, beam_max_items          (algorithm "beam")
+	//   block_max_stack                                  (algorithm "blocks": vertical-fusion depth)
 	//   brute_max_items                                  (algorithm "brute")
 	//   search_max_iters, search_restarts, search_seed   (algorithms "rr", "grasp")
 	//   search_fast_decode                               (3-D rr/arr/grasp: cheap surrogate decoder)

@@ -162,7 +162,11 @@ func init() {
 
 	// Self-managing packers (own geometry/bins; ignore the factory).
 	reg("blocks", selfManaged3D(func(sc *solveCtx) (pack.Result, error) {
-		return d3.NewBlockPacker(sc.bw, sc.bd, sc.bh).PackAllCtx(sc.ctx, sc.items)
+		bp := d3.NewBlockPacker(sc.bw, sc.bd, sc.bh)
+		if n := sc.req.optInt("block_max_stack", d3.MaxBlockSubs); n > 0 {
+			bp.WithMaxStack(n)
+		}
+		return bp.PackAllCtx(sc.ctx, sc.items)
 	}, true))
 	reg("columns", selfManaged3D(func(sc *solveCtx) (pack.Result, error) {
 		return d3.NewColumnPacker(sc.bw, sc.bd, sc.bh).PackAllCtx(sc.ctx, sc.items)

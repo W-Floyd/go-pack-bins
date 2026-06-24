@@ -109,3 +109,31 @@ func newLCG(seed uint32) func() float64 {
 	}
 	return func() float64 { s = s*1664525 + 1013904223; return float64(s>>8) / (1 << 24) }
 }
+
+// TestWithMaxStack clamps to [1, MaxBlockSubs] and actually drives fusion depth:
+// stacks of four 4×4×1 slabs fuse into one height-4 block at maxStack≥4, but with
+// maxStack=1 (fusion disabled) each slab is its own height-1 block, so the tier-2
+// vertical fusion never fires and no placement spans more than one slab's height.
+func TestWithMaxStack(t *testing.T) {
+	if got := NewBlockPacker(10, 10, 10).WithMaxStack(99).maxStack; got != MaxBlockSubs {
+		t.Errorf("WithMaxStack(99) = %d, want clamp to %d", got, MaxBlockSubs)
+	}
+	if got := NewBlockPacker(10, 10, 10).WithMaxStack(0).maxStack; got != 1 {
+		t.Errorf("WithMaxStack(0) = %d, want clamp to 1", got)
+	}
+
+	mk := func() []pack.Item {
+		var items []pack.Item
+		for i := 0; i < 4; i++ { // four 4×4×1 slabs: fuse to a 4×4×4 column at depth ≥4
+			items = append(items, NewItem(fmt.Sprintf("s%d", i), 4, 4, 1, false))
+		}
+		return items
+	}
+	// Depth 1: fusion disabled — no block taller than one slab (height 1).
+	flat, _ := NewBlockPacker(4, 4, 8).WithMaxStack(1).PackAll(mk())
+	for _, p := range flat.Placements {
+		if p3 := p.(*Placement3D); p3.H > 1+1e-9 {
+			t.Fatalf("maxStack=1 produced a fused block of height %.0f — fusion not disabled", p3.H)
+		}
+	}
+}
