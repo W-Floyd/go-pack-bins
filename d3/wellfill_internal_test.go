@@ -1,6 +1,32 @@
 package d3
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
+
+// solidSlabTop must report the highest fully-solid level: here two full 10×10×3
+// layers (solid to z=6) with one 2×2×2 box poking above. The reconstruction can
+// then ignore everything below z=6 and only scan that top box.
+func TestSolidSlabTop(t *testing.T) {
+	boxes := []box{
+		{0, 0, 0, 10, 10, 3}, // full layer 0–3
+		{0, 0, 3, 10, 10, 3}, // full layer 3–6
+		{0, 0, 6, 2, 2, 2},   // poke above
+	}
+	if got := solidSlabTop(boxes, 10, 10); math.Abs(got-6) > 1e-9 {
+		t.Fatalf("solidSlabTop = %.2f, want 6", got)
+	}
+	// A gap above z=3 (only a 2×2 column continues) caps the slab at 3.
+	gappy := []box{{0, 0, 0, 10, 10, 3}, {0, 0, 3, 2, 2, 2}}
+	if got := solidSlabTop(gappy, 10, 10); math.Abs(got-3) > 1e-9 {
+		t.Fatalf("solidSlabTop(gappy) = %.2f, want 3", got)
+	}
+	// Floor not fully covered → no solid slab.
+	if got := solidSlabTop([]box{{0, 0, 0, 5, 5, 3}}, 10, 10); math.Abs(got) > 1e-9 {
+		t.Fatalf("solidSlabTop(partial floor) = %.2f, want 0", got)
+	}
+}
 
 // A 2×6 well (open to the top) is the only free floor; everything else is filled
 // to z=4. A 6×2×4 item fits only rotated to 2×6×4. probeTop must drop it into the

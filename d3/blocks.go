@@ -370,6 +370,45 @@ func (bp *BlockPacker) endgame(its []*pitem, live []int, consumed []bool) bool {
 	return len(r.Unplaced) == 0 && r.BinsUsed() <= 1
 }
 
+// solidSlabTop returns the height of the highest fully-solid slab measured from
+// the floor: the largest z such that every horizontal plane in [0, z] is 100%
+// covered. Below it the packing is solid, so for surface/well reconstruction it
+// can be replaced by a solid floor and the boxes within it ignored — leaving only
+// the thin top layer to scan. Boxes are non-overlapping, so the covered area at a
+// height is the exact sum of the footprints spanning it; the slab ends at the
+// first height where that sum drops below the full base area. Returns 0 when the
+// floor itself is not fully covered (no reduction possible).
+func solidSlabTop(boxes []box, baseW, baseD float64) float64 {
+	full := baseW * baseD
+	type ev struct{ z, dArea float64 }
+	evs := make([]ev, 0, 2*len(boxes))
+	for _, b := range boxes {
+		fp := b.w * b.d
+		evs = append(evs, ev{b.z, fp}, ev{b.z + b.h, -fp})
+	}
+	sort.Slice(evs, func(i, j int) bool {
+		if math.Abs(evs[i].z-evs[j].z) > blockEps {
+			return evs[i].z < evs[j].z
+		}
+		return evs[i].dArea > evs[j].dArea // at equal z, add before remove
+	})
+	cov, prevZ := 0.0, 0.0
+	for i := 0; i < len(evs); {
+		zc := evs[i].z
+		if zc > prevZ+blockEps { // coverage over [prevZ, zc) is cov
+			if cov < full-blockEps {
+				return prevZ // first gap → solid ends here
+			}
+			prevZ = zc
+		}
+		for i < len(evs) && math.Abs(evs[i].z-zc) <= blockEps {
+			cov += evs[i].dArea
+			i++
+		}
+	}
+	return prevZ
+}
+
 // flatFootprint is the base area an item occupies laid as flat as it can be (its
 // smallest-height orientation) — the floor it needs in a single flat layer.
 func flatFootprint(it *pitem) float64 {
@@ -401,9 +440,11 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 		}
 	}
 
-	count := map[string]int{}
-	for _, p := range result.Placements {
-		count[bin3DID(p)]++
+	boxesByBin := map[string][]box{}
+	for _, raw := range result.Placements {
+		if pl, ok := raw.(*Placement3D); ok {
+			boxesByBin[pl.binID] = append(boxesByBin[pl.binID], box{pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H})
+		}
 	}
 
 	// Two complementary surface models per bin: a heightmap (true per-footprint
@@ -412,30 +453,51 @@ func (bp *BlockPacker) finalStage(result *pack.Result, its []*pitem, consumed []
 	// leftover is placed wherever — surface or well, in any orientation — its top
 	// lands lowest, so a piece that fits a well drops into it (often disappearing
 	// below the surface) instead of sitting on top.
+	//
+	// Only the part of each bin ABOVE its highest fully-solid slab matters: below
+	// that everything is full, so it is replaced by a solid floor and its boxes
+	// ignored. That shrinks the reconstruction to the thin top layer, so the final
+	// fill stays cheap even on bins of many thousands of boxes (the cap then guards
+	// only against a pathologically jagged top).
 	var binIDs []string
 	hms := map[string]*Heightmap{}
 	emss := map[string]*EmptyMaximalSpace{}
 	for _, b := range result.Bins {
 		id := b.ID()
-		if count[id] == 0 || count[id] > voidScanMaxBoxes {
+		boxes := boxesByBin[id]
+		if len(boxes) == 0 {
 			continue
+		}
+		zCut := solidSlabTop(boxes, bp.w, bp.d)
+		kept := make([]box, 0, len(boxes))
+		for _, bx := range boxes {
+			if bx.z+bx.h > zCut+blockEps {
+				kept = append(kept, bx)
+			}
+		}
+		if len(kept) > voidScanMaxBoxes {
+			continue // top layer itself too large to scan cheaply
 		}
 		hm := NewHeightmap(bp.w, bp.d, bp.h)
 		hm.contact = ContactSpec{NoFloating: true} // rest on something, never float
 		hm.minTop = true                           // minimise the peak of the final layer
-		hms[id] = hm
 		e := NewEmptyMaximalSpace(bp.w, bp.d, bp.h)
 		e.contact = ContactSpec{NoFloating: true}
+		if zCut > blockEps { // solid floor standing in for the ignored slab below
+			hm.Occupy(0, 0, 0, bp.w, bp.d, zCut)
+			e.Occupy(0, 0, 0, bp.w, bp.d, zCut)
+		}
+		for _, bx := range kept {
+			z, h := bx.z, bx.h
+			if z < zCut { // clip to the kept slab; its lower part is inside the floor
+				h, z = z+h-zCut, zCut
+			}
+			hm.Occupy(bx.x, bx.y, z, bx.w, bx.d, h)
+			e.Occupy(bx.x, bx.y, z, bx.w, bx.d, h)
+		}
+		hms[id] = hm
 		emss[id] = e
 		binIDs = append(binIDs, id)
-	}
-	for _, raw := range result.Placements {
-		if pl, ok := raw.(*Placement3D); ok {
-			if hm := hms[pl.binID]; hm != nil {
-				hm.Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
-				emss[pl.binID].Occupy(pl.X, pl.Y, pl.Z, pl.W, pl.D, pl.H)
-			}
-		}
 	}
 
 	idxByVol := make([]int, 0, len(its))
