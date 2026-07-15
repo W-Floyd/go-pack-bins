@@ -3,16 +3,18 @@
 A bin-packing library for Go covering 1-D, 2-D, and 3-D problems, with online and
 offline algorithms, exact solvers, metaheuristics, hard scalar **constraints**,
 soft **preferences** (balancing, colocation, stability), physical stacking rules,
-a heterogeneous **container catalog**, a **generalized** (optional-items + profit
-+ bin-cost) objective, and a browser demo — which also compiles to **WebAssembly**
+a heterogeneous **container catalog**, a **generalized** (optional-items + profit +
+bin-cost) objective, and a browser demo — which also compiles to **WebAssembly**
 so the whole thing runs client-side with no server.
 
 ```
 go get github.com/W-Floyd/go-pack-bins
 ```
 
-The library has **no external dependencies**. Solves are cancellable via
-`context.Context`.
+The library has a **single optional dependency** — `github.com/crillab/gophersat`,
+a pure-Go SAT solver used only by the SAT-based exact solver; every other package
+is dependency-free (and the `js/wasm` build works without it). Solves are
+cancellable via `context.Context`.
 
 ## Architecture
 
@@ -40,8 +42,13 @@ a small variation on it.
   2-D: MaxRects, Guillotine, Skyline, Shelf. 3-D: extreme-point (with support /
   anti-slosh), Bottom-Left-Fill, **EMS** (empty-maximal-space), **Fit**
   (maximal-contact best-fit, grounded so it never floats against walls/ceiling),
-  **Heightmap**, **LAFF** (largest-area-fit-first layers), and **LayerStack**
-  (flat, sequential layers that stream their progress).
+  **Heightmap**, **LAFF** (largest-area-fit-first layers), **LayerStack**
+  (flat, sequential layers that stream their progress), **BlockPacker** /
+  **ColumnPacker** (waste-free rectangular blocks / columns tiled with MaxRects),
+  and **Assembler** (fuse perfectly-nesting items into solid blocks, then EMS).
+  `d3.LowerBound` gives a combinatorial bin-count bound (so a matching packing is
+  *provably optimal* and the gap is real), and `d3.RefineVoids` is a void-guided
+  post-pass that pulls items into the deepest gaps to tighten a finished packing.
 - **`joint`** — a 3-D packer that decides bin selection *and* placement position
   together under one multi-objective score (balance + anti-slosh, single pass).
 - **`catalog`** — picks the best container type for an order from a catalog of
@@ -49,9 +56,22 @@ a small variation on it.
   sizes when one type's count is exhausted.
 - **`gbpp`** — the Generalized Bin Packing objective: optional items carry a
   profit, bins carry a cost, and the solve minimises net cost (with rejection).
+- **`sat`** — an exact **2-D** packer built on a SAT encoding (the sole gophersat
+  user). It *certifies* optimality: it squeezes the bin count k until k is
+  satisfiable and k−1 is not (or k hits the area lower bound). Needs
+  integer-scalable dimensions; errors rather than rounding.
+- **`strip`** — strip packing: fix the container's base and minimise the open
+  dimension (2-D roll/fabric/PCB height; 3-D printer-bed/pallet/truck length),
+  reusing the d2/d3 placement strategies and keeping the smallest extent found.
+- **`knapsack`** — single-container value maximisation: given one bin too small
+  for everything, choose the highest-value subset that fits (defaults to volume,
+  i.e. best utilisation). Dimension-agnostic; greedy by value density.
 - **`geometry`** — vector/matrix helpers for 3-D solids.
 - **`packapi`** — transport-independent solve API (plain structs in/out) shared by
   the server and the WASM build.
+- **`algoreg`** — the self-describing algorithm registry: one source of truth for
+  which algorithms exist and what each supports. The front-ends build their UI
+  from it, so adding an algorithm needs no `index.html` edit.
 - **`cmd/webdemo`** — HTTP server + single-page visualiser.
 - **`cmd/wasm`** — the same `packapi` compiled to `js/wasm`; see [WebAssembly](#webassembly).
 - **`bench/`** — a separate module benchmarking against
@@ -179,7 +199,9 @@ new features at *each* level independently: the inner (carton) and outer (pallet
 stages each take their own catalog, bin cost, GBPP, and lexicographic objectives.
 The pack streams in progressively; the right-hand panel reports per-metric sum /
 average / σ across bins plus a per-bin breakdown. Setups can be saved and reloaded
-as JSON.
+as JSON, and a solved result can be exported as **placement JSON** (per-item
+position/size/orientation + bin dimensions) or as a **binary STL** mesh (one box
+per placement, bins laid out side by side).
 
 ## WebAssembly
 
