@@ -255,7 +255,11 @@ func (cp *ColumnPacker) fillColumn(result *pack.Result, binID string, cx, cy, pw
 // P. Incomplete coverage (gaps) returns ok=false so the caller drops the level.
 func (cp *ColumnPacker) buildLevel(its []*pitem, binID string, cx, cy, base, pw, pd, H float64, colLive []int, consumed []bool) ([]*Placement3D, []int, bool) {
 	blocks := cp.bp.buildBlocks(its, colLive, consumed, H)
-	floor := d2.NewBin(binID, pw, pd, d2.NewMaxRectsDefault(pw, pd))
+	// Probe the MaxRects strategy directly rather than through a d2.Bin: the floor
+	// item is throwaway (the real placement uses each sub's own id), so this skips
+	// the per-block d2.Item/Placement2D allocations that TryPlace would make — the
+	// same shortcut BlockPacker.placeOnFloor takes.
+	floor := d2.NewMaxRectsDefault(pw, pd)
 	var placements []*Placement3D
 	var used []int
 	usedSet := map[int]bool{}
@@ -271,26 +275,26 @@ func (cp *ColumnPacker) buildLevel(its []*pitem, binID string, cx, cy, base, pw,
 		if skip {
 			continue
 		}
-		p, err := floor.TryPlace(d2.NewItem("lvl", blk.fw, blk.fd, true))
-		if err != nil {
+		x, y, rotated, ok := floor.TryInsert(blk.fw, blk.fd, true)
+		if !ok {
 			continue // footprint doesn't fit the remaining slice floor
 		}
-		pl, ok := p.(*d2.Placement2D)
-		if !ok {
-			continue
+		w, d := blk.fw, blk.fd
+		if rotated {
+			w, d = blk.fd, blk.fw
 		}
 		for _, s := range blk.subs[:blk.n] {
 			placements = append(placements, &Placement3D{
 				binID: binID, itemID: s.id,
-				X: cx + pl.X, Y: cy + pl.Y, Z: base + s.dz,
-				W: pl.W, D: pl.H, H: s.fh,
+				X: cx + x, Y: cy + y, Z: base + s.dz,
+				W: w, D: d, H: s.fh,
 			})
 		}
 		for _, idx := range blk.idxs[:blk.n] {
 			usedSet[idx] = true
 			used = append(used, idx)
 		}
-		covered += pl.W * pl.H
+		covered += w * d
 	}
 	if covered >= pw*pd-blockEps {
 		return placements, used, true
