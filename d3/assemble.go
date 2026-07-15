@@ -155,48 +155,60 @@ func orientToDims(c composite, w, d, h float64) composite {
 // assemble greedily fuses composites that share a full face into larger boxes,
 // in rounds (largest shared face first) until no perfect merge fits the bin.
 func (a *Assembler) assemble(ctx context.Context, comps []composite) []composite {
+	// oref keeps only the reoriented footprint dims (w,d) and thickness (h) plus the
+	// source composite index and axis; the full reoriented composite (with subs) is
+	// materialised lazily via orientUp for the few pairs that actually merge, so the
+	// common non-merging orientations never allocate a subs slice.
+	type oref struct {
+		idx, axis int
+		w, d, h   float64
+	}
+	var seenGen []int // per-composite dedup stamps, reused across keys within a pass
+	gen := 0
 	for pass := 0; pass < 24; pass++ {
 		if ctx.Err() != nil {
 			return comps
-		}
-		type oref struct {
-			idx int
-			oc  composite
 		}
 		buckets := map[[2]float64][]oref{}
 		var keys [][2]float64
 		for i, c := range comps {
 			for axis := 0; axis < 3; axis++ {
-				o := orientUp(c, axis)
-				k := [2]float64{o.w, o.d}
+				w, d, h := orientUpDims(c, axis)
+				k := [2]float64{w, d}
 				if _, ok := buckets[k]; !ok {
 					keys = append(keys, k)
 				}
-				buckets[k] = append(buckets[k], oref{i, o})
+				buckets[k] = append(buckets[k], oref{idx: i, axis: axis, w: w, d: d, h: h})
 			}
 		}
 		sort.Slice(keys, func(x, y int) bool { return keys[x][0]*keys[x][1] > keys[y][0]*keys[y][1] })
 
 		consumed := make([]bool, len(comps))
+		if cap(seenGen) < len(comps) {
+			seenGen = make([]int, len(comps))
+		} else {
+			seenGen = seenGen[:len(comps)]
+		}
 		var merged []composite
+		var live []oref
 		any := false
 		for _, k := range keys {
-			var live []oref
-			seen := map[int]bool{}
+			live = live[:0]
+			gen++
 			for _, r := range buckets[k] {
-				if consumed[r.idx] || seen[r.idx] {
+				if consumed[r.idx] || seenGen[r.idx] == gen {
 					continue
 				}
-				seen[r.idx] = true
+				seenGen[r.idx] = gen
 				live = append(live, r)
 			}
 			// Pair equal-thickness boxes first: a block of two same-thickness pieces
 			// keeps a regular shape, so it still shares faces with its peers and can
 			// fuse again next round — this is what drives recursion beyond pairs.
-			sort.SliceStable(live, func(i, j int) bool { return live[i].oc.h < live[j].oc.h })
+			sort.SliceStable(live, func(i, j int) bool { return live[i].h < live[j].h })
 			for x := 0; x+1 < len(live); x += 2 {
 				A, B := live[x], live[x+1]
-				res := glueZ(A.oc, B.oc)
+				res := glueZ(orientUp(comps[A.idx], A.axis), orientUp(comps[B.idx], B.axis))
 				if !a.tilesBin(res.w, res.d, res.h) {
 					continue
 				}
@@ -216,6 +228,25 @@ func (a *Assembler) assemble(ctx context.Context, comps []composite) []composite
 		comps = merged
 	}
 	return comps
+}
+
+// orientUpDims returns just the reoriented footprint (w≤d) and thickness (h) that
+// orientUp would produce for the given source axis, without building the subs —
+// the cheap key computation for the fusion buckets. It must stay in lockstep with
+// orientUp's permutation + footprint-normalisation.
+func orientUpDims(c composite, axis int) (w, d, h float64) {
+	switch axis {
+	case 0:
+		w, d, h = c.d, c.h, c.w // old x → height
+	case 1:
+		w, d, h = c.w, c.h, c.d // old y → height
+	default:
+		w, d, h = c.w, c.d, c.h // old z → height
+	}
+	if w > d {
+		w, d = d, w
+	}
+	return
 }
 
 // orientUp reorients a composite so the given source axis (0=x,1=y,2=z) becomes
