@@ -813,6 +813,10 @@
         <button class="btn btn-ghost btn-sm" style="flex:1" onclick="document.getElementById('import-file').click()" title="Load a setup from a previously exported JSON file">Import JSON</button>
         <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importConfig(this)">
       </div>
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="exportPlacements()" title="Download the packing result (placements + bin dimensions) as JSON">Placements JSON</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="exportSTL()" title="Download the packed items as an STL mesh (one box per placement, bins laid out side by side)">Export STL</button>
+      </div>
       <button class="btn btn-primary" style="width:100%" id="pack-btn" onclick="runPack()">
         Pack
       </button>
@@ -1769,16 +1773,135 @@ function currentConfig() {
   return cfg;
 }
 
-function exportConfig() {
-  if (items.length === 0) { showWarn('Nothing to export yet — add some items first.'); return; }
-  const json = JSON.stringify(currentConfig(), null, 2);
-  const blob = new Blob([json], { type: 'application/json' });
+// downloadBlob triggers a browser download of `content` (a string, ArrayBuffer
+// or typed array) as `filename`. Shared by every export helper.
+function downloadBlob(content, filename, type) {
+  const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `packing-${document.getElementById('mode').value}.json`;
+  a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
+}
+
+function exportConfig() {
+  if (items.length === 0) { showWarn('Nothing to export yet — add some items first.'); return; }
+  const json = JSON.stringify(currentConfig(), null, 2);
+  downloadBlob(json, `packing-${document.getElementById('mode').value}.json`, 'application/json');
+}
+
+// exportPlacements downloads the current pack result — placements (position +
+// dimensions + orientation per item), bin dimensions and unplaced items — as a
+// standalone JSON file. Works for every mode; nested results carry both levels.
+function exportPlacements() {
+  if (!lastResult) { showWarn('Nothing to export yet — run a pack first.'); return; }
+  const { data, mode, nested } = lastResult;
+  let payload;
+  if (nested) {
+    payload = {
+      mode, nested: true,
+      inner_bin: lastResult.innerBin,
+      outer_bin: lastResult.outerBin,
+      result: data,
+    };
+  } else {
+    const placements = data.placements || [];
+    let bins = 0;
+    for (const p of placements) if (p.bin_index + 1 > bins) bins = p.bin_index + 1;
+    payload = {
+      mode,
+      bin: lastResult.bin,
+      bin_dims: data.bin_dims || null,
+      bins_used: bins,
+      placements,
+      unplaced: data.unplaced || [],
+    };
+  }
+  downloadBlob(JSON.stringify(payload, null, 2), `placements-${mode}.json`, 'application/json');
+}
+
+// placementBoxes flattens the current result into axis-aligned boxes in a Z-up
+// frame — the convention CAD tools and slicers expect, so the exported mesh
+// stands upright. The viewport uses Three.js's right-handed Y-up space (toThree
+// maps width→X, height→Y, depth→Z); the standard conversion to a right-handed
+// Z-up frame is (x,y,z)_yup → (x,-z,y)_zup, i.e. width→X, depth(negated)→Y,
+// height→Z. Negating depth is what keeps the model from coming out mirrored
+// front-to-back. Bins are laid out side by side along X with the same stride as
+// the viewport. Returns [] for results with no box geometry (e.g. 1-D).
+function placementBoxes() {
+  if (!lastResult) return [];
+  const { data, nested } = lastResult;
+  const boxes = [];
+  if (nested) {
+    const l0 = (data.levels && data.levels[0]) || { placements: [] };
+    const l1 = (data.levels && data.levels[1]) || { placements: [] };
+    const bin = lastResult.outerBin || { width: 1 };
+    const stride = bin.width * 1.4;
+    // Each carton placement (level 1) positions a carton on a pallet; the items
+    // inside it (level 0, keyed by bin_index === carton index) are offset by the
+    // carton's own origin — the same composition renderNested3D uses.
+    for (const cp of (l1.placements || [])) {
+      const m = cp.item_id.match(/carton_(\d+)/);
+      const cartonIdx = m ? parseInt(m[1]) : -1;
+      const offX = cp.bin_index * stride;
+      for (const ip of (l0.placements || [])) {
+        if (ip.bin_index !== cartonIdx) continue;
+        const ox = offX + cp.x + ip.x, oy = cp.y + ip.y, oz = cp.z + ip.z;
+        boxes.push({ x0: ox, x1: ox + ip.w, y0: -(oy + ip.d), y1: -oy, z0: oz, z1: oz + ip.h });
+      }
+    }
+    return boxes;
+  }
+  const bin = lastResult.bin || { width: 1 };
+  const stride = bin.width * 1.4;
+  for (const p of (data.placements || [])) {
+    if (!(p.w > 0 && p.h > 0 && p.d > 0)) continue;
+    const offX = p.bin_index * stride;
+    boxes.push({ x0: offX + p.x, x1: offX + p.x + p.w, y0: -(p.y + p.d), y1: -p.y, z0: p.z, z1: p.z + p.h });
+  }
+  return boxes;
+}
+
+// boxesToSTL builds a binary STL (ArrayBuffer) from axis-aligned boxes. Each box
+// is 12 triangles (2 per face) wound counter-clockwise as seen from outside so
+// the stored face normals are consistent for slicers/viewers.
+function boxesToSTL(boxes) {
+  const nTri = boxes.length * 12;
+  const buf = new ArrayBuffer(84 + nTri * 50);
+  const dv = new DataView(buf);
+  dv.setUint32(80, nTri, true); // 80-byte header left zero; triangle count follows
+  let off = 84;
+  const tri = (nx, ny, nz, a, b, c) => {
+    dv.setFloat32(off, nx, true); dv.setFloat32(off + 4, ny, true); dv.setFloat32(off + 8, nz, true);
+    dv.setFloat32(off + 12, a[0], true); dv.setFloat32(off + 16, a[1], true); dv.setFloat32(off + 20, a[2], true);
+    dv.setFloat32(off + 24, b[0], true); dv.setFloat32(off + 28, b[1], true); dv.setFloat32(off + 32, b[2], true);
+    dv.setFloat32(off + 36, c[0], true); dv.setFloat32(off + 40, c[1], true); dv.setFloat32(off + 44, c[2], true);
+    dv.setUint16(off + 48, 0, true);
+    off += 50;
+  };
+  const quad = (nx, ny, nz, a, b, c, d) => { tri(nx, ny, nz, a, b, c); tri(nx, ny, nz, a, c, d); };
+  for (const bx of boxes) {
+    const { x0, y0, z0, x1, y1, z1 } = bx;
+    const P000 = [x0, y0, z0], P100 = [x1, y0, z0], P110 = [x1, y1, z0], P010 = [x0, y1, z0];
+    const P001 = [x0, y0, z1], P101 = [x1, y0, z1], P111 = [x1, y1, z1], P011 = [x0, y1, z1];
+    quad( 1, 0, 0, P100, P110, P111, P101); // +X
+    quad(-1, 0, 0, P000, P001, P011, P010); // -X
+    quad( 0, 1, 0, P010, P011, P111, P110); // +Y
+    quad( 0,-1, 0, P000, P100, P101, P001); // -Y
+    quad( 0, 0, 1, P001, P101, P111, P011); // +Z
+    quad( 0, 0,-1, P000, P010, P110, P100); // -Z
+  }
+  return buf;
+}
+
+// exportSTL downloads the packed items as a binary STL mesh — one box per
+// placement, bins laid out side by side, matching the 3-D viewport layout.
+function exportSTL() {
+  if (!lastResult) { showWarn('Nothing to export yet — run a pack first.'); return; }
+  const boxes = placementBoxes();
+  if (boxes.length === 0) { showWarn('No 3-D box geometry to export — STL needs a 2-D or 3-D result.'); return; }
+  downloadBlob(boxesToSTL(boxes), `placements-${lastResult.mode}.stl`, 'model/stl');
 }
 
 // applyState rebuilds the whole UI from a config object. It sets the mode and
