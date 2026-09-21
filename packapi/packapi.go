@@ -437,6 +437,76 @@ type BinSpec struct {
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
 	Depth  float64 `json:"depth"`
+	// Walls is how thick the container's own structure is, per face. The
+	// dimensions above are the outside — what it occupies when it is itself
+	// packed — and the usable space inside is smaller by the walls it has.
+	//
+	// It matters wherever a container is both packed into and packed: a carton 40
+	// across with 2 of wall holds 36 but still takes 40 of pallet, and quoting
+	// one number for both is the classic way to produce a plan that will not fit.
+	//
+	// Per face rather than one number, because real containers are not uniform: a
+	// crate's base is thicker than its sides, a carton may be double-walled on
+	// two faces only, and an open-topped tote has no lid at all. That also means
+	// the interior is not centred, so InteriorOffset says where it starts.
+	Walls *WallSpec `json:"walls,omitempty"`
+}
+
+// WallSpec is the thickness of each face of a container. Any face left at zero
+// has no wall, which is right for an open top or a bin that sits directly on the
+// floor.
+type WallSpec struct {
+	Left  float64 `json:"left,omitempty"`  // −X
+	Right float64 `json:"right,omitempty"` // +X
+	Front float64 `json:"front,omitempty"` // −Y
+	Back  float64 `json:"back,omitempty"`  // +Y
+	Floor float64 `json:"floor,omitempty"` // −Z
+	Lid   float64 `json:"lid,omitempty"`   // +Z
+}
+
+// UniformWalls is the common case: the same thickness on every face.
+func UniformWalls(t float64) *WallSpec {
+	return &WallSpec{Left: t, Right: t, Front: t, Back: t, Floor: t, Lid: t}
+}
+
+// Interior is the usable space inside the container, once its walls are taken
+// off. It is the size to pack *into*; the declared size is what the container
+// occupies when packed itself.
+//
+// Walls thicker than the box leave nothing usable, reported as an empty
+// interior rather than a negative one.
+func (b BinSpec) Interior() BinSpec {
+	if b.Walls == nil {
+		return BinSpec{Width: b.Width, Height: b.Height, Depth: b.Depth}
+	}
+	w := b.Walls
+	shrink := func(v, a, c float64) float64 {
+		if v-a-c <= 0 {
+			return 0
+		}
+		return v - a - c
+	}
+	return BinSpec{
+		Width:  shrink(b.Width, w.Left, w.Right),
+		Height: shrink(b.Height, w.Floor, w.Lid),
+		Depth:  shrink(b.Depth, w.Front, w.Back),
+	}
+}
+
+// InteriorOffset is where the usable space starts, relative to the container's
+// min corner. With uneven walls the interior is not centred, so contents have to
+// be placed against this rather than against the container's own corner.
+func (b BinSpec) InteriorOffset() (x, y, z float64) {
+	if b.Walls == nil {
+		return 0, 0, 0
+	}
+	return b.Walls.Left, b.Walls.Front, b.Walls.Floor
+}
+
+// Hollow reports whether the walls leave any usable interior.
+func (b BinSpec) Hollow() bool {
+	in := b.Interior()
+	return in.Width > 0 && in.Height > 0 && in.Depth > 0
 }
 
 // ConstraintSpec is a hard constraint on the bin's accumulated scalar totals.
@@ -2739,9 +2809,12 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		l0Contact.NoFloating = true
 	}
 	l0req := PackRequest{
-		Mode:             req.Mode,
-		Algorithm:        l0spec.Algorithm,
-		Bin:              l0spec.Bin,
+		Mode:      req.Mode,
+		Algorithm: l0spec.Algorithm,
+		// Goods go *inside* the carton, so this level packs the interior. The
+		// carton's declared size is what it occupies on the pallet, and is used
+		// below when it becomes an item.
+		Bin:              l0spec.Bin.Interior(),
 		Items:            req.Items,
 		Constraints:      l0spec.Constraints,
 		Preferences:      l0spec.Preferences,
@@ -2812,7 +2885,7 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 	// Let the level-1 gate resolve load paths through each carton's contents
 	// rather than working from the collapsed effective limit.
 	l1req.bearingContents = cartonContentsFn(l0resp, l0spec.Bearing.toD3(),
-		itemScalarsByID, l1spec.ContainerBearing)
+		itemScalarsByID, l1spec.ContainerBearing, l0spec.Bin)
 	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
 		return NestedPackResponse{}, err
@@ -2902,6 +2975,9 @@ func nestedBearTree(l0, l1 PackResponse, req NestedPackRequest) map[int][]d3.Bea
 		contents[p.BinIndex] = append(contents[p.BinIndex], p)
 	}
 
+	// Where the carton's usable space begins, relative to its own corner.
+	wx, wy, wz := l0spec.Bin.InteriorOffset()
+
 	out := map[int][]d3.BearBox{}
 	for _, cp := range l1.Placements {
 		b := cartonIndexOf(cp.ItemID)
@@ -2925,8 +3001,10 @@ func nestedBearTree(l0, l1 PackResponse, req NestedPackRequest) map[int][]d3.Bea
 				limit = d3.NoLimit
 			}
 			carton.Contents = append(carton.Contents, d3.BearBox{
-				// Translate into the pallet frame.
-				X: cp.X + ip.X, Y: cp.Y + ip.Y, Z: cp.Z + ip.Z,
+				// Translate into the pallet frame, past the carton's own walls:
+				// level 0 packed the interior, which with uneven walls does not
+				// start at the carton's corner.
+				X: cp.X + wx + ip.X, Y: cp.Y + wy + ip.Y, Z: cp.Z + wz + ip.Z,
 				W: ip.W, D: ip.D, H: ip.H,
 				Weight:        sc[inner.WeightScalar],
 				Limit:         limit,
@@ -3044,7 +3122,12 @@ func applyCartonBearing(it *ItemSpec, spec *ContainerBearingSpec, l1 BearingSpec
 // lands. That is the whole reason the gate can be exact: at placement time it
 // knows the position, which the collapsed effective limit never could.
 func cartonContentsFn(l0 PackResponse, inner d3.BearingSpec,
-	itemScalars map[string]map[string]float64, spec *ContainerBearingSpec) func(string) ([]d3.BearBox, bool) {
+	itemScalars map[string]map[string]float64, spec *ContainerBearingSpec,
+	carton BinSpec) func(string) ([]d3.BearBox, bool) {
+
+	// Level 0 packed the carton's interior, which with uneven walls does not
+	// begin at the carton's corner, so shift the contents past its walls.
+	wx, wy, wz := carton.InteriorOffset()
 
 	byCarton := map[int][]d3.BearBox{}
 	for _, p := range l0.Placements {
@@ -3057,7 +3140,7 @@ func cartonContentsFn(l0 PackResponse, inner d3.BearingSpec,
 			limit = d3.NoLimit
 		}
 		byCarton[p.BinIndex] = append(byCarton[p.BinIndex], d3.BearBox{
-			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
+			X: p.X + wx, Y: p.Y + wy, Z: p.Z + wz, W: p.W, D: p.D, H: p.H,
 			Weight:        sc[inner.WeightScalar],
 			Limit:         limit,
 			PressureLimit: inner.PressureOf(sc),

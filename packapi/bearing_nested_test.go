@@ -220,7 +220,8 @@ func TestNestedGateResolvesContentsAtPlacement(t *testing.T) {
 	scalars := map[string]map[string]float64{
 		"post": {"weight": 1, "bearlimit": 500},
 	}
-	lookup := cartonContentsFn(l0, inner.toD3(), scalars, &ContainerBearingSpec{Limit: 1})
+	lookup := cartonContentsFn(l0, inner.toD3(), scalars, &ContainerBearingSpec{Limit: 1},
+		BinSpec{Width: 4, Depth: 4, Height: 2}) // no walls: contents sit at the corner
 
 	contents, rigid := lookup("carton_0")
 	if rigid {
