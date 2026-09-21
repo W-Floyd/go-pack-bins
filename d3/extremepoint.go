@@ -36,10 +36,11 @@ type ExtremePoint struct {
 	usedVol          float64
 	contact          ContactSpec
 
-	grid  *boxGrid     // spatial index over placed for O(local) conflict tests
-	epBuf [][3]float64 // reused candidate-point scratch (avoids per-insert realloc)
-	bear  *bearState   // nil unless the load-bearing gate is enabled
-	zones zoneSet      // empty unless exclusion zones are set
+	grid     *boxGrid       // spatial index over placed for O(local) conflict tests
+	epBuf    [][3]float64   // reused candidate-point scratch (avoids per-insert realloc)
+	bear     *bearState     // nil unless the load-bearing gate is enabled
+	zones    zoneSet        // empty unless exclusion zones are set
+	retrieve *retrieveState // nil unless the retrievability gate is enabled
 }
 
 func (ep *ExtremePoint) setPendingItem(id string, scalars map[string]float64) {
@@ -123,7 +124,7 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.zones.blocks(x, y, z, w, d, h) {
 				continue
 			}
-			if !ep.bear.allows(x, y, z, w, d, h) {
+			if !ep.bear.allows(x, y, z, w, d, h) || !ep.retrieve.allows(x, y, z, w, d, h) {
 				continue
 			}
 			if ep.contact.Bottom > 0 || ep.contact.NoFloating {
@@ -148,6 +149,7 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 	}
 
 	ep.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
+	ep.retrieve.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	ep.addPlaced(box{best.x, best.y, best.z, best.w, best.d, best.h})
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }
@@ -192,7 +194,7 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 			if ep.zones.blocks(x, y, z, w, d, h) {
 				continue
 			}
-			if !ep.bear.allows(x, y, z, w, d, h) {
+			if !ep.bear.allows(x, y, z, w, d, h) || !ep.retrieve.allows(x, y, z, w, d, h) {
 				continue
 			}
 			sf := ep.supportFrac(x, y, z, w, d)
@@ -214,6 +216,7 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 // the strategy's occupied set and volume.
 func (ep *ExtremePoint) CommitCandidate(c Candidate) {
 	ep.bear.commit(c.X, c.Y, c.Z, c.W, c.D, c.H)
+	ep.retrieve.commit(c.X, c.Y, c.Z, c.W, c.D, c.H)
 	ep.addPlaced(box{c.X, c.Y, c.Z, c.W, c.D, c.H})
 }
 

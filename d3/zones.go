@@ -33,7 +33,19 @@ type Zone struct {
 	// load-bearing rule: weight resting on it leaves the stack the way weight
 	// resting on the floor does, so it has no crush limit of its own.
 	Supports bool
+	// Permeable marks a zone as reserved empty space rather than something in
+	// the way — an aisle, a door swing, room left for a person to stand. Nothing
+	// may be *packed* there either way, but a box may be slid out through
+	// permeable space, which is the whole point of keeping it clear.
+	//
+	// The zero value is impermeable, so an unqualified zone behaves like the pipe
+	// in the reported use case: solid, and no route out. A supporting zone is
+	// structure and is always impermeable whatever this says.
+	Permeable bool
 }
+
+// blocksPath reports whether the zone obstructs an item being slid through it.
+func (z Zone) blocksPath() bool { return !z.Permeable || z.Supports }
 
 // Empty reports whether the zone has no volume, in which case it blocks nothing.
 func (z Zone) Empty() bool { return z.W <= 0 || z.D <= 0 || z.H <= 0 }

@@ -23,9 +23,10 @@ type Heightmap struct {
 	// minTop ranks candidates by the lowest resulting TOP (z+h) and prefers the
 	// flattest orientation, rather than the lowest base z. Used for a final flat
 	// layer where nothing rests above, so the peak — not the base — is what matters.
-	minTop bool
-	bear   *bearState // nil unless the load-bearing gate is enabled
-	zones  zoneSet    // empty unless exclusion zones are set
+	minTop   bool
+	bear     *bearState // nil unless the load-bearing gate is enabled
+	zones    zoneSet    // empty unless exclusion zones are set
+	retrieve *retrieveState
 }
 
 // NewHeightmap creates a heightmap strategy for a bin of the given dimensions.
@@ -134,7 +135,8 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 					continue
 				}
 				if hm.zones.blocks(x, y, z, w, d, h) ||
-					hm.gated(x, y, z, w, d) || !hm.bear.allows(x, y, z, w, d, h) {
+					hm.gated(x, y, z, w, d) || !hm.bear.allows(x, y, z, w, d, h) ||
+					!hm.retrieve.allows(x, y, z, w, d, h) {
 					continue
 				}
 				c := box{x, y, z, w, d, h}
@@ -153,6 +155,7 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 		return 0, 0, 0, 0, 0, 0, false
 	}
 	hm.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
+	hm.retrieve.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	hm.placed = append(hm.placed, best)
 	hm.usedVol += best.w * best.d * best.h
 	return best.x, best.y, best.z, best.w, best.d, best.h, true

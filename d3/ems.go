@@ -24,6 +24,7 @@ type EmptyMaximalSpace struct {
 	contact          ContactSpec
 	bear             *bearState // nil unless the load-bearing gate is enabled
 	zones            zoneSet    // empty unless exclusion zones are set
+	retrieve         *retrieveState
 
 	// Scratch reused across commits to avoid per-step allocation. spare is a
 	// second backing array for the space set: commit reads e.spaces and writes
@@ -115,7 +116,8 @@ func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw
 			}
 			x, y, z := s.x, s.y, s.z // back-bottom-left corner of the space
 			if e.zones.blocks(x, y, z, w, d, h) ||
-				e.gated(x, y, z, w, d) || !e.bear.allows(x, y, z, w, d, h) {
+				e.gated(x, y, z, w, d) || !e.bear.allows(x, y, z, w, d, h) ||
+				!e.retrieve.allows(x, y, z, w, d, h) {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
@@ -130,6 +132,7 @@ func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw
 		return 0, 0, 0, 0, 0, 0, false
 	}
 	e.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
+	e.retrieve.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	e.commit(best)
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }

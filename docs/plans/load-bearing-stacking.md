@@ -670,3 +670,43 @@ so `supportersOf` finds no supporter above it and the load simply exits.
 
 The demo draws obstacles amber and load-bearing zones slate, because they behave
 differently and should not look the same.
+
+## 14. Retrievability: every box needs a way out
+
+A packing can be legal and useless. Bury a box in the middle of a solid block and it
+cannot be reached without unpacking everything around it — the bin is a puzzle, not a
+store. `d3/retrieve.go` requires every item to keep at least one face with enough free
+space in front of it to slide the item clear of its slot.
+
+    Clearance   free depth needed in front of a face; 0 means the item's own extent
+    OpenFaces   which bin faces are openings; when set, the run must reach one of them
+    SidesOnly   drop the top face, for a store with no room to lift
+
+**Naming the openings is what makes the container case meaningful.** The first version had
+a plain "reach the boundary" flag, under which any box touching any wall counted as being
+at an exit — so almost every packing passed. With `OpenFaces`, a box flush with the
+loading end is at the exit and a box flush with a solid wall is not.
+
+Zones interact through `Zone.Permeable`: an aisle or door swing is reserved *empty* space
+and is exactly what you slide a box out into, while a pipe or a ledge is solid and blocks
+the path. The zero value is impermeable, so an unqualified zone behaves like the pipe in
+the reported use case.
+
+### 14.1 The gate is correct and expensive
+
+Like bearing, this is a property of the whole configuration — a placement can take away
+the last exit of a box that was fine a moment ago — so the gate re-checks the candidate
+and its neighbours, and `RetrievableAll` is the authority over a finished packing.
+
+**Measured cost is high.** In a 3×3×1 tray of nine unit boxes with no lifting allowed, the
+gate admits **three**. An optimal retrievable layout fits five, in a checkerboard. The
+packers cannot find it: their candidate positions are corners of what is already placed,
+so the useful gaps are never offered, and greedy placement fills the first row and then
+refuses everything that would bury it.
+
+That is worth stating plainly rather than tuning away. The constraint is sound; the
+greedy corner-based strategies are a poor fit for it, and closing the gap needs candidate
+generation that proposes access gaps, or a search algorithm that can revisit the layout.
+
+**Outstanding:** the `packapi` surface, reporting `Buried` items in the response, the
+post-pass guard, and the demo UI.

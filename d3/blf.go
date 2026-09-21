@@ -15,10 +15,11 @@ type BottomLeftFill struct {
 	placed           []box
 	usedVol          float64
 
-	grid   *boxGrid     // spatial index over placed for O(local) conflict/support
-	cnrBuf [][3]float64 // reused candidate-corner scratch
-	bear   *bearState   // nil unless the load-bearing gate is enabled
-	zones  zoneSet      // empty unless exclusion zones are set
+	grid     *boxGrid     // spatial index over placed for O(local) conflict/support
+	cnrBuf   [][3]float64 // reused candidate-corner scratch
+	bear     *bearState   // nil unless the load-bearing gate is enabled
+	zones    zoneSet      // empty unless exclusion zones are set
+	retrieve *retrieveState
 }
 
 func (s *BottomLeftFill) setPendingItem(id string, scalars map[string]float64) {
@@ -64,7 +65,7 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 			}
 			if s.zones.blocks(x, y, z, w, d, h) ||
 				s.conflicts(x, y, z, w, d, h) || !s.supported(x, y, z, w, d) ||
-				!s.bear.allows(x, y, z, w, d, h) {
+				!s.bear.allows(x, y, z, w, d, h) || !s.retrieve.allows(x, y, z, w, d, h) {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
@@ -77,6 +78,7 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 		return 0, 0, 0, 0, 0, 0, false
 	}
 	s.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
+	s.retrieve.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	s.grid.insert(int32(len(s.placed)), best)
 	s.placed = append(s.placed, best)
 	s.usedVol += best.w * best.d * best.h
