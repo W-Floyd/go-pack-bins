@@ -817,6 +817,7 @@
         <div class="field" style="margin-top:8px">
           <label>Fixture</label>
           <select id="fixture-kind" onchange="onFixtureKindChange()" style="font-size:12px">
+            <option value="layout">Shelving layout — fill the room</option>
             <option value="shelving">Shelving unit</option>
             <option value="pipe">Pipe / duct</option>
             <option value="aisle">Aisle — keep clear</option>
@@ -853,6 +854,15 @@
           <div class="field" id="fx-gap-field" style="flex:1; min-width:44px">
             <label>Clear gap</label>
             <input type="number" id="fx-gap" value="3" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" id="fx-run-field" style="flex:1; min-width:44px">
+            <label>Run depth</label>
+            <input type="number" id="fx-run" value="2" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" id="fx-aisle-field" style="flex:1; min-width:44px">
+            <label>Aisle width</label>
+            <input type="number" id="fx-aisle" value="3" min="0" step="any" style="font-size:12px"></div>
+        </div>
+        <div id="fx-footprint-note" style="display:none;font-size:11px;color:var(--muted);margin-top:4px">
+          The footprint above is ignored: the layout spans the whole room.
         </div>
 
         <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
@@ -1626,6 +1636,36 @@ function renderZoneList() {
 // coordinates is the point: the numbers a person knows about their room are a
 // footprint and a few heights, not a list of axis-aligned cuboids.
 const FIXTURES = {
+  layout: {
+    note: 'Fills the room with shelving runs and the aisles between them, working ' +
+          'out how many fit. Positions the runs for you — the one thing placing ' +
+          'shelves by hand gets wrong, since moving a run means moving its aisles too.',
+    fields: { z: 'Lowest shelf at', h: 'Board thickness', count: true, gap: true,
+              run: 'Run depth', aisle: 'Aisle width' },
+    supports: true, permeable: false, lockToggles: true,
+    build(f) {
+      const W = roomWidth(), D = roomDepth(), H = roomHeight();
+      const run = Math.max(0.1, f.run), aisle = Math.max(0.1, f.aisle);
+      const out = [];
+      // Walk the room front to back laying aisle, run, aisle, run… An aisle
+      // comes first so the door end is clear, and the last strip is only kept
+      // if it fits whole: half a shelving run is not a shelving run.
+      let y = 0;
+      for (;;) {
+        if (y + aisle > D + 1e-9) break;
+        out.push({ x: 0, y, w: W, d: aisle, z: 0, h: H, permeable: true, supports: false });
+        y += aisle;
+        if (y + run > D + 1e-9) break;
+        for (let i = 0; i < Math.max(1, Math.round(f.count)); i++) {
+          const bz = f.z + i * (f.h + f.gap);
+          if (bz + f.h > H + 1e-9) break;
+          out.push({ x: 0, y, w: W, d: run, z: bz, h: f.h, supports: true, permeable: false });
+        }
+        y += run;
+      }
+      return out;
+    },
+  },
   shelving: {
     note: 'One zone per shelf board. Boxes are packed into the gaps between them ' +
           'and rest on the boards, so the unit is storage rather than an obstacle.',
@@ -1677,9 +1717,9 @@ const FIXTURES = {
   },
 };
 
-function roomHeight() {
-  return parseFloat(document.getElementById('bin-h')?.value) || 10;
-}
+function roomHeight() { return parseFloat(document.getElementById('bin-h')?.value) || 10; }
+function roomWidth()  { return parseFloat(document.getElementById('bin-w')?.value) || 10; }
+function roomDepth()  { return parseFloat(document.getElementById('bin-d')?.value) || 10; }
 
 // onFixtureKindChange shows only the inputs the chosen fixture uses, relabels
 // them in its own terms, and fixes the two behaviour toggles where the kind
@@ -1698,8 +1738,18 @@ function onFixtureKindChange() {
   show('fx-h-field', !!f.fields.h);
   show('fx-count-field', !!f.fields.count);
   show('fx-gap-field', !!f.fields.gap);
+  show('fx-run-field', !!f.fields.run);
+  show('fx-aisle-field', !!f.fields.aisle);
   label('fx-z-label', f.fields.z);
   label('fx-h-label', f.fields.h);
+  // The room-filling layout works out its own footprint, so hide those inputs
+  // rather than leaving four numbers on screen that do nothing.
+  const spans = !!f.fields.run;
+  for (const id of ['fx-x', 'fx-y', 'fx-w', 'fx-d']) {
+    const el = document.getElementById(id);
+    if (el && el.parentElement) el.parentElement.style.display = spans ? 'none' : '';
+  }
+  show('fx-footprint-note', spans);
 
   const sup = document.getElementById('fx-supports');
   const perm = document.getElementById('fx-permeable');
@@ -1719,10 +1769,13 @@ function addFixture() {
   const f = {
     x: num('fx-x'), y: num('fx-y'), w: num('fx-w'), d: num('fx-d'),
     z: num('fx-z'), h: num('fx-h'), count: num('fx-count'), gap: num('fx-gap'),
+    run: num('fx-run'), aisle: num('fx-aisle'),
     supports: !!document.getElementById('fx-supports')?.checked,
     permeable: !!document.getElementById('fx-permeable')?.checked,
   };
-  if (f.w <= 0 || f.d <= 0) {
+  // The room-filling layout derives its own footprint, so only the fixtures that
+  // are actually placed by hand need one.
+  if (!spec.fields.run && (f.w <= 0 || f.d <= 0)) {
     showError('A fixture needs a positive width and depth.');
     return;
   }
