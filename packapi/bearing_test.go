@@ -1008,9 +1008,10 @@ func presetBearingSpec(p *Preset) BearingSpec {
 	}
 }
 
-// The pressure preset must show pressure doing work the weight limit cannot: the
-// pallet has weight to spare, so only the concentration of the load can move the
-// posts off it. A preset that packs the same either way teaches nothing.
+// The pressure preset has to be legible without toggling anything: the wide
+// crate must *stay* stacked while the lighter narrow posts are pushed off. Bin
+// counts alone would pass on a preset where nothing stacks at all, which reads
+// as "bearing forbids stacking" rather than "pressure forbids concentration".
 func TestBearingPressurePresetDemonstrates(t *testing.T) {
 	p := preset3D(t, "Point loads: pressure, not just weight")
 	if p.Bearing == nil || p.Bearing.PressureScalar == "" {
@@ -1033,20 +1034,48 @@ func TestBearingPressurePresetDemonstrates(t *testing.T) {
 	if on.BinsUsed <= off.BinsUsed {
 		t.Errorf("pressure changed nothing: %d bins without, %d with", off.BinsUsed, on.BinsUsed)
 	}
-	// Nothing may rest on the pallet once its pressure cap binds.
+
+	// Classify by footprint: the base and the wide crate span the bin, the posts
+	// are the narrow ones.
+	base := p.Items[0]
+	var wide, narrow []PlacementResult
 	for _, q := range on.Placements {
-		if q.Z > 0 {
-			t.Errorf("%s still stacked at z=%v despite the pressure cap", q.ItemID, q.Z)
+		if q.W*q.D >= base.W*base.D {
+			wide = append(wide, q)
+		} else {
+			narrow = append(narrow, q)
 		}
 	}
-	// And the weight limit alone would not have refused it, which is the point.
-	var total float64
-	for _, it := range p.Items[1:] {
-		total += it.S["weight"]
+	if len(wide) < 2 || len(narrow) == 0 {
+		t.Fatalf("preset shape changed: %d wide, %d narrow", len(wide), len(narrow))
 	}
-	if limit := p.Items[0].S["bearlimit"]; total >= limit {
+	// A wide item must still rest on the base — spread load is fine.
+	stacked := false
+	for _, q := range wide {
+		if q.Z > 0 {
+			stacked = true
+		}
+	}
+	if !stacked {
+		t.Error("no wide item stacked, so the preset reads as 'nothing may stack' rather than " +
+			"'concentrated load may not'")
+	}
+	// The narrow posts must not be on the base, though they weigh less.
+	var narrowWeight float64
+	for _, q := range narrow {
+		if q.BinIndex == 0 && q.Z > 0 {
+			t.Errorf("narrow post %s is still stacked at z=%v", q.ItemID, q.Z)
+		}
+	}
+	for _, it := range p.Items[1:] {
+		if it.W*it.D < base.W*base.D {
+			narrowWeight += it.S["weight"]
+		}
+	}
+	// And the weight limit alone cannot explain the refusal, which is the point.
+	if limit := base.S["bearlimit"]; narrowWeight >= limit {
 		t.Errorf("the posts weigh %v against a limit of %v — the weight limit would have "+
-			"refused them anyway, so the preset does not isolate pressure", total, limit)
+			"refused them anyway, so the preset does not isolate pressure", narrowWeight, limit)
 	}
 }
 
@@ -1095,5 +1124,60 @@ func TestBearingNestedPresetsContrast(t *testing.T) {
 	if f >= r {
 		t.Errorf("load paths bought nothing: %d pallets with flush contents carrying, "+
 			"%d with a rigid carton", f, r)
+	}
+}
+
+// The nested preset must actually look like posts in a carton. Its first
+// version put one item per carton, filling it completely — no corners, no
+// partial footprint, nothing a reader would recognise as the arrangement the
+// name promises. Bin counts alone did not notice.
+func TestBearingNestedPresetHasCornerPosts(t *testing.T) {
+	p := preset3D(t, "Corner posts carry the stack (nested)")
+	bs := presetBearingSpec(p)
+	req := NestedPackRequest{Mode: "3d", Items: presetItemSpecs(p),
+		Levels: []NestedLevelSpec{
+			{Bin: BinSpec{Width: p.InnerBin.W, Depth: p.InnerBin.D, Height: p.InnerBin.H},
+				Algorithm: p.InnerAlgo, Bearing: bs},
+			{Bin: BinSpec{Width: p.Bin.W, Depth: p.Bin.D, Height: p.Bin.H},
+				Algorithm: p.Algo, Bearing: bs, ContainerBearing: p.CartonBearing},
+		}}
+	r, err := PackNestedCtx(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Error != "" {
+		t.Fatalf("solve: %s", r.Error)
+	}
+
+	var first []PlacementResult
+	for _, q := range r.Levels[0].Placements {
+		if q.BinIndex == 0 {
+			first = append(first, q)
+		}
+	}
+	if len(first) < 4 {
+		t.Fatalf("carton 0 holds %d items; the name promises several posts", len(first))
+	}
+	// Distinct corners: no two contents may share an (x,y).
+	seen := map[[2]float64]bool{}
+	for _, q := range first {
+		k := [2]float64{q.X, q.Y}
+		if seen[k] {
+			t.Errorf("two contents share the footprint corner %v", k)
+		}
+		seen[k] = true
+	}
+	// Each must reach the carton's lid, or no load would pass through it.
+	for _, q := range first {
+		if q.Z+q.H != p.InnerBin.H {
+			t.Errorf("content %s tops out at %v, not the carton lid at %v — it carries nothing",
+				q.ItemID, q.Z+q.H, p.InnerBin.H)
+		}
+		// And each must leave room for others: a single item filling the carton
+		// is not a post.
+		if q.W*q.D >= p.InnerBin.W*p.InnerBin.D {
+			t.Errorf("content %s spans the whole carton footprint; that is a filled carton, not posts",
+				q.ItemID)
+		}
 	}
 }
