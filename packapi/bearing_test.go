@@ -98,11 +98,12 @@ func TestBearingRejectedWhereUnsupported(t *testing.T) {
 			want: "3-D only",
 		},
 		{
-			name: "catalog mode",
+			name: "catalog mode with a non-enforcing algorithm",
 			mut: func(r *PackRequest) {
+				r.Algorithm = "gbpp"
 				r.Containers = []ContainerSpec{{Bin: BinSpec{Width: 1, Depth: 1, Height: 4}}}
 			},
-			want: "container-catalog",
+			want: "does not enforce load-bearing",
 		},
 		{
 			name: "self-managed algorithm",
@@ -716,5 +717,90 @@ func TestBearingRejectsScalarNamesNoItemCarries(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", resp.Error, tt.want)
 			}
 		})
+	}
+}
+
+// Container-catalog mode must enforce bearing, not refuse it: choosing the best
+// container size and respecting crush limits are the same job. Single-type and
+// cascade both solve each candidate through packOneBin → pack3D, so the gate
+// applies; this pins that it really does.
+func TestBearingEnforcedInCatalogMode(t *testing.T) {
+	// Two container sizes. The small one cannot hold the order legally once
+	// stacking on the fragile cartons is forbidden; the large one can.
+	build := func(withBearing bool) PackRequest {
+		req := bearingOrderReq("auto", false)
+		req.Containers = []ContainerSpec{
+			{Bin: BinSpec{Width: 10, Depth: 10, Height: 10}},
+			{Bin: BinSpec{Width: 10, Depth: 10, Height: 20}},
+		}
+		if !withBearing {
+			req.Bearing = BearingSpec{}
+		}
+		return req
+	}
+
+	on := PackCtx(context.Background(), build(true))
+	if on.Error != "" {
+		t.Fatalf("catalog + bearing refused: %s", on.Error)
+	}
+	if len(on.Placements) != len(build(true).Items) {
+		t.Errorf("placed %d of %d items", len(on.Placements), len(build(true).Items))
+	}
+
+	guard := build(true).bearingGuard()
+	byBin := map[int][]*d3.Placement3D{}
+	for _, p := range on.Placements {
+		byBin[p.BinIndex] = append(byBin[p.BinIndex],
+			d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+	}
+	if len(byBin) == 0 {
+		t.Fatal("no placements")
+	}
+	for bin, ps := range byBin {
+		if !guard.OK(ps) {
+			t.Errorf("catalog bin %d (container %q) violates the bearing rule", bin, on.Container)
+		}
+	}
+}
+
+// The cascade path (reached when no single container holds the whole order)
+// concatenates results from separate solves, so it has to be checked too.
+func TestBearingEnforcedInCatalogCascade(t *testing.T) {
+	req := bearingOrderReq("auto", false)
+	// Double the order so it cannot fit in one bin, and cap *every* type at one
+	// bin — otherwise an uncapped type holds the whole order and the single-type
+	// branch wins, leaving the cascade untested.
+	base := req.Items
+	var doubled []ItemSpec
+	for i := 0; i < 2; i++ {
+		for _, it := range base {
+			c := it
+			c.ID = it.ID + string(rune('A'+i))
+			doubled = append(doubled, c)
+		}
+	}
+	req.Items = doubled
+	req.Containers = []ContainerSpec{
+		{Bin: BinSpec{Width: 10, Depth: 10, Height: 10}, MaxCount: 1},
+		{Bin: BinSpec{Width: 10, Depth: 10, Height: 10}, MaxCount: 1},
+	}
+	if len(solveCatalogSingle(context.Background(), req).Unplaced) == 0 {
+		t.Fatal("a single container type held the whole order — the cascade branch is not being exercised")
+	}
+
+	resp := PackCtx(context.Background(), req)
+	if resp.Error != "" {
+		t.Fatalf("cascade refused: %s", resp.Error)
+	}
+	guard := req.bearingGuard()
+	byBin := map[int][]*d3.Placement3D{}
+	for _, p := range resp.Placements {
+		byBin[p.BinIndex] = append(byBin[p.BinIndex],
+			d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+	}
+	for bin, ps := range byBin {
+		if !guard.OK(ps) {
+			t.Errorf("cascade bin %d violates the bearing rule", bin)
+		}
 	}
 }

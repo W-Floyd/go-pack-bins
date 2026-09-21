@@ -169,7 +169,9 @@ func containerFactory(req PackRequest, bin BinSpec) pack.BinFactory {
 	case "2d":
 		return constrainedFactory(d2.NewFactory(bin.Width, bin.Height, strat2DFor(req.Algorithm)), req.Constraints)
 	default:
-		stratFn := d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating})
+		stratFn := d3.BearingStrategy(
+			d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}),
+			req.Bearing.toD3())
 		return constrainedFactory(d3.NewFactory(bin.Width, bin.Depth, bin.Height, stratFn), req.Constraints)
 	}
 }
@@ -711,9 +713,10 @@ func (req PackRequest) bearingError() string {
 	if req.Mode != "3d" {
 		return "bearing: the load-bearing constraint is 3-D only"
 	}
-	if len(req.Containers) > 0 {
-		return "bearing: not supported in container-catalog mode"
-	}
+	// Container-catalog mode is fine: solveCatalogSingle and solveCatalogCascade
+	// both solve each candidate container through packOneBin → pack3D, which
+	// builds the gated factory, and the algorithm check below still applies. The
+	// GBPP catalog solver has its own path and is excluded by that check.
 	if !bearingAlgos3D[req.Algorithm] {
 		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of auto, ff, nf, bf, wf, ffd, bfd, nfd, blf, ems, heightmap"
 	}

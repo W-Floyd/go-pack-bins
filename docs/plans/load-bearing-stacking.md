@@ -408,3 +408,35 @@ races both.
 `auto3DPlans` is the single definition of that candidate set, shared by the registry solver
 and `autoCandidates` (the streaming mirror). Those two had already drifted once over the
 gate itself — see §7 — so the set is defined once rather than written twice.
+
+## 9. Container-catalog mode
+
+Bearing was initially refused in catalog mode. That was over-cautious rather than
+necessary: `solveCatalogSingle` and `solveCatalogCascade` both solve each candidate
+container through `packOneBin` → `dispatch` → `pack3D`, which already builds the gated
+factory, so the gate applied all along — only the refusal stood in the way. Removing it
+lets a user pick the best container size *and* respect crush limits, which is one job, not
+two.
+
+`solveCatalogGBPP` is the exception: it builds its own factory via `containerFactory` and
+is reached only by `algorithm: "gbpp"`, which is not in `bearingAlgos3D`, so the algorithm
+check still refuses it. `containerFactory` is gated anyway — leaving an ungated 3-D factory
+in the tree is exactly how the previous escapes happened.
+
+Two tests cover it, and both had to be repaired before they meant anything: the first
+version of the cascade test never reached the cascade, because an uncapped container type
+held the whole order and the single-type branch won. It now caps every type and asserts
+the single-type branch fails first.
+
+**Remaining gaps**, in the order they matter for "enter items and constraints, get the best
+option":
+
+- **Balance preferences + bearing** produce a legal result, but via `runBalanced`, which
+  does not race the orderings — 2 bins where `auto` finds 1.
+- **Nested mode** cannot express bearing: `NestedLevelSpec` has no field, and adding one
+  needs a decision about what a limit means for a carton that becomes an item at the next
+  level.
+- **Issue #1's other two asks** — exclusion zones and access priority — are untouched. See
+  the issue investigation: exclusion zones have a workaround via `EmptyMaximalSpace.Occupy`
+  but no API, and access priority has no mechanism at all, since `pack.Preference` scores
+  bin choice rather than position within a bin.
