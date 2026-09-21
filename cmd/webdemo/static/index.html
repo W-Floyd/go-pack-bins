@@ -4039,7 +4039,7 @@ function beginScene3D(bin, nBins, totalCount) {
       const binLine = new THREE.LineSegments(binEdges, new THREE.LineBasicMaterial({color: 0x2a2d3a}));
       binLine.position.set(offX + bin.width/2, bin.height/2, bin.depth/2);
       scene3d.add(binLine);
-      addZoneMeshes(offX);
+      drawZones(scene3d, offX, toThree);
 
       const lbl = document.createElement('div');
       lbl.className = 'bin-label-3d';
@@ -4060,8 +4060,6 @@ function beginScene3D(bin, nBins, totalCount) {
     updateCamera();
   }
   ensureBins(Math.max(nBins || 1, 1));
-
-  const addZoneMeshes = offX => drawZones(scene3d, offX, toThree);
 
   // Item meshes + their edge lines, tracked so the void inspector can hide them
   // (showing only the red enclosed cuboids). Void overlay meshes are tracked
