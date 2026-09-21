@@ -23,12 +23,12 @@ func pl(binID, itemID string, x, y, z, w, d, h float64) *Placement3D {
 }
 
 // guardFor builds a guard over a literal id→(weight, limit) table.
-func guardFor(t map[string][2]float64) *BearingGuard {
+func guardFor(t map[string][2]float64) *Guard {
 	sc := map[string]map[string]float64{}
 	for id, wl := range t {
 		sc[id] = map[string]float64{wScalar: wl[0], lScalar: wl[1]}
 	}
-	return NewBearingGuard(bearSpec(), sc)
+	return NewGuard(NewBearingGuard(bearSpec(), sc), nil)
 }
 
 // Compact slides riderless boxes toward the walls. A slide can move a box off a
@@ -140,7 +140,7 @@ func TestRefineGuardRejectsCrushingRedrop(t *testing.T) {
 
 	// Guarded, the re-drop is rejected and the bin is left untouched.
 	ps = build()
-	RefineVoids(context.Background(), ps, orients, 3, 2, 4, ContactSpec{}, RefineOptions{Bearing: guard})
+	RefineVoids(context.Background(), ps, orients, 3, 2, 4, ContactSpec{}, RefineOptions{Guard: guard})
 	if !guard.OK(ps) {
 		t.Errorf("guarded refine left a crushing configuration: cargo at z=%v", byID(ps, "cargo").Z)
 	}
@@ -161,7 +161,7 @@ func TestRefineGuardNilMatchesRefine(t *testing.T) {
 	}
 	plain, guarded := build(), build()
 	a := RefineVoids(context.Background(), plain, orients, 3, 2, 4, ContactSpec{}, RefineOptions{})
-	b := RefineVoids(context.Background(), guarded, orients, 3, 2, 4, ContactSpec{}, RefineOptions{Bearing: nil})
+	b := RefineVoids(context.Background(), guarded, orients, 3, 2, 4, ContactSpec{}, RefineOptions{Guard: nil})
 	if a != b {
 		t.Fatalf("moved differs: %v vs %v", a, b)
 	}

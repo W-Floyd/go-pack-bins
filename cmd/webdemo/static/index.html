@@ -804,6 +804,35 @@
         </label>
       </div>
 
+      <!-- exclusion zones: keep-out regions of the bin (3-D) -->
+      <div id="zones-section" style="display:none">
+        <div class="section-label">Exclusion zones (keep-out)</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          Regions no item may occupy — a pipe crossing the space, a door swing, a
+          meter to leave clear. A zone grants no support and is not usable volume,
+          so it is not the same as packing a dummy box.
+        </div>
+        <div class="item-list" id="zone-list"></div>
+        <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field" style="flex:1; min-width:44px"><label>X</label>
+            <input type="number" id="zone-x" value="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label>Y</label>
+            <input type="number" id="zone-y" value="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label>Z</label>
+            <input type="number" id="zone-z" value="0" step="any" style="font-size:12px"></div>
+        </div>
+        <div style="margin-top:6px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field" style="flex:1; min-width:44px"><label>W</label>
+            <input type="number" id="zone-w" value="2" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label>D</label>
+            <input type="number" id="zone-d" value="2" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label>H</label>
+            <input type="number" id="zone-h" value="2" min="0" step="any" style="font-size:12px"></div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addZone()">+ Add</button>
+        </div>
+        <div id="zone-unsupported" style="display:none;font-size:11px;color:var(--warn,#d08770);margin-top:8px"></div>
+      </div>
+
       <!-- load-bearing: per-item crush limits, read from item scalars (3-D) -->
       <div id="bearing-section" style="display:none">
         <div class="section-label">Load-bearing (crush limits)</div>
@@ -1172,6 +1201,7 @@ function onModeChange() {
   onPrefModeChange('inner');
   updateBalanceVisibility();
   updateBearingVisibility();
+  updateZoneVisibility();
 }
 
 // Algorithms that can host balance objectives (registry `balanceable` flag).
@@ -1486,6 +1516,58 @@ function readBearing() {
   };
 }
 
+// zones holds the keep-out regions, in bin coordinates.
+let zones = [];
+
+function renderZoneList() {
+  const el = document.getElementById('zone-list');
+  if (!el) return;
+  el.innerHTML = '';
+  zones.forEach((z, i) => {
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = `
+      <span class="item-id">z${i + 1}</span>
+      <span class="item-dims">${z.w}×${z.d}×${z.h} at (${z.x}, ${z.y}, ${z.z})</span>
+      <button class="remove-btn" onclick="removeZone(${i})">✕</button>`;
+    el.appendChild(row);
+  });
+}
+
+function addZone() {
+  const num = id => parseFloat(document.getElementById(id)?.value) || 0;
+  const z = { x: num('zone-x'), y: num('zone-y'), z: num('zone-z'),
+              w: num('zone-w'), d: num('zone-d'), h: num('zone-h') };
+  if (z.w <= 0 || z.d <= 0 || z.h <= 0) {
+    showError('A zone needs a positive width, depth and height.');
+    return;
+  }
+  zones.push(z);
+  renderZoneList();
+  scheduleAutoPack();
+}
+
+function removeZone(i) {
+  zones.splice(i, 1);
+  renderZoneList();
+  scheduleAutoPack();
+}
+
+// updateZoneVisibility shows the panel for 3-D and warns when the chosen
+// algorithm cannot enforce zones, rather than hiding the control and letting the
+// request be refused at solve time with no explanation.
+function updateZoneVisibility() {
+  const sec = document.getElementById('zones-section');
+  if (!sec) return;
+  sec.style.display = document.getElementById('mode').value === '3d' ? '' : 'none';
+  const algo = document.getElementById('algorithm').value;
+  const ok = !!algoCaps(algo).zones;
+  const warn = document.getElementById('zone-unsupported');
+  warn.style.display = (zones.length > 0 && !ok) ? '' : 'none';
+  warn.textContent = ok ? '' :
+    `"${algo}" does not enforce exclusion zones — pick another algorithm, or the solve will be refused.`;
+}
+
 // readCartonBearing returns the carton's own load-bearing rating for nested
 // mode, or null when nothing is declared. Zero fields are omitted so the server
 // reads them as "unrestricted" rather than "rated at zero" — a carton with no
@@ -1737,6 +1819,7 @@ function onAlgorithmChange() {
   document.getElementById('inner-bin-cost-field').style.display = (algoCaps(ialgo).panel === 'bincost') ? '' : 'none';
   document.getElementById('inner-lex-section').style.display = (algoCaps(ialgo).panel === 'lex') ? '' : 'none';
   updateBearingVisibility();
+  updateZoneVisibility();
   scheduleAutoPack();
 }
 
@@ -2595,6 +2678,7 @@ async function runSinglePack(auto = false) {
   };
   const bearing = readBearing();
   if (bearing) body.bearing = bearing;
+  if (mode === '3d' && zones.length) body.zones = zones.map(z => ({ ...z }));
   if (mode === '3d' && document.getElementById('refine-voids')?.checked) body.refine_voids = true;
   if (algo === 'gbpp') body.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (algo === 'lex') body.lex_objectives = lexObjectives.slice();
@@ -2958,6 +3042,7 @@ async function runNestedPack(auto = false) {
   // limits for the goods, and the cartons inherit the spec when they become
   // items on the pallet. The carton's own structural rating rides on the outer
   // level, which is where a carton is an item.
+  if (zones.length) outer.zones = zones.map(z => ({ ...z }));
   const nestedBearing = readBearing();
   if (nestedBearing) {
     inner.bearing = nestedBearing;

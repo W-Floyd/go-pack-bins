@@ -86,6 +86,7 @@ type Preset struct {
 	Contact            *PresetContact        `json:"contact,omitempty"`
 	Bearing            *PresetBearing        `json:"bearing,omitempty"`
 	CartonBearing      *ContainerBearingSpec `json:"cartonBearing,omitempty"`
+	Zones              []ZoneSpec            `json:"zones,omitempty"`
 	Nested             bool                  `json:"nested,omitempty"`
 	InnerBin           *PresetBin            `json:"innerBin,omitempty"`
 	InnerAlgo          string                `json:"innerAlgo,omitempty"`

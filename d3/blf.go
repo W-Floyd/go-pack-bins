@@ -18,6 +18,7 @@ type BottomLeftFill struct {
 	grid   *boxGrid     // spatial index over placed for O(local) conflict/support
 	cnrBuf [][3]float64 // reused candidate-corner scratch
 	bear   *bearState   // nil unless the load-bearing gate is enabled
+	zones  zoneSet      // empty unless exclusion zones are set
 }
 
 func (s *BottomLeftFill) setPendingItem(id string, scalars map[string]float64) {
@@ -61,7 +62,8 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 			if x+w > s.binW+compactEps || y+d > s.binD+compactEps || z+h > s.binH+compactEps {
 				continue
 			}
-			if s.conflicts(x, y, z, w, d, h) || !s.supported(x, y, z, w, d) ||
+			if s.zones.blocks(x, y, z, w, d, h) ||
+				s.conflicts(x, y, z, w, d, h) || !s.supported(x, y, z, w, d) ||
 				!s.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
@@ -92,6 +94,15 @@ func (s *BottomLeftFill) corners() [][3]float64 {
 			[3]float64{b.x + b.w, b.y, b.z},
 			[3]float64{b.x, b.y + b.d, b.z},
 			[3]float64{b.x, b.y, b.z + b.h},
+		)
+	}
+	// Zones seed corners too: a zone over the origin would otherwise leave an
+	// empty bin with no reachable position.
+	for _, z := range s.zones {
+		pts = append(pts,
+			[3]float64{z.X + z.W, z.Y, z.Z},
+			[3]float64{z.X, z.Y + z.D, z.Z},
+			[3]float64{z.X, z.Y, z.Z + z.H},
 		)
 	}
 	s.cnrBuf = pts

@@ -39,6 +39,7 @@ type ExtremePoint struct {
 	grid  *boxGrid     // spatial index over placed for O(local) conflict tests
 	epBuf [][3]float64 // reused candidate-point scratch (avoids per-insert realloc)
 	bear  *bearState   // nil unless the load-bearing gate is enabled
+	zones zoneSet      // empty unless exclusion zones are set
 }
 
 func (ep *ExtremePoint) setPendingItem(id string, scalars map[string]float64) {
@@ -119,6 +120,9 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
+			if ep.zones.blocks(x, y, z, w, d, h) {
+				continue
+			}
 			if !ep.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
@@ -185,6 +189,9 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
+			if ep.zones.blocks(x, y, z, w, d, h) {
+				continue
+			}
 			if !ep.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
@@ -223,6 +230,16 @@ func (ep *ExtremePoint) extremePoints() [][3]float64 {
 			[3]float64{b.x + b.w, b.y, b.z},
 			[3]float64{b.x, b.y + b.d, b.z},
 			[3]float64{b.x, b.y, b.z + b.h},
+		)
+	}
+	// Zones generate points the same way placed boxes do. Without this a zone
+	// covering the origin would leave an empty bin with no candidate position at
+	// all, and nothing could ever be placed in it.
+	for _, z := range ep.zones {
+		pts = append(pts,
+			[3]float64{z.X + z.W, z.Y, z.Z},
+			[3]float64{z.X, z.Y + z.D, z.Z},
+			[3]float64{z.X, z.Y, z.Z + z.H},
 		)
 	}
 	ep.epBuf = pts

@@ -25,6 +25,7 @@ type Heightmap struct {
 	// layer where nothing rests above, so the peak — not the base — is what matters.
 	minTop bool
 	bear   *bearState // nil unless the load-bearing gate is enabled
+	zones  zoneSet    // empty unless exclusion zones are set
 }
 
 // NewHeightmap creates a heightmap strategy for a bin of the given dimensions.
@@ -132,7 +133,8 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 				if z+h > hm.binH+compactEps {
 					continue
 				}
-				if hm.gated(x, y, z, w, d) || !hm.bear.allows(x, y, z, w, d, h) {
+				if hm.zones.blocks(x, y, z, w, d, h) ||
+					hm.gated(x, y, z, w, d) || !hm.bear.allows(x, y, z, w, d, h) {
 					continue
 				}
 				c := box{x, y, z, w, d, h}
@@ -170,6 +172,20 @@ func (hm *Heightmap) anchors() (xs, ys []float64) {
 			}
 		}
 		for _, y := range [2]float64{b.y, b.y + b.d} {
+			if y >= 0 && y < hm.binD {
+				yset[y] = struct{}{}
+			}
+		}
+	}
+	// Zone edges are anchors too, so a zone over the origin does not leave an
+	// empty bin with only a blocked (0,0) to try.
+	for _, z := range hm.zones {
+		for _, x := range [2]float64{z.X, z.X + z.W} {
+			if x >= 0 && x < hm.binW {
+				xset[x] = struct{}{}
+			}
+		}
+		for _, y := range [2]float64{z.Y, z.Y + z.D} {
 			if y >= 0 && y < hm.binD {
 				yset[y] = struct{}{}
 			}

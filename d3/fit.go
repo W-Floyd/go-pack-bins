@@ -63,7 +63,7 @@ func (f *FitPacker) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh
 				continue
 			}
 			x, y, z := s.x, s.y, s.z // back-bottom-left corner of the space
-			if f.gated(x, y, z, w, d) {
+			if f.zones.blocks(x, y, z, w, d, h) || f.gated(x, y, z, w, d) {
 				continue
 			}
 			// Gravity: never float. The maximal-space set contains overhanging

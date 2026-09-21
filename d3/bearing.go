@@ -544,7 +544,7 @@ func ScalarsByID(items []pack.Item) map[string]map[string]float64 {
 // SettleGuarded is Settle with a load-bearing guard. Settle drops every item at
 // once, so there is no per-move accept step: either the whole drop holds or the
 // bin is left as it was. A nil guard makes this exactly Settle.
-func SettleGuarded(ps []*Placement3D, guard *BearingGuard) {
+func SettleGuarded(ps []*Placement3D, guard *Guard) {
 	if guard == nil {
 		Settle(ps)
 		return

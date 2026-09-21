@@ -61,7 +61,7 @@ func Compact(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupp
 // box's weight onto a supporter that cannot carry it is reverted. A nil guard
 // makes this exactly Compact — sliding is support-preserving but not
 // bearing-preserving, since moving a riderless box changes what it rests on.
-func CompactGuarded(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupport float64, guard *BearingGuard) {
+func CompactGuarded(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupport float64, guard *Guard) {
 	thr := minSupport
 	if thr < compactEps {
 		thr = compactEps // never leave a box fully airborne, even with no explicit gate

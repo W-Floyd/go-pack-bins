@@ -70,7 +70,7 @@ func finishRefine3D(sc *solveCtx, r pack.Result) pack.Result {
 // used by the sequential/strategy packers.
 func finishCompact3D(sc *solveCtx, r pack.Result) pack.Result {
 	if dx, dy, any := sc.req.Contact.lateralAxes(); any {
-		compactResult3DGuarded(r, sc.bw, sc.bd, sc.bh, dx, dy, sc.req.Contact.Bottom, sc.req.bearingGuard())
+		compactResult3DGuarded(r, sc.bw, sc.bd, sc.bh, dx, dy, sc.req.Contact.Bottom, sc.req.postPassGuard())
 	}
 	return r
 }
@@ -124,12 +124,12 @@ func bearingDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64
 	ctor := searchDecoder3D(req, spec)
 	bs := req.bearingD3()
 	if !bs.Enabled() {
-		return ctor
+		return d3.ZoneStrategy(ctor, req.zones())
 	}
 	if !d3.Bearable(ctor(1, 1, 1)) {
 		ctor = d3.NewEMSStrategyContact(spec)
 	}
-	return d3.BearingStrategy(ctor, bs)
+	return d3.ZoneStrategy(d3.BearingStrategy(ctor, bs), req.zones())
 }
 
 // searchOpts3D builds the ruin-and-recreate options, optionally driving the search
@@ -140,7 +140,7 @@ func searchOpts3D(sc *solveCtx) offline.SearchOptions {
 	if sc.req.Decoder == "" && sc.req.optInt("search_fast_decode", 1) >= 1 {
 		spec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
 		sopts.DecodeFactory = constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh,
-			d3.BearingStrategy(d3.NewExtremePointStrategyContact(spec), sc.req.bearingD3())), sc.req.Constraints)
+			d3.ZoneStrategy(d3.BearingStrategy(d3.NewExtremePointStrategyContact(spec), sc.req.bearingD3()), sc.req.zones())), sc.req.Constraints)
 	}
 	// Stop the bin-count search as soon as it proves the volume lower bound — no
 	// budget is then spent failing to beat an already-optimal count.
@@ -273,7 +273,7 @@ func init() {
 		gateSpec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
 		bearSpec := sc.req.bearingD3()
 		stratF := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, strat3DForBearing(algo, gateSpec, bearSpec)), sc.req.Constraints)
+			return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, strat3DConstrained(algo, gateSpec, bearSpec, sc.req.zones())), sc.req.Constraints)
 		}
 		var cands []pack.OfflinePacker
 		for _, pl := range auto3DPlans(sc.req) {

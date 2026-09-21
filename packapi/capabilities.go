@@ -19,6 +19,11 @@ func AlgoCapabilities() algoreg.Payload {
 		c.Bearing = true
 		p.Algos[algo] = c
 	}
+	for algo := range zoneAlgos3D {
+		c := p.Algos[algo]
+		c.Zones = true
+		p.Algos[algo] = c
+	}
 	return p
 }
 

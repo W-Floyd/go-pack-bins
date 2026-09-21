@@ -65,7 +65,7 @@ type RefineOptions struct {
 	// refiner rebuilds free space from geometry alone and re-inserts through an
 	// ungated ExtremePoint, so without this a refined bin can violate limits the
 	// constructive gate enforced.
-	Bearing *BearingGuard
+	Guard *Guard
 }
 
 func (o RefineOptions) withDefaults() RefineOptions {
@@ -103,7 +103,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 	// when a bottom-support fraction is required, since a straight drop can land a
 	// box on a partial support and violate that gate (the EP re-drop honours it).
 	if spec.Bottom <= compactEps {
-		if gravitySettle(bin, opts.Bearing) {
+		if gravitySettle(bin, opts.Guard) {
 			moved = true
 		}
 	}
@@ -128,7 +128,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 			if err := ctx.Err(); err != nil {
 				return moved
 			}
-			if tryLower(bin, i, orients, w, d, h, rs, opts.Bearing) {
+			if tryLower(bin, i, orients, w, d, h, rs, opts.Guard) {
 				improved = true
 			}
 		}
@@ -150,7 +150,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 // Lowering a removable item is always overlap-free and grounded (EMS with
 // NoFloating); the J check guards against a re-orientation that would raise the
 // peak. Returns whether it moved the item.
-func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *BearingGuard) bool {
+func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *Guard) bool {
 	// Extreme-point placement (grid-accelerated) finds the lowest feasible spot in
 	// ~O(k·local), vs the maximal-space prune's O(k²) — this is what lets the
 	// refiner scale to large bins. It commits the other boxes, then drops item i.
@@ -195,7 +195,7 @@ func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, 
 // highest top beneath its footprint (the existing Settle), reporting whether any
 // item actually moved. It is the cheap vertical pre-pass: O(k²), no lateral
 // search, and it lowers whole sub-stacks the leaf-only refiner can't touch.
-func gravitySettle(bin []*Placement3D, guard *BearingGuard) bool {
+func gravitySettle(bin []*Placement3D, guard *Guard) bool {
 	old := make([]float64, len(bin))
 	for i, p := range bin {
 		old[i] = p.Z
@@ -253,7 +253,7 @@ func restsOn(b, a *Placement3D) bool {
 // their lowest feasible positions. It applies the result only if the bin's
 // (peak, ΣZ) objective strictly improves; otherwise the bin is left untouched.
 // Returns whether it applied a change.
-func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *BearingGuard) bool {
+func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *Guard) bool {
 	if len(lift) == 0 {
 		return false
 	}
@@ -367,7 +367,7 @@ func widen(ctx context.Context, bin []*Placement3D, orients map[string][][3]floa
 			if len(st) > opts.MaxSubtree {
 				continue // lifting this would ruin too much
 			}
-			if liftAndRedrop(bin, union(top, st), orients, w, d, h, rs, opts.Bearing) {
+			if liftAndRedrop(bin, union(top, st), orients, w, d, h, rs, opts.Guard) {
 				return true
 			}
 		}

@@ -23,6 +23,7 @@ type EmptyMaximalSpace struct {
 	usedVol          float64
 	contact          ContactSpec
 	bear             *bearState // nil unless the load-bearing gate is enabled
+	zones            zoneSet    // empty unless exclusion zones are set
 
 	// Scratch reused across commits to avoid per-step allocation. spare is a
 	// second backing array for the space set: commit reads e.spaces and writes
@@ -113,7 +114,8 @@ func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw
 				continue
 			}
 			x, y, z := s.x, s.y, s.z // back-bottom-left corner of the space
-			if e.gated(x, y, z, w, d) || !e.bear.allows(x, y, z, w, d, h) {
+			if e.zones.blocks(x, y, z, w, d, h) ||
+				e.gated(x, y, z, w, d) || !e.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
@@ -191,7 +193,13 @@ func (e *EmptyMaximalSpace) setPendingItem(id string, scalars map[string]float64
 func (e *EmptyMaximalSpace) commit(b box) {
 	e.placed = append(e.placed, b)
 	e.usedVol += b.w * b.d * b.h
+	e.carve(b)
+}
 
+// carve removes a box's volume from the free-space set without recording it as
+// placed. Exclusion zones use it: a zone must be unavailable to place into, but
+// it is neither occupied volume nor a surface anything may rest on.
+func (e *EmptyMaximalSpace) carve(b box) {
 	// Build the rebuilt set into the spare backing array (never aliasing e.spaces,
 	// which we are reading) and the reusable new-slab flag buffer.
 	next := e.spare[:0]

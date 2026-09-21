@@ -582,3 +582,34 @@ the contents to 5 and the same order needs three pallets.
 
 - Shear strength remains deferred: a different failure mode from crush, and worth its own
   design rather than being folded into this one.
+
+## 12. Exclusion zones
+
+The second of [issue #1](https://github.com/W-Floyd/go-pack-bins/issues/1)'s three asks.
+A zone is an axis-aligned region no item may occupy: a pipe crossing a basement, a door
+swing, a wheel arch. It is *not* a pre-placed dummy item, which would both offer support
+(items could rest on the pipe) and count as occupied volume (skewing utilisation and the
+Best/Worst-Fit selectors). The original investigation noted `EmptyMaximalSpace.Occupy` as
+a workaround with exactly those two defects; `d3/zones.go` is the version without them.
+
+Supported on **thirteen** 3-D algorithms — the bearing set plus `fit`, whose
+maximal-space strategy gates zones even though it has no bearing gate. `layer` is out:
+its `LayerStack` delegates each layer to a 2-D bin, which would need the zones projected
+onto each layer rather than tested directly. Unsupported algorithms refuse the request.
+
+**A zone must generate candidate positions, not merely veto them.** The first version
+packed zero of ten items on the demo preset. An empty bin's only candidate position is the
+origin, so a zone covering it left nowhere to place anything — and every subsequent
+candidate is derived from an already-placed box, of which there were none. Zones now seed
+extreme points, BLF corners and heightmap anchors the way placed boxes do, and are carved
+out of the maximal-space free set (`EmptyMaximalSpace.carve`, factored out of `commit` so
+a zone is removed from the free spaces without being recorded as placed volume or as a
+surface). `TestZoneOverOriginStillPacks` pins this across every supported algorithm.
+
+The post-pass guards were unified for this: `d3.Guard` bundles the bearing guard and the
+zones, so `CompactGuarded`, `SettleGuarded` and `RefineOptions.Guard` take one value
+rather than growing a parameter per constraint. Every relocation re-checks both.
+
+**Still outstanding from issue #1:** access priority — the soft "some items need to be
+easy to reach" constraint. It remains the hardest of the three, because `pack.Preference`
+scores *which bin* an item goes in and nothing scores *where within a bin*.

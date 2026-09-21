@@ -73,6 +73,9 @@ func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 	if msg := req.bearingError(); msg != "" {
 		return PackResponse{Error: msg}
 	}
+	if msg := req.zoneError(); msg != "" {
+		return PackResponse{Error: msg}
+	}
 	if len(req.Containers) > 0 {
 		return solveCatalog(ctx, req)
 	}
@@ -89,6 +92,9 @@ func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 // (see the algorithm registry) without each caller re-deciding the mode.
 func dispatch(ctx context.Context, req PackRequest) (PackResponse, error) {
 	if msg := req.bearingError(); msg != "" {
+		return PackResponse{Error: msg}, nil
+	}
+	if msg := req.zoneError(); msg != "" {
 		return PackResponse{Error: msg}, nil
 	}
 	switch req.Mode {
@@ -170,9 +176,9 @@ func containerFactory(req PackRequest, bin BinSpec) pack.BinFactory {
 	case "2d":
 		return constrainedFactory(d2.NewFactory(bin.Width, bin.Height, strat2DFor(req.Algorithm)), req.Constraints)
 	default:
-		stratFn := d3.BearingStrategy(
+		stratFn := d3.ZoneStrategy(d3.BearingStrategy(
 			d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}),
-			req.bearingD3())
+			req.bearingD3()), req.zones())
 		return constrainedFactory(d3.NewFactory(bin.Width, bin.Depth, bin.Height, stratFn), req.Constraints)
 	}
 }
@@ -460,6 +466,11 @@ type PackRequest struct {
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 	Contact     ContactSpec      `json:"contact,omitempty"` // per-face support/anti-slosh
+	// Zones are regions of the bin no item may occupy — a pipe crossing a
+	// basement, the swing of a door, a wheel arch. A zone grants no support and
+	// is not occupied volume, so it cannot be expressed as a pre-placed item.
+	// 3-D only; algorithms that cannot enforce them reject the request.
+	Zones []ZoneSpec `json:"zones,omitempty"`
 	// Bearing enables the 3-D load-bearing (crush) constraint. Only the
 	// algorithms in bearingAlgos3D honour it; any other rejects the request
 	// rather than ignoring the option. See BearingSpec.
@@ -624,6 +635,16 @@ func (c ContactSpec) lateralAxes() (doX, doY, any bool) {
 	return c.SideX > 0, c.SideY > 0, c.SideX > 0 || c.SideY > 0
 }
 
+// ZoneSpec is one keep-out region of a bin, in the bin's own coordinates.
+type ZoneSpec struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
+	W float64 `json:"w"`
+	D float64 `json:"d"`
+	H float64 `json:"h"`
+}
+
 // BearingSpec turns on the 3-D load-bearing constraint: no item may carry more
 // weight on its top face, transitively, than its limit allows. Both figures come
 // from named item scalars, matching how MinimizeCG names its mass scalar.
@@ -723,6 +744,52 @@ func BearingSupported(mode, algo string) bool {
 	return mode == "3d" && bearingAlgos3D[algo]
 }
 
+// zoneAlgos3D lists the 3-D algorithms that enforce exclusion zones: those
+// placing through a strategy with a candidate loop the zone test hooks into.
+// It is bearingAlgos3D plus "fit", whose maximal-space strategy gates zones
+// even though it has no bearing gate.
+//
+// Left out on purpose: "layer" (its LayerStack delegates each layer to a 2-D
+// bin, which would need the zones projected rather than tested), the
+// self-managing packers, and the search metaheuristics.
+var zoneAlgos3D = func() map[string]bool {
+	m := map[string]bool{"fit": true}
+	for a := range bearingAlgos3D {
+		m[a] = true
+	}
+	return m
+}()
+
+// ZonesSupported reports whether an algorithm enforces exclusion zones.
+func ZonesSupported(mode, algo string) bool {
+	return mode == "3d" && zoneAlgos3D[algo]
+}
+
+// zoneError returns the request-rejection message when exclusion zones are asked
+// for but unavailable, or "" when the request is fine.
+func (req PackRequest) zoneError() string {
+	if len(req.Zones) == 0 {
+		return ""
+	}
+	if req.Mode != "3d" {
+		return "zones: exclusion zones are 3-D only"
+	}
+	if !zoneAlgos3D[req.Algorithm] {
+		return "zones: algorithm " + req.Algorithm + " does not enforce exclusion zones; use one of auto, ff, nf, bf, wf, pref, ffd, bfd, nfd, blf, ems, fit, heightmap"
+	}
+	for i, z := range req.Zones {
+		if z.W <= 0 || z.D <= 0 || z.H <= 0 {
+			return fmt.Sprintf("zones: zone %d has no volume (w/d/h must all be positive)", i)
+		}
+	}
+	// A zone swallowing the whole bin leaves nowhere to pack, which is more
+	// likely a mis-entered coordinate than an intent.
+	if free := d3.ZoneFreeVolume(req.Bin.Width, req.Bin.Depth, req.Bin.Height, req.zones()); free <= 0 {
+		return "zones: the zones leave no usable space in the bin"
+	}
+	return ""
+}
+
 // bearingError returns the request-rejection message when bearing is asked for
 // but unavailable, or "" when the request is fine.
 func (req PackRequest) bearingError() string {
@@ -796,6 +863,28 @@ func (req PackRequest) bearingD3() d3.BearingSpec {
 	s := req.Bearing.toD3()
 	s.Contents = req.bearingContents
 	return s
+}
+
+// postPassGuard bundles everything a relocation post-pass must preserve: the
+// bearing rule and the exclusion zones. Nil when the request constrains neither.
+func (req PackRequest) postPassGuard() *d3.Guard {
+	return d3.NewGuard(req.bearingGuard(), req.zones())
+}
+
+// zones converts the request's exclusion zones for the 3-D packers. Zones are
+// 3-D only and ignored elsewhere.
+func (req PackRequest) zones() []d3.Zone {
+	if req.Mode != "3d" || len(req.Zones) == 0 {
+		return nil
+	}
+	out := make([]d3.Zone, 0, len(req.Zones))
+	for _, z := range req.Zones {
+		zz := d3.Zone{X: z.X, Y: z.Y, Z: z.Z, W: z.W, D: z.D, H: z.H}
+		if !zz.Empty() {
+			out = append(out, zz)
+		}
+	}
+	return out
 }
 
 // bearingGuard builds the post-pass guard from the request's items. Returns nil
@@ -1035,6 +1124,10 @@ func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
 	// streaming caller gets the same refusal a unary one does rather than a
 	// packing silently missing the constraint.
 	if msg := req.bearingError(); msg != "" {
+		send(StreamFrame{Type: "error", Error: msg})
+		return
+	}
+	if msg := req.zoneError(); msg != "" {
 		send(StreamFrame{Type: "error", Error: msg})
 		return
 	}
@@ -1384,9 +1477,9 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 		// heightmap / layer / blocks). Placement-time gates apply here; any
 		// relocating post-pass (settle, lateral compaction) runs after the live
 		// stream and is delivered as a final reposition frame.
-		stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
+		stratFn := strat3DConstrained(req.Algorithm, d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
-		}, req.bearingD3())
+		}, req.bearingD3(), req.zones())
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
 			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
@@ -1414,7 +1507,7 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 	moved := false
 	switch req.Mode {
 	case "3d":
-		guard := req.bearingGuard()
+		guard := req.postPassGuard()
 		if req.Algorithm == "layer" || req.Algorithm == "blocks" || req.Algorithm == "columns" {
 			settleResult3DGuarded(result, guard) // drop items left floating above a short layer/slice cell
 			moved = true
@@ -1597,7 +1690,7 @@ func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 		bearSpec := req.bearingD3()
 		bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
 		strat := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DForBearing(algo, spec, bearSpec)), req.Constraints)
+			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DConstrained(algo, spec, bearSpec, req.zones())), req.Constraints)
 		}
 		// Corner / maximal-space methods over the constrained factory (honour
 		// weight/category constraints). auto3DPlans is shared with the registry
@@ -1992,6 +2085,15 @@ func strat3DForBearing(algo string, spec d3.ContactSpec, bs d3.BearingSpec) func
 	return d3.BearingStrategy(strat3DForPlain(algo, spec), bs)
 }
 
+// strat3DConstrained is strat3DFor with every placement-time constraint layered
+// on: the load-bearing gate and the exclusion zones. Every 3-D factory a
+// constrained solve can reach must be built through this — the bearing work
+// found seven separate construction sites, and zones ride the same path so they
+// cannot escape through one of them.
+func strat3DConstrained(algo string, spec d3.ContactSpec, bs d3.BearingSpec, zones []d3.Zone) func(w, d, h float64) d3.PlacementStrategy3D {
+	return d3.ZoneStrategy(strat3DForBearing(algo, spec, bs), zones)
+}
+
 func strat3DForPlain(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
 	switch algo {
 	case "blf":
@@ -2036,10 +2138,10 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// The placement strategy follows the algorithm (extreme-point / blf / ems /
 	// heightmap / layer); all read the contact spec (Bottom → hard support gate,
 	// SideX/SideY → contact-maximizing placement, used only by extreme-point).
-	stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
+	stratFn := strat3DConstrained(req.Algorithm, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
-	}, req.bearingD3())
+	}, req.bearingD3(), req.zones())
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
@@ -2059,7 +2161,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
-			compactResult3DGuarded(result, bw, bd, bh, dx, dy, req.Contact.Bottom, req.bearingGuard())
+			compactResult3DGuarded(result, bw, bd, bh, dx, dy, req.Contact.Bottom, req.postPassGuard())
 		}
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
@@ -2371,7 +2473,7 @@ func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support f
 // compactResult3DGuarded is compactResult3D with a load-bearing guard: a slide
 // that would crush an item is reverted. Compaction is support-preserving but not
 // bearing-preserving, so a gated pack must compact through the guard.
-func compactResult3DGuarded(r pack.Result, bw, bd, bh float64, doX, doY bool, support float64, guard *d3.BearingGuard) {
+func compactResult3DGuarded(r pack.Result, bw, bd, bh float64, doX, doY bool, support float64, guard *d3.Guard) {
 	byBin := map[string][]*d3.Placement3D{}
 	for _, p := range r.Placements {
 		if pl, ok := p.(*d3.Placement3D); ok {
@@ -2392,7 +2494,7 @@ func settleResult3D(r pack.Result) { settleResult3DGuarded(r, nil) }
 // settleResult3DGuarded is settleResult3D with a load-bearing guard. No
 // currently bearing-capable algorithm settles, but guarding it keeps a future
 // one from bypassing the constraint silently.
-func settleResult3DGuarded(r pack.Result, guard *d3.BearingGuard) {
+func settleResult3DGuarded(r pack.Result, guard *d3.Guard) {
 	byBin := map[string][]*d3.Placement3D{}
 	for _, p := range r.Placements {
 		if pl, ok := p.(*d3.Placement3D); ok {
@@ -2424,7 +2526,7 @@ func refineResult3D(ctx context.Context, r pack.Result, req PackRequest) {
 	}
 	d3.RefineVoids(ctx, ps, orients, req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY, NoFloating: req.Contact.NoFloating,
-	}, d3.RefineOptions{Bearing: req.bearingGuard()})
+	}, d3.RefineOptions{Guard: req.postPassGuard()})
 }
 
 // compactResult2D is the 2-D equivalent of compactResult3D.
@@ -2532,6 +2634,8 @@ type NestedLevelSpec struct {
 	// Bearing enables the load-bearing constraint among the items packed *at*
 	// this level, with the same semantics as PackRequest.Bearing.
 	Bearing BearingSpec `json:"bearing,omitempty"`
+	// Zones are this level's keep-out regions, in its bin's coordinates.
+	Zones []ZoneSpec `json:"zones,omitempty"`
 	// ContainerBearing describes this level's bin as a load-bearing object once
 	// it becomes an item at the level above — a carton on a pallet.
 	ContainerBearing *ContainerBearingSpec `json:"container_bearing,omitempty"`
@@ -2637,6 +2741,7 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		LexObjectives:    l0spec.LexObjectives,
 		AlgorithmOptions: l0spec.AlgorithmOptions,
 		Bearing:          l0spec.Bearing,
+		Zones:            l0spec.Zones,
 	}
 	l0resp, err := packByMode(ctx, l0req)
 	if err != nil {
@@ -2692,6 +2797,7 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		LexObjectives:    l1spec.LexObjectives,
 		AlgorithmOptions: l1spec.AlgorithmOptions,
 		Bearing:          l1spec.Bearing,
+		Zones:            l1spec.Zones,
 	}
 	// Let the level-1 gate resolve load paths through each carton's contents
 	// rather than working from the collapsed effective limit.
@@ -2841,14 +2947,14 @@ func cartonIndexOf(id string) int {
 func nestedBearingSpecError(req NestedPackRequest) string {
 	names := []string{"inner (carton)", "outer (pallet)"}
 	for i, lvl := range req.Levels {
-		if !lvl.Bearing.Enabled() {
+		if !lvl.Bearing.Enabled() && len(lvl.Zones) == 0 {
 			continue
 		}
 		// Level 1 packs cartons, not the caller's items, so the scalar-presence
 		// checks only make sense for the level that packs the items themselves.
 		probe := PackRequest{
 			Mode: req.Mode, Algorithm: lvl.Algorithm, Bearing: lvl.Bearing,
-			Containers: lvl.Containers,
+			Containers: lvl.Containers, Zones: lvl.Zones, Bin: lvl.Bin,
 		}
 		if i == 0 {
 			probe.Items = req.Items
@@ -2859,11 +2965,14 @@ func nestedBearingSpecError(req NestedPackRequest) string {
 				lvl.Bearing.PressureScalar: 0,
 			}}}
 		}
-		if msg := probe.bearingError(); msg != "" {
-			name := "level " + strconv.Itoa(i)
-			if i < len(names) {
-				name = names[i]
-			}
+		name := "level " + strconv.Itoa(i)
+		if i < len(names) {
+			name = names[i]
+		}
+		if msg := probe.bearingError(); msg != "" && lvl.Bearing.Enabled() {
+			return msg + " (" + name + ")"
+		}
+		if msg := probe.zoneError(); msg != "" {
 			return msg + " (" + name + ")"
 		}
 	}
