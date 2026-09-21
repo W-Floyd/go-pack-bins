@@ -696,6 +696,9 @@ var bearingAlgos3D = map[string]bool{
 	// orderings, so it reaches the best legal packing on its own — see
 	// auto3DPlans.
 	"auto": true,
+	// pref always solves through runBalanced over pack3D's gated factory, and
+	// that path races both orderings too.
+	"pref": true,
 }
 
 // BearingSupported reports whether an algorithm enforces the bearing constraint
@@ -718,7 +721,7 @@ func (req PackRequest) bearingError() string {
 	// builds the gated factory, and the algorithm check below still applies. The
 	// GBPP catalog solver has its own path and is excluded by that check.
 	if !bearingAlgos3D[req.Algorithm] {
-		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of auto, ff, nf, bf, wf, ffd, bfd, nfd, blf, ems, heightmap"
+		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of auto, ff, nf, bf, wf, pref, ffd, bfd, nfd, blf, ems, heightmap"
 	}
 	// A weight scalar no item carries makes every item weightless, which silently
 	// satisfies every limit — the constraint would appear to be enforced while
@@ -749,6 +752,19 @@ func anyItemHasScalar(items []ItemSpec, name string) bool {
 // algorithm's own. Only the sorting algorithms consult it.
 func (req PackRequest) bearingSort() offline.SortPolicy {
 	if !req.Bearing.Enabled() || !req.Bearing.OrderByStrength {
+		return nil
+	}
+	d := req.Bearing.toD3()
+	return offline.DecreasingBearing(d.LimitScalar, d.DefaultLimit)
+}
+
+// bearingSort3D returns the strength ordering to race whenever bearing is on,
+// regardless of OrderByStrength. That flag is the user's choice for a single
+// named algorithm; wherever the solver races alternatives — auto, and the
+// balanced path — it should try both orderings itself rather than make the user
+// pick, so entering items and constraints is enough.
+func (req PackRequest) bearingSort3D() offline.SortPolicy {
+	if !req.Bearing.Enabled() {
 		return nil
 	}
 	d := req.Bearing.toD3()
@@ -2011,7 +2027,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// Balance objectives layer on any balanceable algorithm (bf/wf/pref/auto); this
 	// modifier wraps the chosen algorithm, so it runs before registry dispatch.
 	if prefs, weights := buildPreferences(req.Preferences); isBalanceable(req.Algorithm) && (len(prefs) > 0 || req.Algorithm == "pref") {
-		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions())
+		result, best, perr := runBalanced(ctx, req.Algorithm, factory, prefs, weights, items, req.refineOptions(), req.bearingSort3D())
 		if perr != nil && !errors.Is(perr, pack.ErrItemTooLarge) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
@@ -2167,11 +2183,15 @@ func isBalanceable(algo string) bool {
 // 1) so the distribution leans full/empty; Auto tries both balanceable flavors
 // and keeps the one using fewer bins, breaking ties on lower imbalance. Returns
 // the winning flavor label (for Auto).
-func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item, refineOpts offline.RefineOptions) (pack.Result, string, error) {
+func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, prefs []pack.Preference, weights []float64, items []pack.Item, refineOpts offline.RefineOptions, orders ...offline.SortPolicy) (pack.Result, string, error) {
 	if _, ok := factory.(*pack.ConstrainedFactory); !ok {
 		factory = pack.NewConstrainedFactory(factory)
 	}
-	run := func(fill pack.Preference) (pack.Result, error) {
+	// Try each ordering and keep the tightest. Balancing alone cannot recover a
+	// bin the ordering lost: BalancedFit probes for the achievable bin count and
+	// pre-opens that many, so an order the constraints cannot honour inflates the
+	// probe and the balance is then spread across bins that were never needed.
+	runOrder := func(fill pack.Preference, order offline.SortPolicy) (pack.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return pack.Result{}, err
 		}
@@ -2180,10 +2200,43 @@ func runBalanced(ctx context.Context, algo string, factory pack.BinFactory, pref
 			p = append([]pack.Preference{fill}, prefs...)
 			w = append([]float64{1}, weights...)
 		}
-		r, err := packAllCtx(ctx, offline.NewBalancedFitW(factory, p, w), items)
+		bf := offline.NewBalancedFitW(factory, p, w)
+		if order != nil {
+			bf = bf.WithOrder(order)
+		}
+		r, err := packAllCtx(ctx, bf, items)
 		// Local-search pass: move/swap items between bins to tighten the balance
-		// (no-op above the refine MaxItems cap).
-		return offline.RefineBalance(factory, r, items, refineOpts), err
+		// (no-op above the refine MaxItems cap). It re-packs candidate bin sets,
+		// so it must use the same ordering this pack did — a set that packs in
+		// strength order need not pack in volume order.
+		opts := refineOpts
+		opts.Order = order
+		return offline.RefineBalance(factory, r, items, opts), err
+	}
+	// Fewer unplaced wins, then fewer bins. Comparing bins alone would rank a
+	// variant that drops half the order above one that packs all of it into two
+	// bins, which is the opposite of better.
+	tighter := func(a, b pack.Result) bool {
+		if len(a.Unplaced) != len(b.Unplaced) {
+			return len(a.Unplaced) < len(b.Unplaced)
+		}
+		return a.BinsUsed() < b.BinsUsed()
+	}
+	run := func(fill pack.Preference) (pack.Result, error) {
+		best, err := runOrder(fill, nil)
+		for _, o := range orders {
+			if o == nil {
+				continue
+			}
+			r, e := runOrder(fill, o)
+			if e != nil && !errors.Is(e, pack.ErrItemTooLarge) {
+				continue
+			}
+			if tighter(r, best) {
+				best, err = r, e
+			}
+		}
+		return best, err
 	}
 	switch algo {
 	case "bf":

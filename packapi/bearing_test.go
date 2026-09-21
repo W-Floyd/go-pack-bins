@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/W-Floyd/go-pack-bins/d3"
+	"github.com/W-Floyd/go-pack-bins/offline"
+	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
 func bearingReq(algo string) PackRequest {
@@ -802,5 +804,99 @@ func TestBearingEnforcedInCatalogCascade(t *testing.T) {
 		if !guard.OK(ps) {
 			t.Errorf("cascade bin %d violates the bearing rule", bin)
 		}
+	}
+}
+
+// Balance preferences and bearing must compose without costing a bin. The
+// balanced path does not go through the registry, so it races the orderings
+// itself: BalancedFit probes for the achievable bin count and pre-opens that
+// many, and probing in an order the gate cannot honour inflates the probe, so
+// the balance is then spread over bins that were never needed.
+func TestBearingWithBalancePreferences(t *testing.T) {
+	for _, algo := range []string{"auto", "bf", "wf", "pref"} {
+		t.Run(algo, func(t *testing.T) {
+			req := bearingOrderReq(algo, false)
+			req.Preferences = []PreferenceSpec{{Scalar: "weight", Mode: "balance"}}
+			resp := PackCtx(context.Background(), req)
+			if resp.Error != "" {
+				t.Fatalf("refused: %s", resp.Error)
+			}
+			if resp.BinsUsed != 1 {
+				t.Errorf("used %d bins; the legal packing fits in 1, so balancing lost a bin", resp.BinsUsed)
+			}
+			guard := req.bearingGuard()
+			byBin := map[int][]*d3.Placement3D{}
+			for _, p := range resp.Placements {
+				byBin[p.BinIndex] = append(byBin[p.BinIndex],
+					d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+			}
+			for bin, ps := range byBin {
+				if !guard.OK(ps) {
+					t.Errorf("bin %d violates the bearing rule", bin)
+				}
+			}
+			if len(resp.Placements) != len(req.Items) {
+				t.Errorf("placed %d of %d items", len(resp.Placements), len(req.Items))
+			}
+		})
+	}
+}
+
+// The ordering race must not change balanced solves that have no bearing spec.
+func TestBalanceUnchangedWithoutBearing(t *testing.T) {
+	req := bearingOrderReq("auto", false)
+	req.Bearing = BearingSpec{}
+	req.Preferences = []PreferenceSpec{{Scalar: "weight", Mode: "balance"}}
+	a := PackCtx(context.Background(), req)
+	b := PackCtx(context.Background(), req)
+	if a.BinsUsed != b.BinsUsed || len(a.Placements) != len(b.Placements) {
+		t.Fatalf("non-deterministic: %d/%d bins", a.BinsUsed, b.BinsUsed)
+	}
+	for i := range a.Placements {
+		if a.Placements[i] != b.Placements[i] {
+			t.Errorf("placement %d differs between identical solves", i)
+		}
+	}
+}
+
+// RefineBalance re-packs each bin's item set and its rebuild used to discard any
+// item that failed to re-place — not recording it as unplaced either, so items
+// vanished from the result. A refinement pass must never return less than it was
+// given. The load-bearing gate is what exposed it: a set that packs in strength
+// order need not pack largest-first, which is the order the rebuild used.
+func TestRefineBalanceNeverLosesItems(t *testing.T) {
+	req := bearingOrderReq("bf", false)
+	req.Preferences = []PreferenceSpec{{Scalar: "weight", Mode: "balance"}}
+
+	spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+	factory := pack.NewConstrainedFactory(constrainedFactory(
+		d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height,
+			strat3DForBearing(req.Algorithm, spec, req.Bearing.toD3())), req.Constraints))
+
+	prefs, weights := buildPreferences(req.Preferences)
+	items := items3D(req)
+	packed, err := offline.NewBalancedFitW(factory, prefs, weights).
+		WithOrder(req.bearingSort3D()).PackAll(items)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if len(packed.Placements) != len(items) {
+		t.Fatalf("setup packed %d of %d items", len(packed.Placements), len(items))
+	}
+
+	// Refining with the wrong ordering must not lose items — it should decline
+	// the rebuild and hand back what it was given.
+	wrong := offline.RefineBalance(factory, packed, items, offline.RefineOptions{})
+	if len(wrong.Placements) != len(items) {
+		t.Errorf("refine with a mismatched order returned %d placements, was given %d",
+			len(wrong.Placements), len(items))
+	}
+
+	// With the matching ordering it may refine freely, but still not lose any.
+	right := offline.RefineBalance(factory, packed, items,
+		offline.RefineOptions{Order: req.bearingSort3D()})
+	if len(right.Placements) != len(items) {
+		t.Errorf("refine with the matching order returned %d placements, was given %d",
+			len(right.Placements), len(items))
 	}
 }

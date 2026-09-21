@@ -1,8 +1,6 @@
 package offline
 
 import (
-	"sort"
-
 	"github.com/W-Floyd/go-pack-bins/pack"
 )
 
@@ -25,6 +23,19 @@ type RefineOptions struct {
 	// EvalBudget bounds the number of feasibility rebuilds in one pass; 0 uses
 	// refineEvalBudget.
 	EvalBudget int
+	// Order is the ordering used to re-pack a candidate bin set, both when
+	// testing feasibility and when rebuilding the final result; nil means
+	// largest-first. It must match the ordering the packing was built with: a set
+	// that packs in one order may not pack in another, so re-packing in the wrong
+	// one makes feasible moves look infeasible and can fail the rebuild outright.
+	Order SortPolicy
+}
+
+func (o RefineOptions) order() SortPolicy {
+	if o.Order == nil {
+		return DecreasingVolume
+	}
+	return o.Order
 }
 
 func (o RefineOptions) maxItems() int {
@@ -80,11 +91,12 @@ func RefineBalance(factory pack.BinFactory, r pack.Result, items []pack.Item, op
 	}
 
 	budget := opts.evalBudget()
+	order := opts.order()
 	feasible := func(set []pack.Item) bool {
 		budget--
 		bin := factory.Open()
 		ordered := append([]pack.Item(nil), set...)
-		sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Volume() > ordered[j].Volume() })
+		order(ordered)
 		for _, it := range ordered {
 			if _, err := bin.TryPlace(it); err != nil {
 				return false
@@ -153,32 +165,44 @@ func RefineBalance(factory pack.BinFactory, r pack.Result, items []pack.Item, op
 		}
 	}
 
-	return rebuildResult(factory, asn, r)
+	out, ok := rebuildResult(factory, asn, r, order)
+	if !ok {
+		// The rebuild could not re-place every item, so it would have returned a
+		// result with items missing. A refinement pass must never hand back less
+		// than it was given: keep the original packing.
+		return r
+	}
+	return out
 }
 
-// rebuildResult reconstructs a Result by placing each non-empty bin's items
-// (largest first) into a fresh bin, carrying over unplaced items/errors.
-func rebuildResult(factory pack.BinFactory, asn [][]pack.Item, orig pack.Result) pack.Result {
+// rebuildResult reconstructs a Result by re-packing each non-empty bin's items
+// into a fresh bin, carrying over unplaced items/errors. It reports false if any
+// item could not be re-placed, in which case the partial result is discarded —
+// silently dropping items was a real defect here, and it only surfaced once a
+// constraint (the load-bearing gate) made re-packing in the wrong order fail.
+func rebuildResult(factory pack.BinFactory, asn [][]pack.Item, orig pack.Result, order SortPolicy) (pack.Result, bool) {
 	out := pack.Result{Unplaced: orig.Unplaced, PlacementErrors: orig.PlacementErrors}
 	for _, set := range asn {
 		if len(set) == 0 {
 			continue
 		}
 		ordered := append([]pack.Item(nil), set...)
-		sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Volume() > ordered[j].Volume() })
+		order(ordered)
 		bin := factory.Open()
 		placedAny := false
 		for _, it := range ordered {
-			if p, err := bin.TryPlace(it); err == nil {
-				out.Placements = append(out.Placements, p)
-				placedAny = true
+			p, err := bin.TryPlace(it)
+			if err != nil {
+				return pack.Result{}, false
 			}
+			out.Placements = append(out.Placements, p)
+			placedAny = true
 		}
 		if placedAny {
 			out.Bins = append(out.Bins, bin)
 		}
 	}
-	return out
+	return out, true
 }
 
 // imbalanceScore sums the squared coefficient of variation (σ²/mean²) of item

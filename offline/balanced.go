@@ -25,6 +25,26 @@ type BalancedFit struct {
 	factory pack.BinFactory
 	prefs   []pack.Preference
 	weights []float64
+	order   SortPolicy // nil means DecreasingVolume
+}
+
+// WithOrder sets the item ordering used by both phases, returning the packer for
+// chaining. It matters in both: phase 1's probe decides how many bins to
+// pre-open, so probing in an order the constraints cannot honour over-estimates
+// K and phase 2 then balances across more bins than were needed.
+//
+// Used for bearing-aware packing, where the order has to put load-bearers on the
+// floor for the tight packing to exist at all (see DecreasingBearing).
+func (b *BalancedFit) WithOrder(policy SortPolicy) *BalancedFit {
+	b.order = policy
+	return b
+}
+
+func (b *BalancedFit) orderPolicy() SortPolicy {
+	if b.order == nil {
+		return DecreasingVolume
+	}
+	return b.order
 }
 
 // NewBalancedFit returns a BalancedFit using factory and the given preferences,
@@ -46,10 +66,11 @@ func (b *BalancedFit) Name() string { return "BalancedFit" }
 func (b *BalancedFit) PackAll(items []pack.Item) (pack.Result, error) {
 	// Phase 1: learn the minimum achievable bin count under the same constraints,
 	// taking the tightest of several decreasing-fit heuristics.
+	order := b.orderPolicy()
 	estimator := meta.BestOf(
-		FirstFitDecreasing(b.factory),
-		BestFitDecreasing(b.factory),
-		WorstFitDecreasing(b.factory),
+		New("FFD", order, online.FirstFit(b.factory)),
+		New("BFD", order, online.BestFit(b.factory)),
+		New("WFD", order, online.WorstFit(b.factory)),
 	)
 	probe, err := estimator.PackAll(items)
 	if err != nil && !errors.Is(err, pack.ErrItemTooLarge) {
@@ -60,7 +81,7 @@ func (b *BalancedFit) PackAll(items []pack.Item) (pack.Result, error) {
 	// Phase 2: pre-open K bins, then balance items (largest first) across them.
 	sorted := make([]pack.Item, len(items))
 	copy(sorted, items)
-	DecreasingVolume(sorted)
+	order(sorted)
 
 	packer := online.PreferenceFitNorm(b.factory, b.prefs, b.weights)
 	packer.Prefill(target)
