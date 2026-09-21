@@ -1993,6 +1993,8 @@ async function loadPreset(idx) {
   setContact(preset.contact);
   setBearing(preset.bearing);
   setCartonBearing(preset.cartonBearing);
+  zones = Array.isArray(preset.zones) ? preset.zones.map(z => ({ ...z })) : [];
+  renderZoneList();
   itemCounter = 0;
 
   // Nested mode toggle
@@ -2125,6 +2127,7 @@ function currentConfig() {
     contact: readContactPercent(),
     bearing: readBearingConfig(),
     carton_bearing: readCartonBearing(),
+    zones: zones.map(z => ({ ...z })),
     refine_voids: document.getElementById('refine-voids')?.checked || false,
     constraints: constraints.map(c => ({ ...c })),
     preferences: preferences.map(p => ({ ...p })),
@@ -2334,6 +2337,8 @@ function applyState(s) {
   setContact(s.contact); // percentages, matching readContactPercent()
   setBearing(s.bearing);
   setCartonBearing(s.carton_bearing);
+  zones = Array.isArray(s.zones) ? s.zones.map(z => ({ ...z })) : [];
+  renderZoneList();
   if (document.getElementById('refine-voids')) document.getElementById('refine-voids').checked = !!s.refine_voids;
 
   // GBPP bin cost + lexicographic objectives, with their panels shown to match.
