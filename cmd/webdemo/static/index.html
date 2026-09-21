@@ -1879,6 +1879,7 @@ async function loadPreset(idx) {
   innerPreferences = preset.innerPreferences ? preset.innerPreferences.map(p => ({...p})) : [];
   setContact(preset.contact);
   setBearing(preset.bearing);
+  setCartonBearing(preset.cartonBearing);
   itemCounter = 0;
 
   // Nested mode toggle

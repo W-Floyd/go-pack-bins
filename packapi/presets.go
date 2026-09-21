@@ -58,7 +58,9 @@ type PresetBearing struct {
 	Enabled          bool    `json:"enabled"`
 	WeightScalar     string  `json:"weight_scalar,omitempty"`
 	LimitScalar      string  `json:"limit_scalar,omitempty"`
+	PressureScalar   string  `json:"pressure_scalar,omitempty"`
 	DefaultLimit     float64 `json:"default_limit,omitempty"`
+	DefaultPressure  float64 `json:"default_pressure,omitempty"`
 	DefaultUnlimited bool    `json:"default_unlimited,omitempty"`
 	OrderByStrength  bool    `json:"order_by_strength,omitempty"`
 }
@@ -73,25 +75,26 @@ type PresetContact struct {
 // Preset is a complete demo setup. Optional fields are omitted when unused, so the
 // JSON stays small and matches the legacy hand-written presets byte-for-byte.
 type Preset struct {
-	Label              string            `json:"label"`
-	Algo               string            `json:"algo,omitempty"`
-	Bin                PresetBin         `json:"bin"`
-	Items              []PresetItem      `json:"items,omitempty"`
-	Gen                *PresetGen        `json:"gen,omitempty"`
-	Constraints        []ConstraintSpec  `json:"constraints,omitempty"`
-	Preferences        []PreferenceSpec  `json:"preferences,omitempty"`
-	InnerPreferences   []PreferenceSpec  `json:"innerPreferences,omitempty"`
-	Contact            *PresetContact    `json:"contact,omitempty"`
-	Bearing            *PresetBearing    `json:"bearing,omitempty"`
-	Nested             bool              `json:"nested,omitempty"`
-	InnerBin           *PresetBin        `json:"innerBin,omitempty"`
-	InnerAlgo          string            `json:"innerAlgo,omitempty"`
-	Catalog            []PresetContainer `json:"catalog,omitempty"`
-	InnerCatalog       []PresetContainer `json:"innerCatalog,omitempty"`
-	BinCost            float64           `json:"binCost,omitempty"`
-	InnerBinCost       float64           `json:"innerBinCost,omitempty"`
-	LexObjectives      []string          `json:"lexObjectives,omitempty"`
-	InnerLexObjectives []string          `json:"innerLexObjectives,omitempty"`
+	Label              string                `json:"label"`
+	Algo               string                `json:"algo,omitempty"`
+	Bin                PresetBin             `json:"bin"`
+	Items              []PresetItem          `json:"items,omitempty"`
+	Gen                *PresetGen            `json:"gen,omitempty"`
+	Constraints        []ConstraintSpec      `json:"constraints,omitempty"`
+	Preferences        []PreferenceSpec      `json:"preferences,omitempty"`
+	InnerPreferences   []PreferenceSpec      `json:"innerPreferences,omitempty"`
+	Contact            *PresetContact        `json:"contact,omitempty"`
+	Bearing            *PresetBearing        `json:"bearing,omitempty"`
+	CartonBearing      *ContainerBearingSpec `json:"cartonBearing,omitempty"`
+	Nested             bool                  `json:"nested,omitempty"`
+	InnerBin           *PresetBin            `json:"innerBin,omitempty"`
+	InnerAlgo          string                `json:"innerAlgo,omitempty"`
+	Catalog            []PresetContainer     `json:"catalog,omitempty"`
+	InnerCatalog       []PresetContainer     `json:"innerCatalog,omitempty"`
+	BinCost            float64               `json:"binCost,omitempty"`
+	InnerBinCost       float64               `json:"innerBinCost,omitempty"`
+	LexObjectives      []string              `json:"lexObjectives,omitempty"`
+	InnerLexObjectives []string              `json:"innerLexObjectives,omitempty"`
 }
 
 var (

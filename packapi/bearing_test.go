@@ -2,6 +2,7 @@ package packapi
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -970,5 +971,129 @@ func TestBearingRejectsUnusedPressureScalar(t *testing.T) {
 	req.Bearing.PressureScalar = "nope"
 	if resp := PackCtx(context.Background(), req); !strings.Contains(resp.Error, `no item has a "nope" scalar`) {
 		t.Errorf("error = %q", resp.Error)
+	}
+}
+
+// preset3D finds a 3-D demo preset by label.
+func preset3D(t *testing.T, label string) *Preset {
+	t.Helper()
+	for _, p := range Presets()["3d"] {
+		if p.Label == label {
+			c := p
+			return &c
+		}
+	}
+	t.Fatalf("preset %q is missing", label)
+	return nil
+}
+
+func presetItemSpecs(p *Preset) []ItemSpec {
+	out := make([]ItemSpec, 0, len(p.Items))
+	for i, it := range p.Items {
+		out = append(out, ItemSpec{ID: fmt.Sprintf("i%d", i),
+			Width: it.W, Depth: it.D, Height: it.H, Scalars: it.S})
+	}
+	return out
+}
+
+func presetBearingSpec(p *Preset) BearingSpec {
+	if p.Bearing == nil {
+		return BearingSpec{}
+	}
+	return BearingSpec{
+		WeightScalar: p.Bearing.WeightScalar, LimitScalar: p.Bearing.LimitScalar,
+		PressureScalar: p.Bearing.PressureScalar, DefaultLimit: p.Bearing.DefaultLimit,
+		DefaultPressure: p.Bearing.DefaultPressure, DefaultUnlimited: p.Bearing.DefaultUnlimited,
+		OrderByStrength: p.Bearing.OrderByStrength,
+	}
+}
+
+// The pressure preset must show pressure doing work the weight limit cannot: the
+// pallet has weight to spare, so only the concentration of the load can move the
+// posts off it. A preset that packs the same either way teaches nothing.
+func TestBearingPressurePresetDemonstrates(t *testing.T) {
+	p := preset3D(t, "Point loads: pressure, not just weight")
+	if p.Bearing == nil || p.Bearing.PressureScalar == "" {
+		t.Fatal("preset does not name a pressure scalar")
+	}
+	build := func(withBearing bool) PackRequest {
+		req := PackRequest{Mode: "3d", Algorithm: p.Algo,
+			Bin:   BinSpec{Width: p.Bin.W, Depth: p.Bin.D, Height: p.Bin.H},
+			Items: presetItemSpecs(p)}
+		if withBearing {
+			req.Bearing = presetBearingSpec(p)
+		}
+		return req
+	}
+	off := PackCtx(context.Background(), build(false))
+	on := PackCtx(context.Background(), build(true))
+	if off.Error != "" || on.Error != "" {
+		t.Fatalf("errors: off=%q on=%q", off.Error, on.Error)
+	}
+	if on.BinsUsed <= off.BinsUsed {
+		t.Errorf("pressure changed nothing: %d bins without, %d with", off.BinsUsed, on.BinsUsed)
+	}
+	// Nothing may rest on the pallet once its pressure cap binds.
+	for _, q := range on.Placements {
+		if q.Z > 0 {
+			t.Errorf("%s still stacked at z=%v despite the pressure cap", q.ItemID, q.Z)
+		}
+	}
+	// And the weight limit alone would not have refused it, which is the point.
+	var total float64
+	for _, it := range p.Items[1:] {
+		total += it.S["weight"]
+	}
+	if limit := p.Items[0].S["bearlimit"]; total >= limit {
+		t.Errorf("the posts weigh %v against a limit of %v — the weight limit would have "+
+			"refused them anyway, so the preset does not isolate pressure", total, limit)
+	}
+}
+
+// The nested pair must differ only by the rigid flag, and must pack differently:
+// load runs through flush contents when the carton is not rigid, so the same
+// order needs fewer pallets.
+func TestBearingNestedPresetsContrast(t *testing.T) {
+	flex := preset3D(t, "Corner posts carry the stack (nested)")
+	rigid := preset3D(t, "Rigid cartons: the lid carries it (nested)")
+
+	if flex.CartonBearing == nil || rigid.CartonBearing == nil {
+		t.Fatal("a nested bearing preset is missing its carton rating")
+	}
+	if flex.CartonBearing.Rigid || !rigid.CartonBearing.Rigid {
+		t.Fatalf("the pair must differ by the rigid flag: flex=%v rigid=%v",
+			flex.CartonBearing.Rigid, rigid.CartonBearing.Rigid)
+	}
+	if flex.CartonBearing.Limit != rigid.CartonBearing.Limit {
+		t.Errorf("the pair must share a carton rating to isolate the flag: %v vs %v",
+			flex.CartonBearing.Limit, rigid.CartonBearing.Limit)
+	}
+	if len(flex.Items) != len(rigid.Items) {
+		t.Errorf("the pair must share an item set: %d vs %d items", len(flex.Items), len(rigid.Items))
+	}
+
+	pallets := func(p *Preset) int {
+		bs := presetBearingSpec(p)
+		req := NestedPackRequest{Mode: "3d", Items: presetItemSpecs(p),
+			Levels: []NestedLevelSpec{
+				{Bin: BinSpec{Width: p.InnerBin.W, Depth: p.InnerBin.D, Height: p.InnerBin.H},
+					Algorithm: p.InnerAlgo, Bearing: bs},
+				{Bin: BinSpec{Width: p.Bin.W, Depth: p.Bin.D, Height: p.Bin.H},
+					Algorithm: p.Algo, Bearing: bs, ContainerBearing: p.CartonBearing},
+			}}
+		r, err := PackNestedCtx(context.Background(), req)
+		if err != nil {
+			t.Fatalf("%s: %v", p.Label, err)
+		}
+		if r.Error != "" {
+			t.Fatalf("%s: %s", p.Label, r.Error)
+		}
+		return r.Levels[1].BinsUsed
+	}
+
+	f, r := pallets(flex), pallets(rigid)
+	if f >= r {
+		t.Errorf("load paths bought nothing: %d pallets with flush contents carrying, "+
+			"%d with a rigid carton", f, r)
 	}
 }
