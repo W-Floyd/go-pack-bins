@@ -122,7 +122,7 @@ func decoder3D(sc *solveCtx) pack.BinFactory {
 // bearing requests fall back to EMS, which does gate.
 func bearingDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
 	ctor := searchDecoder3D(req, spec)
-	bs := req.Bearing.toD3()
+	bs := req.bearingD3()
 	if !bs.Enabled() {
 		return ctor
 	}
@@ -140,7 +140,7 @@ func searchOpts3D(sc *solveCtx) offline.SearchOptions {
 	if sc.req.Decoder == "" && sc.req.optInt("search_fast_decode", 1) >= 1 {
 		spec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
 		sopts.DecodeFactory = constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh,
-			d3.BearingStrategy(d3.NewExtremePointStrategyContact(spec), sc.req.Bearing.toD3())), sc.req.Constraints)
+			d3.BearingStrategy(d3.NewExtremePointStrategyContact(spec), sc.req.bearingD3())), sc.req.Constraints)
 	}
 	// Stop the bin-count search as soon as it proves the volume lower bound — no
 	// budget is then spent failing to beat an already-optimal count.
@@ -271,7 +271,7 @@ func init() {
 	// auto: mirror autoCandidates so Pack and StreamPack pick the same winner.
 	reg("auto", compact3D2(func(sc *solveCtx) (pack.Result, string, error) {
 		gateSpec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
-		bearSpec := sc.req.Bearing.toD3()
+		bearSpec := sc.req.bearingD3()
 		stratF := func(algo string) pack.BinFactory {
 			return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, strat3DForBearing(algo, gateSpec, bearSpec)), sc.req.Constraints)
 		}

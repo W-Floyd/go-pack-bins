@@ -165,11 +165,30 @@ const bearEps = 1e-9
 // adds is propagated, so this is O(supporters × stack depth) rather than a full
 // re-solve.
 func CanBear(bs []BearBox, cand BearBox) bool {
+	if hasContents(bs) || len(cand.Contents) > 0 {
+		// Containers are involved, so load routes through contents and the
+		// incremental shortcut below does not apply: the candidate can change
+		// which limits bind inside a box it lands on. Re-check the whole
+		// configuration against the exact rule. Same order of work as the
+		// shortcut, which already walks every box.
+		all := make([]BearBox, 0, len(bs)+1)
+		all = append(all, bs...)
+		return LoadPathOK(append(all, cand))
+	}
 	if cand.Weight <= 0 {
 		return true // weightless candidate crushes nothing
 	}
 	borne := BorneLoads(bs)
 	return addLoad(bs, borne, cand.X, cand.Y, cand.Z, cand.W, cand.D, cand.Weight)
+}
+
+func hasContents(bs []BearBox) bool {
+	for i := range bs {
+		if len(bs[i].Contents) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // addLoad pushes load down from the footprint at (x,y,z,w,d) through the support
@@ -225,6 +244,15 @@ type BearingSpec struct {
 	// DefaultLimit it defaults to NoLimit when the scalar is unnamed, since a
 	// pressure cap is an extra restriction rather than the primary rule.
 	DefaultPressure float64
+	// Contents, when set, reports what is inside an item — a carton's goods, for
+	// a packing whose items are themselves containers. Positions are in the
+	// item's own frame, origin at its min corner; the gate translates them once
+	// the item's position is known.
+	//
+	// Supplying it makes the gate resolve load paths through contents instead of
+	// treating each item as a solid block, so a carton with strong contents
+	// reaching its lid can be stacked on even when its own rating is low.
+	Contents func(itemID string) (contents []BearBox, rigid bool)
 	// DefaultLimit applies to items carrying no LimitScalar value. It is
 	// deliberately not defaulted to NoLimit: a zero value means "fragile", so a
 	// caller who enables bearing but mis-names the limit scalar gets a packing
@@ -245,6 +273,8 @@ type bearState struct {
 	boxes []BearBox // parallel to the strategy's own placed slice
 
 	pendWeight, pendLimit, pendPressure float64
+	pendContents                        []BearBox // in the pending item's own frame
+	pendRigid                           bool
 	havePending                         bool
 }
 
@@ -257,9 +287,13 @@ func newBearState(spec BearingSpec) *bearState {
 
 // setPendingItem records the weight and limit of the item about to be placed,
 // read from its scalars under the spec's names.
-func (b *bearState) setPendingItem(scalars map[string]float64) {
+func (b *bearState) setPendingItem(id string, scalars map[string]float64) {
 	if b == nil {
 		return
+	}
+	b.pendContents, b.pendRigid = nil, false
+	if b.spec.Contents != nil {
+		b.pendContents, b.pendRigid = b.spec.Contents(id)
 	}
 	b.pendWeight = scalars[b.spec.WeightScalar]
 	limit, ok := scalars[b.spec.LimitScalar]
@@ -300,10 +334,39 @@ func (b *bearState) allows(x, y, z, w, d, h float64) bool {
 	if !b.havePending {
 		return false
 	}
-	return CanBear(b.boxes, BearBox{
+	return CanBear(b.boxes, b.pendingBox(x, y, z, w, d, h))
+}
+
+// pendingBox is the pending item as a BearBox at the given position, with its
+// contents translated from the item's own frame into this one — the frame
+// BearBox.Contents expects, so no conversion is needed when the rule walks it.
+func (b *bearState) pendingBox(x, y, z, w, d, h float64) BearBox {
+	out := BearBox{
 		X: x, Y: y, Z: z, W: w, D: d, H: h,
 		Weight: b.pendWeight, Limit: b.pendLimit, PressureLimit: b.pendPressure,
-	})
+		Rigid: b.pendRigid,
+	}
+	if len(b.pendContents) > 0 {
+		out.Contents = make([]BearBox, len(b.pendContents))
+		copy(out.Contents, b.pendContents)
+		translate(out.Contents, x, y, z)
+	}
+	return out
+}
+
+// translate shifts a subtree into a new origin, in place.
+func translate(bs []BearBox, dx, dy, dz float64) {
+	for i := range bs {
+		bs[i].X += dx
+		bs[i].Y += dy
+		bs[i].Z += dz
+		if len(bs[i].Contents) > 0 {
+			inner := make([]BearBox, len(bs[i].Contents))
+			copy(inner, bs[i].Contents)
+			bs[i].Contents = inner
+			translate(inner, dx, dy, dz)
+		}
+	}
 }
 
 // commit records a placed box, consuming the pending item's weight and limit.
@@ -311,10 +374,7 @@ func (b *bearState) commit(x, y, z, w, d, h float64) {
 	if b == nil {
 		return
 	}
-	b.boxes = append(b.boxes, BearBox{
-		X: x, Y: y, Z: z, W: w, D: d, H: h,
-		Weight: b.pendWeight, Limit: b.pendLimit, PressureLimit: b.pendPressure,
-	})
+	b.boxes = append(b.boxes, b.pendingBox(x, y, z, w, d, h))
 	b.havePending = false
 }
 
@@ -334,7 +394,7 @@ func (b *bearState) occupy(x, y, z, w, d, h float64) {
 // weight reach the placement decision without touching PlacementStrategy3D,
 // which has six implementations and callers in three packages.
 type pendingBearer interface {
-	setPendingItem(scalars map[string]float64)
+	setPendingItem(id string, scalars map[string]float64)
 }
 
 // WithBearing enables the load-bearing gate on a strategy, returning it for
@@ -448,11 +508,25 @@ func (g *BearingGuard) OK(ps []*Placement3D) bool {
 		if !ok {
 			limit = g.spec.DefaultLimit
 		}
-		g.buf = append(g.buf, BearBox{
+		b := BearBox{
 			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
 			Weight: sc[g.spec.WeightScalar], Limit: limit,
 			PressureLimit: g.spec.PressureOf(sc),
-		})
+		}
+		// Relocation moves containers too, so the guard must see inside them or
+		// it would judge a moved carton as a solid block and disagree with the
+		// gate that placed it.
+		if g.spec.Contents != nil {
+			if inner, rigid := g.spec.Contents(p.itemID); len(inner) > 0 {
+				b.Contents = make([]BearBox, len(inner))
+				copy(b.Contents, inner)
+				translate(b.Contents, p.X, p.Y, p.Z)
+				b.Rigid = rigid
+			} else {
+				b.Rigid = rigid
+			}
+		}
+		g.buf = append(g.buf, b)
 	}
 	return BearingOK(g.buf)
 }

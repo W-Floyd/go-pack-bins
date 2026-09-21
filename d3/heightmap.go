@@ -47,8 +47,8 @@ func (hm *Heightmap) Occupy(x, y, z, w, d, h float64) {
 	hm.usedVol += w * d * h
 }
 
-func (hm *Heightmap) setPendingItem(scalars map[string]float64) {
-	hm.bear.setPendingItem(scalars)
+func (hm *Heightmap) setPendingItem(id string, scalars map[string]float64) {
+	hm.bear.setPendingItem(id, scalars)
 }
 
 // NewHeightmapStrategyContact returns a Factory3D-compatible constructor that

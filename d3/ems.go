@@ -172,8 +172,8 @@ func (e *EmptyMaximalSpace) Occupy(x, y, z, w, d, h float64) {
 	e.commit(box{x, y, z, w, d, h})
 }
 
-func (e *EmptyMaximalSpace) setPendingItem(scalars map[string]float64) {
-	e.bear.setPendingItem(scalars)
+func (e *EmptyMaximalSpace) setPendingItem(id string, scalars map[string]float64) {
+	e.bear.setPendingItem(id, scalars)
 }
 
 // commit records the placed box and rebuilds the empty-space set: every space

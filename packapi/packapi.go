@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -173,7 +172,7 @@ func containerFactory(req PackRequest, bin BinSpec) pack.BinFactory {
 	default:
 		stratFn := d3.BearingStrategy(
 			d3.NewExtremePointStrategyContact(d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}),
-			req.Bearing.toD3())
+			req.bearingD3())
 		return constrainedFactory(d3.NewFactory(bin.Width, bin.Depth, bin.Height, stratFn), req.Constraints)
 	}
 }
@@ -465,6 +464,10 @@ type PackRequest struct {
 	// algorithms in bearingAlgos3D honour it; any other rejects the request
 	// rather than ignoring the option. See BearingSpec.
 	Bearing BearingSpec `json:"bearing,omitempty"`
+	// bearingContents is set internally by nested packing so the level-1 gate
+	// can see inside each carton. It is not part of the wire format: a caller
+	// describes items, not the packings inside them.
+	bearingContents func(itemID string) ([]d3.BearBox, bool)
 	// RefineVoids enables the void-refiner post-pass (3-D only): after the solve,
 	// top-layer items are pulled down into voids to tighten each bin. Relocating,
 	// so it is delivered as a final reposition frame when streaming.
@@ -787,6 +790,14 @@ func (req PackRequest) bearingSort3D() offline.SortPolicy {
 	return offline.DecreasingBearing(d.LimitScalar, d.DefaultLimit)
 }
 
+// bearingD3 is the request's bearing spec plus the contents lookup, which lives
+// on the request rather than the spec because it is derived per solve.
+func (req PackRequest) bearingD3() d3.BearingSpec {
+	s := req.Bearing.toD3()
+	s.Contents = req.bearingContents
+	return s
+}
+
 // bearingGuard builds the post-pass guard from the request's items. Returns nil
 // when bearing is off, which every guarded post-pass treats as permissive.
 func (req PackRequest) bearingGuard() *d3.BearingGuard {
@@ -801,7 +812,7 @@ func (req PackRequest) bearingGuard() *d3.BearingGuard {
 		}
 		scalars[it.ID] = sc
 	}
-	return d3.NewBearingGuard(req.Bearing.toD3(), scalars)
+	return d3.NewBearingGuard(req.bearingD3(), scalars)
 }
 
 type PlacementResult struct {
@@ -1375,7 +1386,7 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 		// stream and is delivered as a final reposition frame.
 		stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
-		}, req.Bearing.toD3())
+		}, req.bearingD3())
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
 			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
@@ -1583,7 +1594,7 @@ func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 		}
 	case "3d":
 		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
-		bearSpec := req.Bearing.toD3()
+		bearSpec := req.bearingD3()
 		bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
 		strat := func(algo string) pack.BinFactory {
 			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DForBearing(algo, spec, bearSpec)), req.Constraints)
@@ -2028,7 +2039,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
-	}, req.Bearing.toD3())
+	}, req.bearingD3())
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
@@ -2647,10 +2658,6 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 
 	// Build one carton item per filled bin, sized to that bin's actual dimensions
 	// (a catalog at level 0 may have chosen different carton sizes per bin).
-	cartonContents := map[int][]PlacementResult{}
-	for _, p := range l0resp.Placements {
-		cartonContents[p.BinIndex] = append(cartonContents[p.BinIndex], p)
-	}
 	cartonItems := make([]ItemSpec, l0resp.BinsUsed)
 	for b := 0; b < l0resp.BinsUsed; b++ {
 		d := binDimsAt(l0resp, b, l0spec.Bin)
@@ -2660,8 +2667,7 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		}
 		// A carton's summed scalars are right for weight and meaningless for a
 		// bearing limit, so replace the limit with what its load path can carry.
-		applyCartonBearing(&cartonItems[b], cartonContents[b], l0spec.Bearing.toD3(),
-			req.Levels[1].ContainerBearing, req.Levels[1].Bearing, itemScalarsByID)
+		applyCartonBearing(&cartonItems[b], req.Levels[1].ContainerBearing, req.Levels[1].Bearing)
 	}
 
 	// Level 1: pack carton items into outer bins (pallets).
@@ -2680,6 +2686,10 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		AlgorithmOptions: l1spec.AlgorithmOptions,
 		Bearing:          l1spec.Bearing,
 	}
+	// Let the level-1 gate resolve load paths through each carton's contents
+	// rather than working from the collapsed effective limit.
+	l1req.bearingContents = cartonContentsFn(l0resp, l0spec.Bearing.toD3(),
+		itemScalarsByID, l1spec.ContainerBearing)
 	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
 		return NestedPackResponse{}, err
@@ -2842,16 +2852,12 @@ func nestedBearingError(l0, l1 PackResponse, req NestedPackRequest) string {
 // weight and meaningless for a limit — summing "what each item can bear" is not
 // "what the carton can bear".
 //
-// The effective limit is what the load path through the carton can actually
-// carry: the contents that reach its top face carry load through, so their
-// limits add up; where nothing reaches the top, the carton's own structure
-// carries it. A rigid carton always uses its own rating.
-//
-// This is the *gate's* approximation — it collapses the per-patch decomposition
-// to one number, because the flat rule at level 1 takes one number per item. The
-// exact check is nestedBearingError, run on the finished packing.
-func applyCartonBearing(it *ItemSpec, contents []PlacementResult, inner d3.BearingSpec,
-	spec *ContainerBearingSpec, l1 BearingSpec, itemScalars map[string]map[string]float64) {
+// The limit it gets is the container's *own* structural rating. The gate reads
+// the carton's contents separately (see cartonContentsFn) and resolves load
+// paths through them per patch, so this number must describe the lid alone —
+// setting it to anything the contents can carry would rate the lid for load that
+// never touches it.
+func applyCartonBearing(it *ItemSpec, spec *ContainerBearingSpec, l1 BearingSpec) {
 	if !l1.Enabled() {
 		return
 	}
@@ -2862,7 +2868,7 @@ func applyCartonBearing(it *ItemSpec, contents []PlacementResult, inner d3.Beari
 	sc[l1.WeightScalar] += spec.tare()
 
 	if l1.LimitScalar != "" {
-		sc[l1.LimitScalar] = cartonEffectiveLimit(it, contents, inner, spec, itemScalars)
+		sc[l1.LimitScalar] = spec.limit()
 	}
 	if l1.PressureScalar != "" {
 		sc[l1.PressureScalar] = spec.pressure()
@@ -2870,28 +2876,39 @@ func applyCartonBearing(it *ItemSpec, contents []PlacementResult, inner d3.Beari
 	it.Scalars = sc
 }
 
-// cartonEffectiveLimit sums the limits of the contents reaching the carton's top
-// face, falling back to the carton's own rating when nothing does.
-func cartonEffectiveLimit(it *ItemSpec, contents []PlacementResult, inner d3.BearingSpec,
-	spec *ContainerBearingSpec, itemScalars map[string]map[string]float64) float64 {
-	if spec.rigid() || !inner.Enabled() {
-		return spec.limit()
-	}
-	top := it.Height
-	total, anyFlush := 0.0, false
-	for _, p := range contents {
-		if math.Abs((p.Z+p.H)-top) > 1e-9 {
-			continue // not flush with the lid: carries nothing through
-		}
-		anyFlush = true
-		limit, ok := itemScalars[p.ItemID][inner.LimitScalar]
+// cartonContentsFn builds the lookup d3.BearingSpec.Contents wants for the
+// level-1 solve: given a carton's item id, what is inside it.
+//
+// Positions are returned in the carton's own frame — exactly what level 0
+// produced — because the gate translates them once it knows where the carton
+// lands. That is the whole reason the gate can be exact: at placement time it
+// knows the position, which the collapsed effective limit never could.
+func cartonContentsFn(l0 PackResponse, inner d3.BearingSpec,
+	itemScalars map[string]map[string]float64, spec *ContainerBearingSpec) func(string) ([]d3.BearBox, bool) {
+
+	byCarton := map[int][]d3.BearBox{}
+	for _, p := range l0.Placements {
+		sc := itemScalars[p.ItemID]
+		limit, ok := sc[inner.LimitScalar]
 		if !ok {
 			limit = inner.DefaultLimit
 		}
-		total += limit
+		if !inner.Enabled() {
+			limit = d3.NoLimit
+		}
+		byCarton[p.BinIndex] = append(byCarton[p.BinIndex], d3.BearBox{
+			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
+			Weight:        sc[inner.WeightScalar],
+			Limit:         limit,
+			PressureLimit: inner.PressureOf(sc),
+		})
 	}
-	if !anyFlush {
-		return spec.limit()
+	rigid := spec.rigid()
+	return func(id string) ([]d3.BearBox, bool) {
+		b := cartonIndexOf(id)
+		if b < 0 {
+			return nil, rigid
+		}
+		return byCarton[b], rigid
 	}
-	return total
 }

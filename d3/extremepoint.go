@@ -41,8 +41,8 @@ type ExtremePoint struct {
 	bear  *bearState   // nil unless the load-bearing gate is enabled
 }
 
-func (ep *ExtremePoint) setPendingItem(scalars map[string]float64) {
-	ep.bear.setPendingItem(scalars)
+func (ep *ExtremePoint) setPendingItem(id string, scalars map[string]float64) {
+	ep.bear.setPendingItem(id, scalars)
 }
 
 type box struct{ x, y, z, w, d, h float64 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/W-Floyd/go-pack-bins/d3"
 )
 
 // nestedBearReq builds a two-level request: goods into cartons, cartons onto a
@@ -50,30 +52,28 @@ func TestNestedBearingGatesInsideCartons(t *testing.T) {
 	}
 }
 
-// A carton's weight at the pallet level is its contents plus its declared tare.
-func TestNestedCartonTareCounts(t *testing.T) {
-	items := []ItemSpec{
-		{ID: "g1", Width: 4, Depth: 4, Height: 2, Scalars: map[string]float64{"weight": 10}},
-	}
-	withTare := nestedBearReq(items, &ContainerBearingSpec{Tare: 5, Limit: 100})
-	tree := func(req NestedPackRequest) float64 {
-		l0, _ := packByMode(context.Background(), PackRequest{
-			Mode: "3d", Algorithm: "ffd", Bin: req.Levels[0].Bin, Items: req.Items,
-			Bearing: req.Levels[0].Bearing,
-		})
-		var total float64
-		for b := 0; b < l0.BinsUsed; b++ {
-			it := ItemSpec{ID: "carton_0", Width: 4, Depth: 4, Height: 2,
-				Scalars: map[string]float64{"weight": 10}}
-			applyCartonBearing(&it, l0.Placements, req.Levels[0].Bearing.toD3(),
-				req.Levels[1].ContainerBearing, req.Levels[1].Bearing,
-				map[string]map[string]float64{"g1": items[0].Scalars})
-			total = it.Scalars["weight"]
-		}
-		return total
-	}
-	if got := tree(withTare); got != 15 {
+// A carton's weight at the pallet level is its contents plus its declared tare,
+// and its limit is its own structural rating rather than anything its contents
+// can bear — the gate reads those separately.
+func TestNestedCartonScalars(t *testing.T) {
+	l1 := BearingSpec{WeightScalar: "weight", LimitScalar: "bearlimit", DefaultUnlimited: true}
+	it := ItemSpec{ID: "carton_0", Width: 4, Depth: 4, Height: 2,
+		Scalars: map[string]float64{"weight": 10}} // summed from contents
+	applyCartonBearing(&it, &ContainerBearingSpec{Tare: 5, Limit: 100}, l1)
+
+	if got := it.Scalars["weight"]; got != 15 {
 		t.Errorf("carton weight = %v, want 15 (10 contents + 5 tare)", got)
+	}
+	if got := it.Scalars["bearlimit"]; got != 100 {
+		t.Errorf("carton limit = %v, want its own rating of 100", got)
+	}
+
+	// With no declared rating the carton's own structure is unrestricted, so the
+	// load path through its contents is what binds.
+	bare := ItemSpec{ID: "carton_0", Scalars: map[string]float64{"weight": 10}}
+	applyCartonBearing(&bare, nil, l1)
+	if got := bare.Scalars["bearlimit"]; got != d3.NoLimit {
+		t.Errorf("undeclared carton limit = %v, want NoLimit", got)
 	}
 }
 
@@ -197,5 +197,99 @@ func TestNestedBearingValidatorRejects(t *testing.T) {
 	req.Items[0].Scalars["bearlimit"] = 1000
 	if msg := nestedBearingError(l0, l1, req); msg != "" {
 		t.Errorf("a stack within every limit was rejected: %s", msg)
+	}
+}
+
+// The level-1 gate must resolve load paths through a carton's contents at
+// placement time, not work from a collapsed number and leave the validator to
+// clean up. The difference shows where the collapsed limit and the real load
+// path disagree: a carton whose contents reach its lid only over part of its
+// footprint. The effective limit sums those contents' limits as though load
+// spread across them, while the real rule charges the uncovered part to the
+// carton's own weak structure.
+func TestNestedGateResolvesContentsAtPlacement(t *testing.T) {
+	// Carton 4x4x2. Its single content is a strong 1x1 post reaching the lid, so
+	// only a sixteenth of the lid transmits; the rest rests on the carton.
+	inner := BearingSpec{WeightScalar: "weight", LimitScalar: "bearlimit", DefaultUnlimited: true}
+	l0 := PackResponse{
+		BinsUsed: 1,
+		Placements: []PlacementResult{
+			{BinIndex: 0, ItemID: "post", X: 0, Y: 0, Z: 0, W: 1, D: 1, H: 2},
+		},
+	}
+	scalars := map[string]map[string]float64{
+		"post": {"weight": 1, "bearlimit": 500},
+	}
+	lookup := cartonContentsFn(l0, inner.toD3(), scalars, &ContainerBearingSpec{Limit: 1})
+
+	contents, rigid := lookup("carton_0")
+	if rigid {
+		t.Error("carton reported rigid without the flag")
+	}
+	if len(contents) != 1 {
+		t.Fatalf("lookup returned %d contents, want 1", len(contents))
+	}
+	// Positions must come back in the carton's own frame — the gate translates
+	// them once it knows where the carton lands.
+	if contents[0].X != 0 || contents[0].Z != 0 {
+		t.Errorf("contents not in the carton's local frame: %+v", contents[0])
+	}
+
+	// Build the carton at a pallet position and load its whole lid. The strong
+	// post takes its sixteenth; the weak carton must refuse the rest.
+	carton := d3.BearBox{
+		X: 2, Y: 3, Z: 0, W: 4, D: 4, H: 2,
+		Weight: 1, Limit: 1, PressureLimit: d3.NoLimit,
+	}
+	carton.Contents = append([]d3.BearBox(nil), contents...)
+	for i := range carton.Contents {
+		carton.Contents[i].X += carton.X
+		carton.Contents[i].Y += carton.Y
+		carton.Contents[i].Z += carton.Z
+	}
+	load := d3.BearBox{X: 2, Y: 3, Z: 2, W: 4, D: 4, H: 1,
+		Weight: 160, Limit: d3.NoLimit, PressureLimit: d3.NoLimit}
+
+	if d3.LoadPathOK([]d3.BearBox{carton, load}) {
+		t.Error("a weak carton accepted the fifteen-sixteenths of the load resting on its own lid")
+	}
+	// The carton item handed to the level-1 solve must carry its *own* structural
+	// rating, not anything its contents can bear: the gate reads the contents
+	// separately, so a limit describing them would rate the lid for load that
+	// never touches it.
+	it := ItemSpec{ID: "carton_0", Width: 4, Depth: 4, Height: 2, Scalars: map[string]float64{"weight": 1}}
+	applyCartonBearing(&it, &ContainerBearingSpec{Limit: 1}, inner)
+	if it.Scalars["bearlimit"] != 1 {
+		t.Errorf("carton limit = %v, want 1 (its own rating, not its contents')",
+			it.Scalars["bearlimit"])
+	}
+}
+
+// End to end: with the gate contents-aware, a nested solve that the collapsed
+// approximation would have mis-placed comes back consistent — the validator
+// finds nothing left to reject.
+func TestNestedGateAndValidatorAgree(t *testing.T) {
+	items := []ItemSpec{
+		{ID: "post1", Width: 4, Depth: 4, Height: 2,
+			Scalars: map[string]float64{"weight": 2, "bearlimit": 300}},
+		{ID: "post2", Width: 4, Depth: 4, Height: 2,
+			Scalars: map[string]float64{"weight": 2, "bearlimit": 300}},
+		{ID: "post3", Width: 4, Depth: 4, Height: 2,
+			Scalars: map[string]float64{"weight": 2, "bearlimit": 300}},
+	}
+	req := nestedBearReq(items, &ContainerBearingSpec{Limit: 2})
+	resp, err := PackNestedCtx(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("solve: %s", resp.Error)
+	}
+	if got := len(resp.Levels[0].Placements); got != len(items) {
+		t.Errorf("placed %d of %d goods", got, len(items))
+	}
+	// The gate placed it; the exact rule must agree.
+	if msg := nestedBearingError(levelResp(resp, 0), levelResp(resp, 1), req); msg != "" {
+		t.Errorf("gate and validator disagree: %s", msg)
 	}
 }

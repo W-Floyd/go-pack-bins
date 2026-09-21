@@ -41,7 +41,7 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	// A bearing-enabled strategy needs the item's weight and limit, which
 	// TryInsert's geometry-only signature cannot carry.
 	if pb, ok := b.strategy.(pendingBearer); ok {
-		pb.setPendingItem(scalars)
+		pb.setPendingItem(item.ID(), scalars)
 	}
 	x, y, z, w, d, h, placed := b.strategy.TryInsert(i3.Orientations())
 	if !placed {

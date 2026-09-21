@@ -20,8 +20,8 @@ type BottomLeftFill struct {
 	bear   *bearState   // nil unless the load-bearing gate is enabled
 }
 
-func (s *BottomLeftFill) setPendingItem(scalars map[string]float64) {
-	s.bear.setPendingItem(scalars)
+func (s *BottomLeftFill) setPendingItem(id string, scalars map[string]float64) {
+	s.bear.setPendingItem(id, scalars)
 }
 
 // NewBottomLeftFill creates a BLF strategy for a bin of the given dimensions.

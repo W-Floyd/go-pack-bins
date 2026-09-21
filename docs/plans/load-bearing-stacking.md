@@ -533,13 +533,27 @@ its lid, added up; its own rating where nothing reaches the lid; its own rating 
 `Rigid`. Verified: a carton rated 1 with a flush post rated 500 gets an effective limit of
 500, and the same carton with a short content falls back to its own rating.
 
-### 11.3 Outstanding
+### 11.3 The gate knows about contents
 
-- **The level-1 gate is an approximation; the validator is exact.** The flat rule takes one
-  number per item, so the per-patch decomposition is collapsed to a single effective limit
-  for the carton placement, and `nestedBearingError` re-checks the finished packing
-  properly. A packing the gate admits but the load paths reject is reported as an error
-  rather than repaired — there is no fallback search. Closing that gap means teaching the
-  constructive gate about contents, which is the same step the flat model needed.
+The gate no longer works from a collapsed number. `BearingSpec.Contents` is an optional
+lookup from item id to what is inside it, in the item's *own* frame; the gate translates
+those into place once the position is known, which is precisely what a single pre-computed
+limit could never do. `CanBear` switches to the exact `LoadPathOK` whenever any container
+is involved and keeps the flat incremental shortcut otherwise, so content-free packing is
+unchanged in both behaviour and cost.
+
+Every gate-construction site now builds from `req.bearingD3()` (spec + contents lookup)
+rather than `Bearing.toD3()`; the remaining `toD3()` calls read scalar names for sort
+policies and are correct as they are. `BearingGuard` resolves contents too, so relocation
+post-passes judge a moved carton the same way the gate that placed it did.
+
+**This inverted the meaning of a carton's limit scalar, and the first version was wrong.**
+Once the gate reads contents itself, `BearBox.Limit` on a carton means its *own lid*, so
+`applyCartonBearing` setting it to the collapsed sum of its contents' limits rated the lid
+at 500 when its real rating was 1 — far too permissive. It now carries the container's own
+rating and `cartonEffectiveLimit` is deleted rather than left to mislead.
+
+### 11.4 Outstanding
+
 - Demo UI for the nested bearing controls.
 - Shear strength remains deferred.
