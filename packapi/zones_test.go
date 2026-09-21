@@ -361,3 +361,78 @@ func TestZonesAutoKeepsFit(t *testing.T) {
 		t.Error("Fit dropped from the zoned auto race though it enforces zones")
 	}
 }
+
+// The basement preset is the one that has to look like a real store: shelving
+// runs you can walk between, boxes resting on the boards rather than stacked in
+// a heap, and nothing left standing in an aisle.
+func TestBasementShelvingPreset(t *testing.T) {
+	const label = "Basement: shelving runs with walking aisles"
+	var p *Preset
+	for _, c := range Presets()["3d"] {
+		if c.Label == label {
+			cc := c
+			p = &cc
+		}
+	}
+	if p == nil {
+		t.Fatalf("preset %q is missing", label)
+	}
+
+	req := PackRequest{Mode: "3d", Algorithm: p.Algo,
+		Bin:     BinSpec{Width: p.Bin.W, Depth: p.Bin.D, Height: p.Bin.H},
+		Zones:   p.Zones,
+		Contact: ContactSpec{NoFloating: true}} // boxes must rest on something
+	for i, it := range p.Items {
+		req.Items = append(req.Items, ItemSpec{ID: fmt.Sprintf("i%d", i),
+			Width: it.W, Depth: it.D, Height: it.H})
+	}
+
+	resp := PackCtx(context.Background(), req)
+	if resp.Error != "" {
+		t.Fatalf("solve: %s", resp.Error)
+	}
+	if len(resp.Placements) != len(p.Items) {
+		t.Errorf("placed %d of %d", len(resp.Placements), len(p.Items))
+	}
+	if resp.BinsUsed != 1 {
+		t.Errorf("used %d rooms; the layout should hold the order in one", resp.BinsUsed)
+	}
+
+	// Aisles must stay walkable — an aisle with boxes standing in it is not an
+	// aisle, and is the whole thing the preset is meant to show.
+	var aisles []ZoneSpec
+	var boards []ZoneSpec
+	for _, z := range p.Zones {
+		switch {
+		case z.Permeable:
+			aisles = append(aisles, z)
+		case z.Supports:
+			boards = append(boards, z)
+		}
+	}
+	if len(aisles) < 2 || len(boards) < 4 {
+		t.Fatalf("preset shape changed: %d aisles, %d shelf boards", len(aisles), len(boards))
+	}
+	for _, q := range resp.Placements {
+		for _, a := range aisles {
+			if q.Y >= a.Y && q.Y < a.Y+a.D {
+				t.Errorf("%s is standing in a walking aisle at y=%v", q.ItemID, q.Y)
+			}
+		}
+	}
+
+	// And the shelves must be carrying boxes, not just be scenery: something has
+	// to rest on each board's top face.
+	used := 0
+	for _, b := range boards {
+		for _, q := range resp.Placements {
+			if math.Abs(q.Z-(b.Z+b.H)) < 1e-9 {
+				used++
+				break
+			}
+		}
+	}
+	if used < len(boards) {
+		t.Errorf("only %d of %d shelf boards carry anything; the rest are decoration", used, len(boards))
+	}
+}
