@@ -242,6 +242,40 @@ func TestZonePresetDemonstrates(t *testing.T) {
 		t.Errorf("placed %d of %d items — the zones should divert, not defeat, the pack",
 			len(on.Placements), len(p.Items))
 	}
+
+	// Every zone must actually be in the way. The first version of this preset
+	// put ten small items in a large bin: they filled one floor layer, the pipe
+	// overhead was never approached, and only the doorway did anything — a
+	// decorative zone that the bin-level checks above happily accepted.
+	for i, z := range p.Zones {
+		reached := false
+		for _, q := range off.Placements {
+			if q.Z+q.H > z.Z && q.Z < z.Z+z.H {
+				reached = true
+				break
+			}
+		}
+		if !reached {
+			t.Errorf("zone %d spans z %v..%v but the unzoned packing never reaches that height, "+
+				"so it constrains nothing", i, z.Z, z.Z+z.H)
+		}
+	}
+
+	// And the obstruction must show: routing around the zones has to change the
+	// shape of the packing, not merely shuffle items within the same envelope.
+	top := func(r PackResponse) float64 {
+		var t float64
+		for _, q := range r.Placements {
+			if q.Z+q.H > t {
+				t = q.Z + q.H
+			}
+		}
+		return t
+	}
+	if top(on) <= top(off) {
+		t.Errorf("packing reaches z=%v with the zones and z=%v without — the obstruction is not visible",
+			top(on), top(off))
+	}
 }
 
 // A zone covering the origin must not brick the bin. An empty bin's only
