@@ -647,6 +647,11 @@ type ZoneSpec struct {
 	// carries nothing; a ledge or a plinth is structure and can take a load. The
 	// zone still blocks placement inside itself either way.
 	Supports bool `json:"supports,omitempty"`
+	// Permeable marks the zone as reserved empty space rather than something
+	// solid — an aisle or a door swing. Nothing is packed there either way, but a
+	// box may be slid out through permeable space when retrievability is checked,
+	// which is the reason for keeping it clear. Solid by default.
+	Permeable bool `json:"permeable,omitempty"`
 }
 
 // BearingSpec turns on the 3-D load-bearing constraint: no item may carry more
@@ -883,7 +888,8 @@ func (req PackRequest) zones() []d3.Zone {
 	}
 	out := make([]d3.Zone, 0, len(req.Zones))
 	for _, z := range req.Zones {
-		zz := d3.Zone{X: z.X, Y: z.Y, Z: z.Z, W: z.W, D: z.D, H: z.H, Supports: z.Supports}
+		zz := d3.Zone{X: z.X, Y: z.Y, Z: z.Z, W: z.W, D: z.D, H: z.H,
+			Supports: z.Supports, Permeable: z.Permeable}
 		if !zz.Empty() {
 			out = append(out, zz)
 		}

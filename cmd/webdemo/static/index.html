@@ -806,34 +806,64 @@
 
       <!-- exclusion zones: keep-out regions of the bin (3-D) -->
       <div id="zones-section" style="display:none">
-        <div class="section-label">Exclusion zones (keep-out)</div>
+        <div class="section-label">Room fixtures</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
-          Regions no item may occupy — a pipe crossing the space, a door swing, a
-          meter to leave clear. A zone grants no support and is not usable volume,
-          so it is not the same as packing a dummy box.
+          What is already in the room. Nothing is packed into a fixture; a shelf or
+          ledge can be stacked on, a pipe or column cannot, and an aisle is space
+          kept clear that a box may still be slid out into.
         </div>
         <div class="item-list" id="zone-list"></div>
-        <div style="margin-top:8px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
-          <div class="field" style="flex:1; min-width:44px"><label>X</label>
-            <input type="number" id="zone-x" value="0" step="any" style="font-size:12px"></div>
-          <div class="field" style="flex:1; min-width:44px"><label>Y</label>
-            <input type="number" id="zone-y" value="0" step="any" style="font-size:12px"></div>
-          <div class="field" style="flex:1; min-width:44px"><label>Z</label>
-            <input type="number" id="zone-z" value="0" step="any" style="font-size:12px"></div>
+
+        <div class="field" style="margin-top:8px">
+          <label>Fixture</label>
+          <select id="fixture-kind" onchange="onFixtureKindChange()" style="font-size:12px">
+            <option value="shelving">Shelving unit</option>
+            <option value="pipe">Pipe / duct</option>
+            <option value="aisle">Aisle — keep clear</option>
+            <option value="column">Column / post</option>
+            <option value="ledge">Ledge / plinth</option>
+            <option value="custom">Custom box</option>
+          </select>
         </div>
-        <div style="margin-top:6px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap;">
-          <div class="field" style="flex:1; min-width:44px"><label>W</label>
-            <input type="number" id="zone-w" value="2" min="0" step="any" style="font-size:12px"></div>
-          <div class="field" style="flex:1; min-width:44px"><label>D</label>
-            <input type="number" id="zone-d" value="2" min="0" step="any" style="font-size:12px"></div>
-          <div class="field" style="flex:1; min-width:44px"><label>H</label>
-            <input type="number" id="zone-h" value="2" min="0" step="any" style="font-size:12px"></div>
-          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addZone()">+ Add</button>
+        <div id="fixture-note" style="font-size:11px;color:var(--muted);margin:4px 0 6px"></div>
+
+        <!-- Footprint: every fixture has one. Labels change per kind. -->
+        <div style="display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap">
+          <div class="field" style="flex:1; min-width:44px"><label>From X</label>
+            <input type="number" id="fx-x" value="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label>From Y</label>
+            <input type="number" id="fx-y" value="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label id="fx-w-label">Width</label>
+            <input type="number" id="fx-w" value="2" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" style="flex:1; min-width:44px"><label id="fx-d-label">Depth</label>
+            <input type="number" id="fx-d" value="2" min="0" step="any" style="font-size:12px"></div>
         </div>
-        <label class="checkbox-row" style="margin-top:6px">
-          <input type="checkbox" id="zone-supports">
-          Carries load (a ledge you can stack on, not a pipe)
-        </label>
+
+        <!-- Vertical extent: meaning depends on the kind. -->
+        <div style="margin-top:6px; display:flex; gap:6px; align-items:flex-end; flex-wrap:wrap">
+          <div class="field" id="fx-z-field" style="flex:1; min-width:44px">
+            <label id="fx-z-label">Height off floor</label>
+            <input type="number" id="fx-z" value="0" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" id="fx-h-field" style="flex:1; min-width:44px">
+            <label id="fx-h-label">Thickness</label>
+            <input type="number" id="fx-h" value="1" min="0" step="any" style="font-size:12px"></div>
+          <div class="field" id="fx-count-field" style="flex:1; min-width:44px">
+            <label>Shelves</label>
+            <input type="number" id="fx-count" value="3" min="1" step="1" style="font-size:12px"></div>
+          <div class="field" id="fx-gap-field" style="flex:1; min-width:44px">
+            <label>Clear gap</label>
+            <input type="number" id="fx-gap" value="3" min="0" step="any" style="font-size:12px"></div>
+        </div>
+
+        <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+          <label class="checkbox-row" id="fx-supports-row" style="flex:1">
+            <input type="checkbox" id="fx-supports"> Can be stacked on
+          </label>
+          <label class="checkbox-row" id="fx-permeable-row" style="flex:1">
+            <input type="checkbox" id="fx-permeable"> Boxes may be slid through it
+          </label>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addFixture()">+ Add</button>
+        </div>
         <div id="zone-unsupported" style="display:none;font-size:11px;color:var(--warn,#d08770);margin-top:8px"></div>
       </div>
 
@@ -1556,37 +1586,165 @@ function drawZones(scene, offX, toThree) {
   }
 }
 
+// renderZoneList lists one row per *fixture*, not per zone: a shelving unit is
+// several boards but one thing a person put in the room.
 function renderZoneList() {
   const el = document.getElementById('zone-list');
   if (!el) return;
   el.innerHTML = '';
+  const seen = new Set();
   zones.forEach((z, i) => {
+    if (z.group != null) {
+      if (seen.has(z.group)) return;
+      seen.add(z.group);
+    }
+    const parts = z.group != null ? zones.filter(o => o.group === z.group) : [z];
+    const name = { shelving: 'Shelving', pipe: 'Pipe', aisle: 'Aisle',
+                   column: 'Column', ledge: 'Ledge' }[z.kind] || 'Zone';
+    const tags = [];
+    if (parts.length > 1) tags.push(`${parts.length} shelves`);
+    if (z.supports) tags.push('stackable');
+    if (z.permeable) tags.push('slide-through');
+    const top = Math.max(...parts.map(p => p.z + p.h));
     const row = document.createElement('div');
     row.className = 'item-row';
     row.innerHTML = `
-      <span class="item-id">z${i + 1}</span>
-      <span class="item-dims">${z.w}×${z.d}×${z.h} at (${z.x}, ${z.y}, ${z.z})${z.supports ? ' · bearing' : ''}</span>
+      <span class="item-id">${esc(name)}</span>
+      <span class="item-dims">${z.w}×${z.d} at (${z.x}, ${z.y}), up to ${top}${
+        tags.length ? ' · ' + esc(tags.join(', ')) : ''}</span>
       <button class="remove-btn" onclick="removeZone(${i})">✕</button>`;
     el.appendChild(row);
   });
 }
 
-function addZone() {
+// FIXTURES describes each kind of thing that can already be in a room: which of
+// the shared inputs it uses, what those inputs mean for it, and how it expands
+// into zones. A shelving unit becomes one zone per shelf board; everything else
+// is a single box.
+//
+// Keeping the vocabulary ("shelving unit", "pipe", "aisle") rather than six raw
+// coordinates is the point: the numbers a person knows about their room are a
+// footprint and a few heights, not a list of axis-aligned cuboids.
+const FIXTURES = {
+  shelving: {
+    note: 'One zone per shelf board. Boxes are packed into the gaps between them ' +
+          'and rest on the boards, so the unit is storage rather than an obstacle.',
+    fields: { z: 'Lowest shelf at', h: 'Board thickness', count: true, gap: true },
+    supports: true, permeable: false, lockToggles: true,
+    build(f) {
+      const out = [];
+      for (let i = 0; i < Math.max(1, Math.round(f.count)); i++) {
+        out.push({ x: f.x, y: f.y, w: f.w, d: f.d,
+                   z: f.z + i * (f.h + f.gap), h: f.h,
+                   supports: true, permeable: false });
+      }
+      return out;
+    },
+  },
+  pipe: {
+    note: 'Solid and carries nothing: no box may occupy it, rest on it, or be ' +
+          'slid through it.',
+    fields: { z: 'Height off floor', h: 'Thickness' },
+    supports: false, permeable: false, lockToggles: true,
+    build: f => [{ ...f, supports: false, permeable: false }],
+  },
+  aisle: {
+    note: 'Space kept free, floor to ceiling. Nothing is packed here, but a box ' +
+          'may be slid out into it — which is what the clearance is for.',
+    fields: {},
+    supports: false, permeable: true, lockToggles: true,
+    build: f => [{ x: f.x, y: f.y, w: f.w, d: f.d, z: 0, h: roomHeight(),
+                   supports: false, permeable: true }],
+  },
+  column: {
+    note: 'Solid from floor to ceiling — a post, a stanchion, a boxed-in pipe run.',
+    fields: {},
+    supports: false, permeable: false, lockToggles: true,
+    build: f => [{ x: f.x, y: f.y, w: f.w, d: f.d, z: 0, h: roomHeight(),
+                   supports: false, permeable: false }],
+  },
+  ledge: {
+    note: 'A single surface you can stack on: a plinth, a sill, a flat wheel arch.',
+    fields: { z: 'Height off floor', h: 'Thickness' },
+    supports: true, permeable: false, lockToggles: true,
+    build: f => [{ ...f, supports: true, permeable: false }],
+  },
+  custom: {
+    note: 'A plain box, with both behaviours yours to set.',
+    fields: { z: 'From Z', h: 'Height' },
+    lockToggles: false,
+    build: f => [{ ...f }],
+  },
+};
+
+function roomHeight() {
+  return parseFloat(document.getElementById('bin-h')?.value) || 10;
+}
+
+// onFixtureKindChange shows only the inputs the chosen fixture uses, relabels
+// them in its own terms, and fixes the two behaviour toggles where the kind
+// already determines them — a pipe is never stackable, an aisle always
+// permeable. Only "custom" leaves them to the user.
+function onFixtureKindChange() {
+  const kind = document.getElementById('fixture-kind')?.value || 'custom';
+  const f = FIXTURES[kind];
+  if (!f) return;
+  document.getElementById('fixture-note').textContent = f.note;
+
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  const label = (id, text) => { const el = document.getElementById(id); if (el && text) el.textContent = text; };
+
+  show('fx-z-field', !!f.fields.z);
+  show('fx-h-field', !!f.fields.h);
+  show('fx-count-field', !!f.fields.count);
+  show('fx-gap-field', !!f.fields.gap);
+  label('fx-z-label', f.fields.z);
+  label('fx-h-label', f.fields.h);
+
+  const sup = document.getElementById('fx-supports');
+  const perm = document.getElementById('fx-permeable');
+  if (f.lockToggles) {
+    sup.checked = !!f.supports; perm.checked = !!f.permeable;
+  }
+  sup.disabled = perm.disabled = !!f.lockToggles;
+  show('fx-supports-row', !f.lockToggles);
+  show('fx-permeable-row', !f.lockToggles);
+}
+
+function addFixture() {
+  const kind = document.getElementById('fixture-kind')?.value || 'custom';
+  const spec = FIXTURES[kind];
+  if (!spec) return;
   const num = id => parseFloat(document.getElementById(id)?.value) || 0;
-  const z = { x: num('zone-x'), y: num('zone-y'), z: num('zone-z'),
-              w: num('zone-w'), d: num('zone-d'), h: num('zone-h'),
-              supports: !!document.getElementById('zone-supports')?.checked };
-  if (z.w <= 0 || z.d <= 0 || z.h <= 0) {
-    showError('A zone needs a positive width, depth and height.');
+  const f = {
+    x: num('fx-x'), y: num('fx-y'), w: num('fx-w'), d: num('fx-d'),
+    z: num('fx-z'), h: num('fx-h'), count: num('fx-count'), gap: num('fx-gap'),
+    supports: !!document.getElementById('fx-supports')?.checked,
+    permeable: !!document.getElementById('fx-permeable')?.checked,
+  };
+  if (f.w <= 0 || f.d <= 0) {
+    showError('A fixture needs a positive width and depth.');
     return;
   }
-  zones.push(z);
+  const made = spec.build(f).filter(z => z.w > 0 && z.d > 0 && z.h > 0);
+  if (!made.length) {
+    showError('That fixture has no volume — check its thickness and height.');
+    return;
+  }
+  // Group the parts of one fixture so a shelving unit lists and deletes as one
+  // thing rather than as five loose boards.
+  const group = ++fixtureSeq;
+  for (const z of made) zones.push({ ...z, kind, group });
   renderZoneList();
   scheduleAutoPack();
 }
 
+let fixtureSeq = 0;
+
+// removeZone deletes a whole fixture, not one of its boards.
 function removeZone(i) {
-  zones.splice(i, 1);
+  const g = zones[i] && zones[i].group;
+  zones = g ? zones.filter(z => z.group !== g) : zones.filter((_, j) => j !== i);
   renderZoneList();
   scheduleAutoPack();
 }
@@ -1598,6 +1756,7 @@ function updateZoneVisibility() {
   const sec = document.getElementById('zones-section');
   if (!sec) return;
   sec.style.display = document.getElementById('mode').value === '3d' ? '' : 'none';
+  onFixtureKindChange(); // keep the fixture form showing only its own inputs
   const algo = document.getElementById('algorithm').value;
   const ok = !!algoCaps(algo).zones;
   const warn = document.getElementById('zone-unsupported');
