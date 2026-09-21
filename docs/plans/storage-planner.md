@@ -366,7 +366,87 @@ thing a single blended number throws away.
 
 Each step is useful on its own, which is the test of whether the decomposition is right.
 
-## 11. Risks
+## 11. Effort and viability
+
+**Verdict: viable, and the cost is not where it looks.** The algorithms here are ordinary —
+a flood fill, a strip layout, a catalog solve. What this codebase charges for is
+*integration*: the load-bearing work in this repo had to be threaded through **eight**
+separate solve paths (`pack3D`, `streamSolve`, the registry `auto`, `sweepRefine3D`'s
+decoder, the balanced path, `containerFactory`, both nested levels), and each one was
+found by testing behaviour rather than by reading code. Budget that tax per new
+constraint, not per new algorithm.
+
+**Heuristic is the right target, and the line is not where it is usually drawn.** Placement
+quality can be heuristic — nobody needs the optimal shelf layout. Feasibility cannot: "will
+this crush", "can this get out", "does this fit past the pipe" have to be exact, because a
+plan that is 5% worse is fine and a plan that is wrong is worthless. So the search may be
+greedy and the *checks* may not.
+
+| Piece | Size | Why |
+|---|---|---|
+| Container inherits orientation (§5.5) | **S**, but see below | One computation on carton items |
+| Stage A — geometry + layout (§6) | **S–M** | Pure geometry, no solver, fully testable; a JS version already exists to port |
+| Drawers / cupboards (§3) | **M** | Shape is easy; the per-kind *access rule* is the work |
+| Stage B — containerise + fill (§7) | **M–L** | Reuses catalog and GBPP, but GBPP is currently excluded from bearing and zones, so composing pays the integration tax |
+| Egress: translation (§5.3) | **M** | Grid + flood fill, self-contained |
+| Egress: rotation (§5.4) | **M**, risky | Needs the orientation model below, plus the swept-volume test |
+| Egress: unpacking (§5.6) | **M** | Mostly bookkeeping once the above exists |
+| Locations + searches (§8) | **L** | Two nested searches, lexicographic scoring, plus measurement against brute force |
+
+### 11.1 A prerequisite the plan assumed and the code lacks
+
+§5.5 intersects "permitted orientations". **There is no such set.** `Item3D` carries a
+single `allowRotate bool`, and `computeOrientations` returns either all six axis-aligned
+orientations or exactly one. "This side up" — the four rotations about the vertical — is
+not expressible at all. Only `SolidBin3D`, on the voxel path, has a `RotationIndex`.
+
+So §5.5 splits in two:
+
+- **As a boolean AND** over contents: genuinely small, and fixes the pessimism in nested
+  packing today. Cannot express this-side-up, so it is a partial rule.
+- **As a true orientation set**: touches `Item3D`, `computeOrientations`, `ItemSpec`, and
+  everywhere orientations are consumed. Medium, and a **shared prerequisite** — the
+  bearing plan's §4.B deferred per-up-face crush limits for exactly the same missing
+  model.
+
+Doing the boolean version first is right, provided the plan does not then pretend the
+rule is complete.
+
+### 11.2 The two things that decide viability
+
+Neither is effort. Both are unproven assumptions.
+
+**Retrievability is expensive, and that is measured, not feared.** In a 3×3×1 tray of nine
+unit boxes with no lifting, the gate admits **three**, where a checkerboard fits five. The
+greedy packers cannot find the checkerboard because their candidate positions are corners
+of what is already placed, so the access gaps are never offered. If that ratio carries into
+real rooms, the planner produces sparse, disappointing layouts — and the constraint that
+makes a plan *usable* is the one degrading it. The plan's mitigation is to apply it per
+compartment, where a shelf gap is shallow and everything is reachable from the aisle. That
+is plausible and **untested**, and it should be the first thing measured, because if it
+fails the feature's value is in question rather than its cost.
+
+**Egress has no local repair.** Bearing and extraction can be gated at placement because a
+box only affects its neighbours. Blocking a *route* affects the far side of the room, so
+egress can only validate a finished plan, and the only repair is the layout search trying
+a wider aisle. If that loop turns out to thrash — widen, re-pack, fail differently — the
+search cost is unbounded in a way none of the existing solvers are.
+
+### 11.3 Cheapest way to find out
+
+Before building any of it, a throwaway spike worth a fraction of the whole:
+
+1. Take the basement preset that already exists — 54 boxes, three shelving runs, aisles.
+2. Run the existing `RetrievableAll` over it per compartment and then over the whole room.
+3. Compare the fill each allows against the unconstrained 54.
+
+That answers the only question that matters — *does the usability constraint destroy the
+packing* — using code that already exists, against a layout that already exists, in far
+less time than Stage A. If per-compartment retrievability holds up, the rest is ordinary
+work with a known integration tax. If it does not, the plan needs a different answer for
+access before anything else is built.
+
+## 12. Risks
 
 - **Stage boundaries hide good answers.** Stage C is the mitigation, and it should be
   measured against a brute-force solve on small instances rather than assumed.
