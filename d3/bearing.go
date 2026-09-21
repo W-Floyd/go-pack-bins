@@ -25,6 +25,19 @@ type BearBox struct {
 	X, Y, Z, W, D, H float64
 	Weight           float64 // this box's own weight
 	Limit            float64 // max weight its top face may carry; see NoLimit
+	// PressureLimit caps the weight per unit of contact area, independently of
+	// Limit. A box may take 10kg spread over its whole top and still be crushed
+	// by 3kg on a narrow foot, so the two checks are separate and both apply.
+	// NoLimit means unrestricted.
+	PressureLimit float64
+}
+
+// Load is the bearing analysis of one box: how much weight rests on it in total,
+// and the highest pressure any single contact patch on its top face applies.
+// Peak rather than mean, because a box fails if *any* patch over-loads it.
+type Load struct {
+	Weight   float64
+	Pressure float64
 }
 
 // NoLimit is the Limit of a box with no bearing restriction. Callers that leave
@@ -70,8 +83,8 @@ func supportersOf(bs []BearBox, x, y, z, w, d float64) []supporter {
 //
 // A box's shed load is its own weight plus everything it bears, divided across
 // its supporters by contact-area fraction.
-func BorneLoads(bs []BearBox) []float64 {
-	borne := make([]float64, len(bs))
+func BorneLoads(bs []BearBox) []Load {
+	borne := make([]Load, len(bs))
 	for _, i := range topDown(bs) {
 		sup := supportersOf(bs, bs[i].X, bs[i].Y, bs[i].Z, bs[i].W, bs[i].D)
 		if len(sup) == 0 {
@@ -84,9 +97,15 @@ func BorneLoads(bs []BearBox) []float64 {
 		if total <= 0 {
 			continue
 		}
-		shed := bs[i].Weight + borne[i]
+		shed := bs[i].Weight + borne[i].Weight
 		for _, s := range sup {
-			borne[s.idx] += shed * s.area / total
+			share := shed * s.area / total
+			borne[s.idx].Weight += share
+			// Pressure is per contact patch, so it is the share divided by the
+			// area that share crosses — not by the supporter's whole top face.
+			if p := share / s.area; p > borne[s.idx].Pressure {
+				borne[s.idx].Pressure = p
+			}
 		}
 	}
 	return borne
@@ -122,7 +141,10 @@ func topDown(bs []BearBox) []int {
 func BearingOK(bs []BearBox) bool {
 	borne := BorneLoads(bs)
 	for i := range bs {
-		if borne[i] > bs[i].Limit+bearEps {
+		if borne[i].Weight > bs[i].Limit+bearEps {
+			return false
+		}
+		if borne[i].Pressure > bs[i].PressureLimit+bearEps {
 			return false
 		}
 	}
@@ -149,7 +171,7 @@ func CanBear(bs []BearBox, cand BearBox) bool {
 // addLoad pushes load down from the footprint at (x,y,z,w,d) through the support
 // chain, reporting whether every box en route stays within its Limit. borne is
 // the pre-existing load and is not mutated.
-func addLoad(bs []BearBox, borne []float64, x, y, z, w, d, load float64) bool {
+func addLoad(bs []BearBox, borne []Load, x, y, z, w, d, load float64) bool {
 	if load <= 0 {
 		return true
 	}
@@ -164,7 +186,13 @@ func addLoad(bs []BearBox, borne []float64, x, y, z, w, d, load float64) bool {
 	for _, s := range sup {
 		share := load * s.area / total
 		b := &bs[s.idx]
-		if borne[s.idx]+share > b.Limit+bearEps {
+		if borne[s.idx].Weight+share > b.Limit+bearEps {
+			return false
+		}
+		// Pressure is checked against this patch alone. It is not added to the
+		// pre-existing peak: two patches loading the same box do not combine into
+		// one more concentrated patch.
+		if share/s.area > b.PressureLimit+bearEps {
 			return false
 		}
 		// The supporter passes its new share further down along with nothing
@@ -186,6 +214,13 @@ type BearingSpec struct {
 	WeightScalar string
 	// LimitScalar names the item scalar holding each item's bearing limit.
 	LimitScalar string
+	// PressureScalar names the item scalar holding each item's maximum pressure
+	// (weight per unit contact area). Empty disables the pressure check.
+	PressureScalar string
+	// DefaultPressure applies to items carrying no PressureScalar value. Unlike
+	// DefaultLimit it defaults to NoLimit when the scalar is unnamed, since a
+	// pressure cap is an extra restriction rather than the primary rule.
+	DefaultPressure float64
 	// DefaultLimit applies to items carrying no LimitScalar value. It is
 	// deliberately not defaulted to NoLimit: a zero value means "fragile", so a
 	// caller who enables bearing but mis-names the limit scalar gets a packing
@@ -205,8 +240,8 @@ type bearState struct {
 	spec  BearingSpec
 	boxes []BearBox // parallel to the strategy's own placed slice
 
-	pendWeight, pendLimit float64
-	havePending           bool
+	pendWeight, pendLimit, pendPressure float64
+	havePending                         bool
 }
 
 func newBearState(spec BearingSpec) *bearState {
@@ -227,7 +262,24 @@ func (b *bearState) setPendingItem(scalars map[string]float64) {
 	if !ok {
 		limit = b.spec.DefaultLimit
 	}
-	b.pendLimit, b.havePending = limit, true
+	b.pendLimit = limit
+	b.pendPressure = b.spec.pressureOf(scalars)
+	b.havePending = true
+}
+
+// pressureOf resolves an item's pressure cap, or NoLimit when the spec names no
+// pressure scalar.
+func (s BearingSpec) pressureOf(scalars map[string]float64) float64 {
+	if s.PressureScalar == "" {
+		return NoLimit
+	}
+	if v, ok := scalars[s.PressureScalar]; ok {
+		return v
+	}
+	if s.DefaultPressure == 0 {
+		return NoLimit
+	}
+	return s.DefaultPressure
 }
 
 // allows reports whether placing the pending item at this footprint keeps every
@@ -246,7 +298,7 @@ func (b *bearState) allows(x, y, z, w, d, h float64) bool {
 	}
 	return CanBear(b.boxes, BearBox{
 		X: x, Y: y, Z: z, W: w, D: d, H: h,
-		Weight: b.pendWeight, Limit: b.pendLimit,
+		Weight: b.pendWeight, Limit: b.pendLimit, PressureLimit: b.pendPressure,
 	})
 }
 
@@ -257,7 +309,7 @@ func (b *bearState) commit(x, y, z, w, d, h float64) {
 	}
 	b.boxes = append(b.boxes, BearBox{
 		X: x, Y: y, Z: z, W: w, D: d, H: h,
-		Weight: b.pendWeight, Limit: b.pendLimit,
+		Weight: b.pendWeight, Limit: b.pendLimit, PressureLimit: b.pendPressure,
 	})
 	b.havePending = false
 }
@@ -270,7 +322,7 @@ func (b *bearState) occupy(x, y, z, w, d, h float64) {
 	if b == nil {
 		return
 	}
-	b.boxes = append(b.boxes, BearBox{X: x, Y: y, Z: z, W: w, D: d, H: h, Limit: NoLimit})
+	b.boxes = append(b.boxes, BearBox{X: x, Y: y, Z: z, W: w, D: d, H: h, Limit: NoLimit, PressureLimit: NoLimit})
 }
 
 // pendingBearer is the optional strategy extension through which Bin3D hands the
@@ -349,6 +401,7 @@ func BearBoxesOf(ps []*Placement3D, scalars map[string]map[string]float64, spec 
 		out = append(out, BearBox{
 			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
 			Weight: sc[spec.WeightScalar], Limit: limit,
+			PressureLimit: spec.pressureOf(sc),
 		})
 	}
 	return out
@@ -394,6 +447,7 @@ func (g *BearingGuard) OK(ps []*Placement3D) bool {
 		g.buf = append(g.buf, BearBox{
 			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
 			Weight: sc[g.spec.WeightScalar], Limit: limit,
+			PressureLimit: g.spec.pressureOf(sc),
 		})
 	}
 	return BearingOK(g.buf)

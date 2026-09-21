@@ -776,7 +776,7 @@
         <div class="section-label">Load-bearing (crush limits)</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
           No item carries more than its limit, counting everything stacked above it.
-          Both figures come from item scalars — set them in the Scalars field, e.g.
+          Figures come from item scalars — set them in the Scalars field, e.g.
           <code>weight=8, bearlimit=20</code>. A limit of 0 means fragile: nothing may
           rest on it.
         </div>
@@ -795,6 +795,16 @@
               <input type="text" id="bearing-limit" value="bearlimit" oninput="scheduleAutoPack()"
                      style="font-family:var(--mono);font-size:12px">
             </div>
+            <div class="field">
+              <label>Pressure scalar</label>
+              <input type="text" id="bearing-pressure" placeholder="(none)" oninput="scheduleAutoPack()"
+                     style="font-family:var(--mono);font-size:12px">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">
+            Pressure is optional: a cap on weight per unit of contact area, so a box
+            rated for 10&nbsp;kg spread flat is not crushed by 3&nbsp;kg on a narrow foot.
+            Leave blank to check total weight only.
           </div>
           <label class="checkbox-row" style="margin-top:8px">
             <input type="checkbox" id="bearing-default-unlimited" checked onchange="scheduleAutoPack()">
@@ -1439,6 +1449,7 @@ function readBearing() {
     limit_scalar: name('bearing-limit', 'bearlimit'),
     default_unlimited: !!document.getElementById('bearing-default-unlimited')?.checked,
     order_by_strength: !!document.getElementById('bearing-order')?.checked,
+    pressure_scalar: (document.getElementById('bearing-pressure')?.value || '').trim(),
   };
 }
 
@@ -1453,6 +1464,7 @@ function setBearing(spec) {
   document.getElementById('bearing-default-unlimited').checked =
     spec.default_unlimited !== undefined ? !!spec.default_unlimited : true;
   document.getElementById('bearing-order').checked = !!spec.order_by_strength;
+  document.getElementById('bearing-pressure').value = spec.pressure_scalar || '';
   updateBearingVisibility();
 }
 
@@ -1917,6 +1929,7 @@ function readBearingConfig() {
     limit_scalar: txt('bearing-limit', 'bearlimit'),
     default_unlimited: document.getElementById('bearing-default-unlimited')?.checked || false,
     order_by_strength: document.getElementById('bearing-order')?.checked || false,
+    pressure_scalar: (document.getElementById('bearing-pressure')?.value || '').trim(),
   };
 }
 

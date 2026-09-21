@@ -90,9 +90,9 @@ func NewMeshSolid(triangles []Triangle) (*MeshSolid, error) {
 // ErrOpenMesh is returned when a mesh has boundary (non-manifold) edges.
 var ErrOpenMesh = errors.New("d3: mesh is not closed (boundary edges detected)")
 
-func (m *MeshSolid) Triangles() []Triangle    { return m.triangles }
-func (m *MeshSolid) AABB() geometry.BBox3     { return m.bbox }
-func (m *MeshSolid) Volume() float64          { return math.Abs(m.vol) }
+func (m *MeshSolid) Triangles() []Triangle { return m.triangles }
+func (m *MeshSolid) AABB() geometry.BBox3  { return m.bbox }
+func (m *MeshSolid) Volume() float64       { return math.Abs(m.vol) }
 
 func (m *MeshSolid) Contains(p geometry.Vec3) bool {
 	return raycastContains(m.triangles, p)
@@ -165,8 +165,8 @@ func (b *BoxSolid) Triangles() []Triangle {
 	}
 }
 
-func (b *BoxSolid) AABB() geometry.BBox3    { return b.bbox }
-func (b *BoxSolid) Volume() float64         { return b.bbox.Volume() }
+func (b *BoxSolid) AABB() geometry.BBox3 { return b.bbox }
+func (b *BoxSolid) Volume() float64      { return b.bbox.Volume() }
 
 func (b *BoxSolid) Contains(p geometry.Vec3) bool {
 	return p.X > b.bbox.Min.X && p.X < b.bbox.Max.X &&
@@ -201,12 +201,24 @@ func computeBBox(ts []Triangle) geometry.BBox3 {
 	max := ts[0].A
 	for _, t := range ts {
 		for _, v := range [3]geometry.Vec3{t.A, t.B, t.C} {
-			if v.X < min.X { min.X = v.X }
-			if v.Y < min.Y { min.Y = v.Y }
-			if v.Z < min.Z { min.Z = v.Z }
-			if v.X > max.X { max.X = v.X }
-			if v.Y > max.Y { max.Y = v.Y }
-			if v.Z > max.Z { max.Z = v.Z }
+			if v.X < min.X {
+				min.X = v.X
+			}
+			if v.Y < min.Y {
+				min.Y = v.Y
+			}
+			if v.Z < min.Z {
+				min.Z = v.Z
+			}
+			if v.X > max.X {
+				max.X = v.X
+			}
+			if v.Y > max.Y {
+				max.Y = v.Y
+			}
+			if v.Z > max.Z {
+				max.Z = v.Z
+			}
 		}
 	}
 	return geometry.NewBBox3(min, max)

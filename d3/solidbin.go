@@ -31,14 +31,14 @@ var _ pack.Placement = (*SolidPlacement3D)(nil)
 // This is computationally expensive for large bins or many items. For box-
 // shaped containers and box items, prefer Bin3D with ExtremePoint.
 type SolidBin3D struct {
-	id              string
-	container       Solid
-	voxRes          float64
-	containerVox    *VoxelGrid // interior voxels of the container
-	occupiedVox     *VoxelGrid // voxels occupied by placed items (same grid as containerVox)
-	usedVol         float64
-	items           []pack.Item
-	orientations    []geometry.Mat3x3 // 24 axis-aligned rotations, lazily initialised
+	id           string
+	container    Solid
+	voxRes       float64
+	containerVox *VoxelGrid // interior voxels of the container
+	occupiedVox  *VoxelGrid // voxels occupied by placed items (same grid as containerVox)
+	usedVol      float64
+	items        []pack.Item
+	orientations []geometry.Mat3x3 // 24 axis-aligned rotations, lazily initialised
 }
 
 // NewSolidBin creates a SolidBin3D with the given container solid and voxel resolution.
@@ -199,12 +199,24 @@ func rotatedBBox(bbox geometry.BBox3, rot geometry.Mat3x3) geometry.BBox3 {
 	min, max := r0, r0
 	for _, c := range corners[1:] {
 		rc := rot.MulVec(c)
-		if rc.X < min.X { min.X = rc.X }
-		if rc.Y < min.Y { min.Y = rc.Y }
-		if rc.Z < min.Z { min.Z = rc.Z }
-		if rc.X > max.X { max.X = rc.X }
-		if rc.Y > max.Y { max.Y = rc.Y }
-		if rc.Z > max.Z { max.Z = rc.Z }
+		if rc.X < min.X {
+			min.X = rc.X
+		}
+		if rc.Y < min.Y {
+			min.Y = rc.Y
+		}
+		if rc.Z < min.Z {
+			min.Z = rc.Z
+		}
+		if rc.X > max.X {
+			max.X = rc.X
+		}
+		if rc.Y > max.Y {
+			max.Y = rc.Y
+		}
+		if rc.Z > max.Z {
+			max.Z = rc.Z
+		}
 	}
 	return geometry.NewBBox3(min, max)
 }

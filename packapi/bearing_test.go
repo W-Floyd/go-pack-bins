@@ -900,3 +900,75 @@ func TestRefineBalanceNeverLosesItems(t *testing.T) {
 			len(right.Placements), len(items))
 	}
 }
+
+// Pressure end to end: a box rated for plenty of total weight must still refuse
+// a load concentrated on a narrow foot.
+func TestBearingPressureEndToEnd(t *testing.T) {
+	build := func(withPressure bool) PackRequest {
+		req := PackRequest{
+			Mode: "3d", Algorithm: "auto",
+			Bin: BinSpec{Width: 5, Depth: 5, Height: 10},
+			Bearing: BearingSpec{
+				WeightScalar: "weight", LimitScalar: "bearlimit", DefaultUnlimited: true,
+			},
+			Items: []ItemSpec{
+				// 5x5 pallet: takes 100kg total, but only 2 per unit of area.
+				{ID: "pallet", Width: 5, Depth: 5, Height: 1,
+					Scalars: map[string]float64{"weight": 1, "bearlimit": 100, "bearpressure": 2}},
+				// 1x1 post weighing 25: 25kg over 1 unit of area.
+				{ID: "post", Width: 1, Depth: 1, Height: 1,
+					Scalars: map[string]float64{"weight": 25}},
+			},
+		}
+		if withPressure {
+			req.Bearing.PressureScalar = "bearpressure"
+		}
+		return req
+	}
+
+	// Without the pressure check the post stacks: 25kg is well under 100kg.
+	off := PackCtx(context.Background(), build(false))
+	if off.Error != "" {
+		t.Fatalf("off: %s", off.Error)
+	}
+	var offPost float64 = -1
+	for _, p := range off.Placements {
+		if p.ItemID == "post" {
+			offPost = p.Z
+		}
+	}
+	if offPost <= 0 {
+		t.Fatalf("without the pressure check the post should stack (z=%v); the case proves nothing", offPost)
+	}
+
+	// With it, the concentrated load is refused and the post goes elsewhere.
+	on := PackCtx(context.Background(), build(true))
+	if on.Error != "" {
+		t.Fatalf("on: %s", on.Error)
+	}
+	guard := build(true).bearingGuard()
+	byBin := map[int][]*d3.Placement3D{}
+	for _, p := range on.Placements {
+		byBin[p.BinIndex] = append(byBin[p.BinIndex],
+			d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+	}
+	for bin, ps := range byBin {
+		if !guard.OK(ps) {
+			t.Errorf("bin %d exceeds the pressure cap", bin)
+		}
+	}
+	for _, p := range on.Placements {
+		if p.ItemID == "post" && p.Z > 0 && p.BinIndex == 0 {
+			t.Errorf("post still stacked on the pallet at z=%v despite the pressure cap", p.Z)
+		}
+	}
+}
+
+// A pressure scalar no item carries is refused, like the other scalar names.
+func TestBearingRejectsUnusedPressureScalar(t *testing.T) {
+	req := bearingOrderReq("auto", false)
+	req.Bearing.PressureScalar = "nope"
+	if resp := PackCtx(context.Background(), req); !strings.Contains(resp.Error, `no item has a "nope" scalar`) {
+		t.Errorf("error = %q", resp.Error)
+	}
+}

@@ -440,3 +440,49 @@ option":
   the issue investigation: exclusion zones have a workaround via `EmptyMaximalSpace.Occupy`
   but no API, and access priority has no mechanism at all, since `pack.Preference` scores
   bin choice rather than position within a bin.
+
+## 10. Pressure limits
+
+§6 left open whether `L_i` is total borne weight or *pressure*, and said to start with
+weight and note pressure as a refinement. Both now apply, as separate checks: a box rated
+for 10 kg spread across its whole top can still be crushed by 3 kg on a narrow foot, and
+neither check excuses the other.
+
+- `BearBox.PressureLimit` caps weight per unit of contact area; `NoLimit` is unrestricted.
+- Pressure is measured **per contact patch** — the share crossing an interface divided by
+  *that interface's* area, not by the supporter's whole top face — so a small heavy item
+  concentrates load exactly as it should.
+- The per-box figure is the **peak** patch pressure, not the sum: two separate patches at
+  2.0 do not combine into one patch at 4.0. `TestBearingPressureIsPeakPerPatch` pins this.
+- `BorneLoads` now returns `[]Load{Weight, Pressure}` rather than `[]float64`, since both
+  come from the same traversal.
+
+`supportersOf` already returned per-supporter contact areas, so this was the drop-in §6
+predicted. The pressure scalar is opt-in: naming no `PressureScalar` leaves the check off
+entirely, and naming one no item carries is refused like the other scalar names.
+
+## 11. Planned: load paths through containers (not yet built)
+
+The nested-mode question — what a bearing limit means for a carton that becomes an item at
+the pallet level — resolved into something larger than a per-carton limit, and is
+**designed but not implemented**. The decisions taken:
+
+- **Flush inheritance uses the contents' limit alone**, not `min(container, contents)`.
+  When load passes through the contents, the box structure contributes nothing.
+- **Per-item flag: `rigid` vs inherit.** A rigid item always uses its own declared limit
+  regardless of what is inside it.
+- **"Flush" is not a binary property of the container.** It is resolved *per contact
+  patch*, by physical layout: four strong corner posts reaching the top can carry a box
+  above through those corners, while the carton's own rating need only cover what actually
+  rests on its structure. So a patch loading a container's top face decomposes into the
+  part overlapping flush contents (which transfers into them, recursively) and the
+  remainder (which loads the container's own lid, checked against its own limit).
+
+This makes bearing **recursive across the nesting boundary**, reusing the same
+split-by-contact-area logic `supportersOf` already performs within a bin. It is closer to
+a load-path model than to the static per-item rule in §4, and the user has confirmed that
+level of physical fidelity is in scope.
+
+**Explicitly deferred:** shear strength. It was raised as a possible further
+consideration, not a requirement, and it is a different failure mode from crush —
+worth its own design rather than being folded into this one.

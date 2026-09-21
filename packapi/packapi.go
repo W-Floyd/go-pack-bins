@@ -632,6 +632,15 @@ type BearingSpec struct {
 	// LimitScalar names the item scalar holding each item's bearing limit. An
 	// item whose limit is zero is fragile: nothing may rest on it.
 	LimitScalar string `json:"limit_scalar,omitempty"`
+	// PressureScalar names the item scalar holding each item's maximum pressure —
+	// weight per unit of contact area. An item may take 10kg spread across its
+	// whole top and still be crushed by 3kg on a narrow foot, so this is a
+	// separate check from the weight limit and both apply. Empty disables it.
+	PressureScalar string `json:"pressure_scalar,omitempty"`
+	// DefaultPressure applies to items carrying no PressureScalar value; zero
+	// means unrestricted, since a pressure cap is an extra restriction rather
+	// than the primary rule.
+	DefaultPressure float64 `json:"default_pressure,omitempty"`
 	// DefaultLimit applies to items carrying no LimitScalar value. It defaults to
 	// zero — i.e. fragile — so that a mis-named limit scalar yields a packing that
 	// refuses to stack rather than one that silently permits every crush. Set
@@ -665,9 +674,11 @@ func (b BearingSpec) toD3() d3.BearingSpec {
 		lim = d3.NoLimit
 	}
 	return d3.BearingSpec{
-		WeightScalar: b.WeightScalar,
-		LimitScalar:  b.LimitScalar,
-		DefaultLimit: lim,
+		WeightScalar:    b.WeightScalar,
+		LimitScalar:     b.LimitScalar,
+		DefaultLimit:    lim,
+		PressureScalar:  b.PressureScalar,
+		DefaultPressure: b.DefaultPressure,
 	}
 }
 
@@ -735,6 +746,9 @@ func (req PackRequest) bearingError() string {
 	// fragile (nothing may stack at all). Neither is what the caller meant.
 	if req.Bearing.LimitScalar != "" && !anyItemHasScalar(req.Items, req.Bearing.LimitScalar) {
 		return "bearing: no item has a \"" + req.Bearing.LimitScalar + "\" scalar, so every item would take the default limit"
+	}
+	if req.Bearing.PressureScalar != "" && !anyItemHasScalar(req.Items, req.Bearing.PressureScalar) {
+		return "bearing: no item has a \"" + req.Bearing.PressureScalar + "\" scalar, so the pressure check would never bind"
 	}
 	return ""
 }

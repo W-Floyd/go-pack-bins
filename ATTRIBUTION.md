@@ -88,6 +88,7 @@ Clean-room implementations of methods/objectives surveyed there (ideas, not code
 | GRASP (greedy randomized adaptive search) | Correcher et al. (2017); Calzavara et al. (2021) | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
 | Beam search (bounded tree search over placement order) | Araya et al. (2020); Parreño et al. (2020) | [`offline/beam.go`](offline/beam.go) |
 | Lexicographic multi-objective selection | Bin packing with lexicographic objectives (2022) | [`meta/lexicographic.go`](meta/lexicographic.go) |
+| Maximum-pressure limit: a cap on borne weight per unit of contact area, checked per contact patch alongside the total-weight limit | Bischoff (2006), which models bearing strength as pressure rather than total weight | [`d3/bearing.go`](d3/bearing.go) |
 | Bearing-aware item ordering: place load-bearers on the floor and fragile items last, so a crush-free arrangement is reachable (opt-in; `auto` races it against volume order) | Ratcliff & Bischoff (1998); Bischoff (2006) layer-from-floor schemes | [`offline/bearing.go`](offline/bearing.go) |
 | Load-bearing / crush constraint: per-item limit on the weight its top face may carry, accumulated transitively up the support stack and apportioned across supporters by contact area (`bearLimit = 0` gives fragility) | Bischoff (2006), *EJOR* 168(3); Junqueira, Morabito & Yamashita (2012), *C&OR* 39(1); Ratcliff & Bischoff (1998) layer-from-floor scheme | [`d3/bearing.go`](d3/bearing.go) |
 
