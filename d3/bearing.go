@@ -267,13 +267,13 @@ func (b *bearState) setPendingItem(scalars map[string]float64) {
 		limit = b.spec.DefaultLimit
 	}
 	b.pendLimit = limit
-	b.pendPressure = b.spec.pressureOf(scalars)
+	b.pendPressure = b.spec.PressureOf(scalars)
 	b.havePending = true
 }
 
 // pressureOf resolves an item's pressure cap, or NoLimit when the spec names no
 // pressure scalar.
-func (s BearingSpec) pressureOf(scalars map[string]float64) float64 {
+func (s BearingSpec) PressureOf(scalars map[string]float64) float64 {
 	if s.PressureScalar == "" {
 		return NoLimit
 	}
@@ -405,7 +405,7 @@ func BearBoxesOf(ps []*Placement3D, scalars map[string]map[string]float64, spec 
 		out = append(out, BearBox{
 			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
 			Weight: sc[spec.WeightScalar], Limit: limit,
-			PressureLimit: spec.pressureOf(sc),
+			PressureLimit: spec.PressureOf(sc),
 		})
 	}
 	return out
@@ -451,7 +451,7 @@ func (g *BearingGuard) OK(ps []*Placement3D) bool {
 		g.buf = append(g.buf, BearBox{
 			X: p.X, Y: p.Y, Z: p.Z, W: p.W, D: p.D, H: p.H,
 			Weight: sc[g.spec.WeightScalar], Limit: limit,
-			PressureLimit: g.spec.pressureOf(sc),
+			PressureLimit: g.spec.PressureOf(sc),
 		})
 	}
 	return BearingOK(g.buf)

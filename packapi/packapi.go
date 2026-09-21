@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2516,6 +2518,50 @@ type NestedLevelSpec struct {
 	// AlgorithmOptions carries this level's per-algorithm numeric tunables, with
 	// the same keys, defaults, and server-side clamping as PackRequest.
 	AlgorithmOptions map[string]float64 `json:"algorithm_options,omitempty"`
+	// Bearing enables the load-bearing constraint among the items packed *at*
+	// this level, with the same semantics as PackRequest.Bearing.
+	Bearing BearingSpec `json:"bearing,omitempty"`
+	// ContainerBearing describes this level's bin as a load-bearing object once
+	// it becomes an item at the level above — a carton on a pallet.
+	ContainerBearing *ContainerBearingSpec `json:"container_bearing,omitempty"`
+}
+
+// ContainerBearingSpec rates a container's own structure: what its lid can carry
+// when load does not pass through its contents.
+type ContainerBearingSpec struct {
+	// Limit is the weight the container's own structure may carry, and Pressure
+	// the weight per unit area. Zero means unrestricted for both, since a
+	// container with no declared rating should not silently become fragile.
+	Limit    float64 `json:"limit,omitempty"`
+	Pressure float64 `json:"pressure,omitempty"`
+	// Rigid makes the container carry load on its own structure regardless of
+	// what is inside it. Without it, load over contents that reach the container's
+	// top face passes into those contents and is checked against their limits.
+	Rigid bool `json:"rigid,omitempty"`
+	// Tare is the container's own empty weight, added to its contents' weight.
+	Tare float64 `json:"tare,omitempty"`
+}
+
+func (c *ContainerBearingSpec) limit() float64 {
+	if c == nil || c.Limit <= 0 {
+		return d3.NoLimit
+	}
+	return c.Limit
+}
+
+func (c *ContainerBearingSpec) pressure() float64 {
+	if c == nil || c.Pressure <= 0 {
+		return d3.NoLimit
+	}
+	return c.Pressure
+}
+
+func (c *ContainerBearingSpec) rigid() bool { return c != nil && c.Rigid }
+func (c *ContainerBearingSpec) tare() float64 {
+	if c == nil {
+		return 0
+	}
+	return c.Tare
 }
 
 type NestedPackRequest struct {
@@ -2572,6 +2618,7 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		BinCost:          l0spec.BinCost,
 		LexObjectives:    l0spec.LexObjectives,
 		AlgorithmOptions: l0spec.AlgorithmOptions,
+		Bearing:          l0spec.Bearing,
 	}
 	l0resp, err := packByMode(ctx, l0req)
 	if err != nil {
@@ -2600,6 +2647,10 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 
 	// Build one carton item per filled bin, sized to that bin's actual dimensions
 	// (a catalog at level 0 may have chosen different carton sizes per bin).
+	cartonContents := map[int][]PlacementResult{}
+	for _, p := range l0resp.Placements {
+		cartonContents[p.BinIndex] = append(cartonContents[p.BinIndex], p)
+	}
 	cartonItems := make([]ItemSpec, l0resp.BinsUsed)
 	for b := 0; b < l0resp.BinsUsed; b++ {
 		d := binDimsAt(l0resp, b, l0spec.Bin)
@@ -2607,6 +2658,10 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 			ID: fmt.Sprintf("carton_%d", b), Width: d.Width, Height: d.Height, Depth: d.Depth,
 			Scalars: binScalars[b],
 		}
+		// A carton's summed scalars are right for weight and meaningless for a
+		// bearing limit, so replace the limit with what its load path can carry.
+		applyCartonBearing(&cartonItems[b], cartonContents[b], l0spec.Bearing.toD3(),
+			req.Levels[1].ContainerBearing, req.Levels[1].Bearing, itemScalarsByID)
 	}
 
 	// Level 1: pack carton items into outer bins (pallets).
@@ -2623,10 +2678,18 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 		BinCost:          l1spec.BinCost,
 		LexObjectives:    l1spec.LexObjectives,
 		AlgorithmOptions: l1spec.AlgorithmOptions,
+		Bearing:          l1spec.Bearing,
 	}
 	l1resp, err := packByMode(ctx, l1req)
 	if err != nil {
 		return NestedPackResponse{}, err
+	}
+
+	// The level-1 solve places cartons through the flat rule, which cannot see
+	// how load routes through a carton's contents. Re-check the finished packing
+	// against the exact load-path rule.
+	if msg := nestedBearingError(l0resp, l1resp, req); msg != "" {
+		return NestedPackResponse{Error: msg}, nil
 	}
 
 	return NestedPackResponse{
@@ -2683,4 +2746,152 @@ func nestedLevelResult(resp PackResponse, nominal BinSpec) NestedLevelResult {
 		r.BinDims = *resp.ContainerBin
 	}
 	return r
+}
+
+// nestedBearTree rebuilds the two-level packing as a BearBox tree, one entry per
+// pallet bin, so the load-path rule can be applied to it.
+//
+// Level-0 placements are in carton-local coordinates and level-1 placements put
+// each carton on a pallet, so a content's position in the pallet frame is the
+// carton's position plus its own. BearBox.Contents expects that shared frame.
+func nestedBearTree(l0, l1 PackResponse, req NestedPackRequest) map[int][]d3.BearBox {
+	l0spec, l1spec := req.Levels[0], req.Levels[1]
+	inner := l0spec.Bearing.toD3()
+
+	itemScalars := make(map[string]map[string]float64, len(req.Items))
+	for _, s := range req.Items {
+		itemScalars[s.ID] = s.Scalars
+	}
+
+	// Carton index → its contents, still in carton-local coordinates.
+	contents := map[int][]PlacementResult{}
+	for _, p := range l0.Placements {
+		contents[p.BinIndex] = append(contents[p.BinIndex], p)
+	}
+
+	out := map[int][]d3.BearBox{}
+	for _, cp := range l1.Placements {
+		b := cartonIndexOf(cp.ItemID)
+		if b < 0 {
+			continue
+		}
+		carton := d3.BearBox{
+			X: cp.X, Y: cp.Y, Z: cp.Z, W: cp.W, D: cp.D, H: cp.H,
+			Weight:        l1spec.ContainerBearing.tare(),
+			Limit:         l1spec.ContainerBearing.limit(),
+			PressureLimit: l1spec.ContainerBearing.pressure(),
+			Rigid:         l1spec.ContainerBearing.rigid(),
+		}
+		for _, ip := range contents[b] {
+			sc := itemScalars[ip.ItemID]
+			limit, ok := sc[inner.LimitScalar]
+			if !ok {
+				limit = inner.DefaultLimit
+			}
+			if !inner.Enabled() {
+				limit = d3.NoLimit
+			}
+			carton.Contents = append(carton.Contents, d3.BearBox{
+				// Translate into the pallet frame.
+				X: cp.X + ip.X, Y: cp.Y + ip.Y, Z: cp.Z + ip.Z,
+				W: ip.W, D: ip.D, H: ip.H,
+				Weight:        sc[inner.WeightScalar],
+				Limit:         limit,
+				PressureLimit: inner.PressureOf(sc),
+			})
+		}
+		out[cp.BinIndex] = append(out[cp.BinIndex], carton)
+	}
+	return out
+}
+
+// cartonIndexOf parses the level-0 bin index back out of a carton item id, or
+// returns -1 if the id is not one nestedBearTree produced.
+func cartonIndexOf(id string) int {
+	const prefix = "carton_"
+	if !strings.HasPrefix(id, prefix) {
+		return -1
+	}
+	n, err := strconv.Atoi(id[len(prefix):])
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// nestedBearingError validates a finished nested packing against the load-path
+// rule, returning a message or "".
+//
+// This is a validator, not a gate: the level-1 solve places cartons through the
+// flat rule using each carton's effective limit, which cannot see how load
+// routes through a carton's contents. The exact check happens here.
+func nestedBearingError(l0, l1 PackResponse, req NestedPackRequest) string {
+	if !req.Levels[0].Bearing.Enabled() && req.Levels[1].ContainerBearing == nil {
+		return ""
+	}
+	for bin, boxes := range nestedBearTree(l0, l1, req) {
+		if !d3.LoadPathOK(boxes) {
+			return fmt.Sprintf("bearing: pallet %d exceeds a load-bearing limit once load paths through the cartons are resolved", bin)
+		}
+	}
+	return ""
+}
+
+// applyCartonBearing fixes up a carton item's bearing scalars for the level-1
+// solve. The carton's scalars are the *sum* of its contents', which is right for
+// weight and meaningless for a limit — summing "what each item can bear" is not
+// "what the carton can bear".
+//
+// The effective limit is what the load path through the carton can actually
+// carry: the contents that reach its top face carry load through, so their
+// limits add up; where nothing reaches the top, the carton's own structure
+// carries it. A rigid carton always uses its own rating.
+//
+// This is the *gate's* approximation — it collapses the per-patch decomposition
+// to one number, because the flat rule at level 1 takes one number per item. The
+// exact check is nestedBearingError, run on the finished packing.
+func applyCartonBearing(it *ItemSpec, contents []PlacementResult, inner d3.BearingSpec,
+	spec *ContainerBearingSpec, l1 BearingSpec, itemScalars map[string]map[string]float64) {
+	if !l1.Enabled() {
+		return
+	}
+	sc := map[string]float64{}
+	for k, v := range it.Scalars {
+		sc[k] = v
+	}
+	sc[l1.WeightScalar] += spec.tare()
+
+	if l1.LimitScalar != "" {
+		sc[l1.LimitScalar] = cartonEffectiveLimit(it, contents, inner, spec, itemScalars)
+	}
+	if l1.PressureScalar != "" {
+		sc[l1.PressureScalar] = spec.pressure()
+	}
+	it.Scalars = sc
+}
+
+// cartonEffectiveLimit sums the limits of the contents reaching the carton's top
+// face, falling back to the carton's own rating when nothing does.
+func cartonEffectiveLimit(it *ItemSpec, contents []PlacementResult, inner d3.BearingSpec,
+	spec *ContainerBearingSpec, itemScalars map[string]map[string]float64) float64 {
+	if spec.rigid() || !inner.Enabled() {
+		return spec.limit()
+	}
+	top := it.Height
+	total, anyFlush := 0.0, false
+	for _, p := range contents {
+		if math.Abs((p.Z+p.H)-top) > 1e-9 {
+			continue // not flush with the lid: carries nothing through
+		}
+		anyFlush = true
+		limit, ok := itemScalars[p.ItemID][inner.LimitScalar]
+		if !ok {
+			limit = inner.DefaultLimit
+		}
+		total += limit
+	}
+	if !anyFlush {
+		return spec.limit()
+	}
+	return total
 }

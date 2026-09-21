@@ -515,10 +515,31 @@ Two corrections during implementation, both caught by tests:
   the contents' weight never reached the level below. Derived rather than asked of the
   caller: a forgotten sum would silently under-load everything beneath.
 
-### 11.2 Outstanding
+### 11.2 Wired to nested mode
 
-- Wire it to nested mode: build the `BearBox` tree from a two-level solve, translating the
-  inner packing into the outer frame, and surface `rigid` plus the container's own limit
-  per level / container type.
-- The constructive gate still works on the flat model. A strategy placing cartons does not
-  yet consult load paths, so the nested check is a validator rather than a gate.
+`NestedLevelSpec.Bearing` gates the items packed *at* that level, and
+`NestedLevelSpec.ContainerBearing` rates that level's bin as a load-bearing object once it
+becomes an item above — `Limit`, `Pressure`, `Rigid` and `Tare`.
+
+`nestedBearTree` rebuilds the two-level result as a `BearBox` tree (level-0 placements are
+carton-local, so each content's pallet-frame position is the carton's plus its own) and
+`nestedBearingError` checks each pallet with `LoadPathOK`.
+
+**The carton's scalars needed fixing, not just forwarding.** A carton item at level 1
+carries the *sum* of its contents' scalars, which is right for weight and meaningless for a
+limit: summing "what each item can bear" is not "what the carton can bear". The effective
+limit is now what the load path through it can carry — the limits of the contents reaching
+its lid, added up; its own rating where nothing reaches the lid; its own rating always if
+`Rigid`. Verified: a carton rated 1 with a flush post rated 500 gets an effective limit of
+500, and the same carton with a short content falls back to its own rating.
+
+### 11.3 Outstanding
+
+- **The level-1 gate is an approximation; the validator is exact.** The flat rule takes one
+  number per item, so the per-patch decomposition is collapsed to a single effective limit
+  for the carton placement, and `nestedBearingError` re-checks the finished packing
+  properly. A packing the gate admits but the load paths reject is reported as an error
+  rather than repaired — there is no fallback search. Closing that gap means teaching the
+  constructive gate about contents, which is the same step the flat model needed.
+- Demo UI for the nested bearing controls.
+- Shear strength remains deferred.
