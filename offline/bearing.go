@@ -57,3 +57,37 @@ func DecreasingBearing(limitScalar string, defaultLimit float64) SortPolicy {
 		})
 	}
 }
+
+// DecreasingAccess orders items by how often they are wanted, most-accessed
+// first, breaking ties by volume descending.
+//
+// Ordering is most of the access objective for a packer that has no intra-bin
+// scoring. Every 3-D strategy already places bottom-first and near-corner-first,
+// so whatever is offered earliest lands in the cheapest positions; handing them
+// the frequently-wanted items first is what puts those within reach. Where a
+// packer *does* score positions (joint), this still matters: it decides who gets
+// to choose from the full set of cheap spots and who chooses from what is left.
+func DecreasingAccess(freqScalar string, dflt float64) SortPolicy {
+	return func(items []pack.Item) {
+		sort.SliceStable(items, func(i, j int) bool {
+			fi := accessFreqOf(items[i], freqScalar, dflt)
+			fj := accessFreqOf(items[j], freqScalar, dflt)
+			if fi != fj {
+				return fi > fj
+			}
+			return items[i].Volume() > items[j].Volume()
+		})
+	}
+}
+
+func accessFreqOf(it pack.Item, name string, dflt float64) float64 {
+	if name == "" {
+		return dflt
+	}
+	if sc := pack.ScalarsOf(it); sc != nil {
+		if v, ok := sc[name]; ok {
+			return v
+		}
+	}
+	return dflt
+}

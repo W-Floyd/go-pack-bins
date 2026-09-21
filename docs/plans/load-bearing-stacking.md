@@ -613,3 +613,42 @@ rather than growing a parameter per constraint. Every relocation re-checks both.
 **Still outstanding from issue #1:** access priority — the soft "some items need to be
 easy to reach" constraint. It remains the hardest of the three, because `pack.Preference`
 scores *which bin* an item goes in and nothing scores *where within a bin*.
+
+## 13. Access cost (issue #1's third ask)
+
+"Most accessed versus cost to access": place the things you reach for often where
+they are cheap to reach. Unlike the first two asks this is a **soft objective** —
+a bad arrangement still packs — and the cost is caller-defined rather than fixed:
+
+    cost = Fixed
+         + PerHeight   × z
+         + PerDistance × distance from the access point to the item's nearest face
+         + Σ PerScalar[s]       × scalar(s)
+         + Σ PerHeightScalar[s] × scalar(s) × z
+
+The last term is the one that matters and the one an additive model misses:
+lifting something *heavy* to shoulder height is worse than the height and the weight
+separately suggest. `Fixed` covers "this container is slow to open at all" — a taped
+carton against a drawer. Distance is measured to the item's nearest face, not its
+centre: you reach the front of a box, not through it.
+
+The objective is `Σ frequency × cost`, with frequency read from a per-item scalar.
+
+**Two mechanisms, because one was never going to be enough.** The original
+investigation's finding still holds: `pack.Preference` scores *which bin* an item goes
+in and nothing in the library scores *where within a bin*. So:
+
+- **Ordering** (`offline.DecreasingAccess`) puts the frequently-wanted items in front of
+  the strategies' own bottom-first, corner-first placement. Works with any algorithm.
+- **Candidate scoring** (`JointFit.WithAccessCost`) ranks positions by retrieval cost
+  directly. `joint` is the only packer that scores positions within a bin, so it is the
+  only one that can act on this properly. The item's own frequency is constant across its
+  own candidates, so it changes nothing there — it decides placement *order*, which is
+  what settles who gets the cheap positions.
+
+Measured over 24 items in one 8×8×8 bin, net access cost: **2674** unaided, **2051** with
+candidate scoring, **1240** with ordering as well — and no extra bins in any case. Both
+mechanisms carry real weight, and ordering carries more of it than the scoring does.
+
+**Outstanding:** the `packapi` surface, the demo UI, and a preset. The core and the
+`joint` integration are done.

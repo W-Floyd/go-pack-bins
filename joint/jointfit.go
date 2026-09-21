@@ -37,6 +37,26 @@ type JointFit struct {
 	sloshWeight float64 // weight of the normalised neighbour-contact term (0 = off)
 	observer    pack.PlaceObserver
 	binSeq      int
+
+	// access is the retrieval-cost objective; accessWeight is its pull against
+	// the other soft objectives. Zero cost disables it.
+	access       d3.AccessCost
+	accessWeight float64
+}
+
+// WithAccessCost adds the retrieval-cost objective, returning the packer for
+// chaining. Candidates are ranked by what it would cost to get the item back
+// out — height off the floor, walk from the door, the fixed cost of opening the
+// container, and whatever per-scalar terms the caller has described.
+//
+// JointFit is the only packer that scores positions *within* a bin, so it is the
+// only one that can act on this directly. Elsewhere the objective is carried by
+// item ordering alone (offline.DecreasingAccess), which puts the
+// frequently-wanted items in front of the strategies' own bottom-first,
+// corner-first placement.
+func (j *JointFit) WithAccessCost(cost d3.AccessCost, weight float64) *JointFit {
+	j.access, j.accessWeight = cost, weight
+	return j
 }
 
 // New builds a JointFit for w×d×h bins. spec carries the support gate and the
@@ -50,7 +70,7 @@ func New(w, d, h float64, spec d3.ContactSpec, prefs []pack.Preference, weights 
 }
 
 func (j *JointFit) Name() string                  { return "joint" }
-func (j *JointFit) Observe(fn pack.PlaceObserver)  { j.observer = fn }
+func (j *JointFit) Observe(fn pack.PlaceObserver) { j.observer = fn }
 
 var _ pack.OfflinePacker = (*JointFit)(nil)
 var _ pack.Observable = (*JointFit)(nil)
@@ -160,6 +180,15 @@ func (j *JointFit) best(cands []scored, itemScalars map[string]float64) int {
 	}
 	if j.sloshWeight > 0 {
 		accumulate(j.sloshWeight, func(i int) float64 { return cands[i].c.Lateral })
+	}
+	if j.accessWeight > 0 && !j.access.Zero() {
+		// Negated: the scorer maximises, and a cheaper position is better. The
+		// item's own access frequency is a constant across its candidates, so it
+		// changes nothing here — it decides placement *order* instead, which is
+		// what settles who gets the cheap positions.
+		accumulate(j.accessWeight, func(i int) float64 {
+			return -j.access.OfCandidate(cands[i].c, itemScalars)
+		})
 	}
 
 	bestIdx := 0
