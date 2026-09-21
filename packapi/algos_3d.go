@@ -109,7 +109,27 @@ func selfManaged3D(run func(sc *solveCtx) (pack.Result, error), settle bool) sol
 // overrides). search algos decode candidate orderings through it, not sc.factory.
 func decoder3D(sc *solveCtx) pack.BinFactory {
 	spec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
-	return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, searchDecoder3D(sc.req, spec)), sc.req.Constraints)
+	return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, bearingDecoder3D(sc.req, spec)), sc.req.Constraints)
+}
+
+// bearingDecoder3D is searchDecoder3D with the bearing gate applied, and with a
+// decoder that cannot carry the gate swapped for one that can.
+//
+// Both halves matter. auto's tail (sweepRefine3D) re-packs shuffled orderings
+// through this factory and replaces the race winner if the result scores better,
+// so an ungated decoder silently undoes the constraint. And the decoder may be
+// "fit", whose FitPacker has no gate at all — wrapping it would be a no-op, so
+// bearing requests fall back to EMS, which does gate.
+func bearingDecoder3D(req PackRequest, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
+	ctor := searchDecoder3D(req, spec)
+	bs := req.Bearing.toD3()
+	if !bs.Enabled() {
+		return ctor
+	}
+	if !d3.Bearable(ctor(1, 1, 1)) {
+		ctor = d3.NewEMSStrategyContact(spec)
+	}
+	return d3.BearingStrategy(ctor, bs)
 }
 
 // searchOpts3D builds the ruin-and-recreate options, optionally driving the search
@@ -119,7 +139,8 @@ func searchOpts3D(sc *solveCtx) offline.SearchOptions {
 	sopts := sc.req.searchOptions(sc.ctx)
 	if sc.req.Decoder == "" && sc.req.optInt("search_fast_decode", 1) >= 1 {
 		spec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
-		sopts.DecodeFactory = constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, d3.NewExtremePointStrategyContact(spec)), sc.req.Constraints)
+		sopts.DecodeFactory = constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh,
+			d3.BearingStrategy(d3.NewExtremePointStrategyContact(spec), sc.req.Bearing.toD3())), sc.req.Constraints)
 	}
 	// Stop the bin-count search as soon as it proves the volume lower bound — no
 	// budget is then spent failing to beat an already-optimal count.

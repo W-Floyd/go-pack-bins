@@ -715,9 +715,31 @@ func (req PackRequest) bearingError() string {
 		return "bearing: not supported in container-catalog mode"
 	}
 	if !bearingAlgos3D[req.Algorithm] {
-		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of ff, nf, bf, wf, ffd, bfd, nfd, blf, ems, heightmap"
+		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of auto, ff, nf, bf, wf, ffd, bfd, nfd, blf, ems, heightmap"
+	}
+	// A weight scalar no item carries makes every item weightless, which silently
+	// satisfies every limit — the constraint would appear to be enforced while
+	// doing nothing. Refuse instead: a typo here is otherwise invisible.
+	if !anyItemHasScalar(req.Items, req.Bearing.WeightScalar) {
+		return "bearing: no item has a \"" + req.Bearing.WeightScalar +
+			"\" scalar, so every item would be weightless and no limit could ever be exceeded"
+	}
+	// Likewise a limit scalar nothing carries: with DefaultUnlimited every item
+	// bears anything (the constraint does nothing), and without it every item is
+	// fragile (nothing may stack at all). Neither is what the caller meant.
+	if req.Bearing.LimitScalar != "" && !anyItemHasScalar(req.Items, req.Bearing.LimitScalar) {
+		return "bearing: no item has a \"" + req.Bearing.LimitScalar + "\" scalar, so every item would take the default limit"
 	}
 	return ""
+}
+
+func anyItemHasScalar(items []ItemSpec, name string) bool {
+	for _, it := range items {
+		if _, ok := it.Scalars[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // bearingSort returns the item ordering for a bearing solve, or nil to keep the

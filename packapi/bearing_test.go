@@ -646,3 +646,75 @@ func TestAutoUnchangedWithoutBearing(t *testing.T) {
 		}
 	}
 }
+
+// auto's tail re-packs shuffled orderings through the search decoder and
+// replaces the race winner if the result scores better. That decoder builds its
+// own factory, so without the gate auto could return a crushing packing that
+// none of its racing candidates produced. It can also be "fit", whose strategy
+// has no gate at all.
+//
+// All-fragile items make this loud: nothing may stack, so every item must sit on
+// the floor and eight 5x5 footprints cannot share one 10x10 bin.
+func TestBearingAutoSweepCannotUndoTheGate(t *testing.T) {
+	for _, algo := range []string{"auto", "ffd", "ems"} {
+		t.Run(algo, func(t *testing.T) {
+			req := bearingOrderReq(algo, false)
+			req.Items = append([]ItemSpec(nil), req.Items...)
+			for i := range req.Items {
+				sc := map[string]float64{}
+				for k, v := range req.Items[i].Scalars {
+					sc[k] = v
+				}
+				sc["bearlimit"] = 0 // everything fragile
+				req.Items[i].Scalars = sc
+			}
+			resp := PackCtx(context.Background(), req)
+			if resp.Error != "" {
+				t.Fatalf("solve: %s", resp.Error)
+			}
+
+			guard := req.bearingGuard()
+			byBin := map[int][]*d3.Placement3D{}
+			for _, p := range resp.Placements {
+				byBin[p.BinIndex] = append(byBin[p.BinIndex],
+					d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+			}
+			for bin, ps := range byBin {
+				if !guard.OK(ps) {
+					t.Errorf("%s (winner %q) crushed a fragile item in bin %d", algo, resp.BestPacker, bin)
+				}
+			}
+			for _, p := range resp.Placements {
+				if p.Z > compactEpsUI {
+					t.Errorf("%s put %s at z=%v though nothing may be stacked on", algo, p.ItemID, p.Z)
+				}
+			}
+		})
+	}
+}
+
+const compactEpsUI = 1e-9
+
+// A scalar name no item carries must be refused, not silently honoured. A
+// mis-typed weight scalar makes every item weightless, so no limit can ever be
+// exceeded and the constraint looks enforced while doing nothing.
+func TestBearingRejectsScalarNamesNoItemCarries(t *testing.T) {
+	tests := []struct {
+		name string
+		mut  func(*PackRequest)
+		want string
+	}{
+		{"weight scalar absent", func(r *PackRequest) { r.Bearing.WeightScalar = "mass" }, "no item has a \"mass\" scalar"},
+		{"limit scalar absent", func(r *PackRequest) { r.Bearing.LimitScalar = "typo" }, "no item has a \"typo\" scalar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := bearingOrderReq("auto", false)
+			tt.mut(&req)
+			resp := PackCtx(context.Background(), req)
+			if !strings.Contains(resp.Error, tt.want) {
+				t.Errorf("error = %q, want it to mention %q", resp.Error, tt.want)
+			}
+		})
+	}
+}
