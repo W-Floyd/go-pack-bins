@@ -1,5 +1,7 @@
 package d3
 
+import "math"
+
 // Exclusion zones: regions of a bin that items must avoid.
 //
 // Real containers are not empty boxes. A basement has a pipe crossing it
@@ -8,14 +10,29 @@ package d3
 // they occupy no usable volume — so they cannot be modelled by pre-placing a
 // dummy item, which would both offer support and count toward utilisation.
 //
-// A zone is a pure geometric veto: no placement may overlap one. It grants no
-// support, so an item cannot sit on a pipe, and it is not occupied volume, so
-// bin utilisation and the Best/Worst-Fit selectors still measure real packing.
+// A zone is a geometric veto: no placement may overlap one. It is never occupied
+// volume, so bin utilisation and the Best/Worst-Fit selectors still measure real
+// packing.
+//
+// By default it grants no support either — nothing may rest on a pipe or in a
+// doorway. Zone.Supports opts into the other case: a ledge, a plinth or a flat
+// wheel arch is structure you can stack on, even though you cannot pack inside
+// it. That distinction is the difference between an obstacle and a surface, and
+// only the caller knows which they have.
 
 // Zone is an axis-aligned region of a bin that no item may occupy, in the bin's
 // own coordinates.
 type Zone struct {
 	X, Y, Z, W, D, H float64
+	// Supports lets items rest on the zone's top face. A pipe or a door swing
+	// carries nothing and leaves that false; a ledge, a plinth or a wheel arch
+	// with a flat top is structure, so items may sit on it.
+	//
+	// A supporting zone still blocks placement inside itself, still occupies no
+	// usable volume, and is treated as structure rather than cargo by the
+	// load-bearing rule: weight resting on it leaves the stack the way weight
+	// resting on the floor does, so it has no crush limit of its own.
+	Supports bool
 }
 
 // Empty reports whether the zone has no volume, in which case it blocks nothing.
@@ -44,6 +61,32 @@ func (zs zoneSet) blocks(x, y, z, w, d, h float64) bool {
 		}
 	}
 	return false
+}
+
+// supportArea is the contact area the supporting zones offer to a footprint
+// resting at height z. Non-supporting zones contribute nothing, so a box cannot
+// be propped on a pipe.
+//
+// Zones never overlap each other's top faces in any sane configuration, so
+// summing is exact — the same assumption footprintSupport makes about placed
+// boxes, whose tops cannot overlap because the boxes cannot.
+func (zs zoneSet) supportArea(x, y, z, w, d float64) float64 {
+	area := 0.0
+	for i := range zs {
+		s := &zs[i]
+		if !s.Supports || s.Empty() {
+			continue
+		}
+		if math.Abs(s.Z+s.H-z) > compactEps {
+			continue
+		}
+		iw := overlap1D(x, x+w, s.X, s.X+s.W)
+		id := overlap1D(y, y+d, s.Y, s.Y+s.D)
+		if iw > 0 && id > 0 {
+			area += iw * id
+		}
+	}
+	return area
 }
 
 // WithZones makes a strategy refuse any placement overlapping one of the zones,

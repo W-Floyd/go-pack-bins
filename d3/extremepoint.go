@@ -259,7 +259,9 @@ func (ep *ExtremePoint) supportFrac(x, y, z, w, d float64) float64 {
 	if footprint == 0 {
 		return 1.0
 	}
-	supported := 0.0
+	// A supporting zone is a surface like any placed box: a box may rest on a
+	// ledge, but not on a pipe.
+	supported := ep.zones.supportArea(x, y, z, w, d)
 	for _, b := range ep.placed {
 		if b.z+b.h < z-eps || b.z+b.h > z+eps {
 			continue

@@ -138,6 +138,10 @@ func (s *BottomLeftFill) supported(x, y, z, w, d float64) bool {
 	if z <= compactEps {
 		return true
 	}
+	// A ledge holds a box up; a pipe does not.
+	if s.zones.supportArea(x, y, z, w, d) > compactEps {
+		return true
+	}
 	return s.grid.anyNear(x, y, z, w, d, 0, s.placed, func(b box) bool {
 		return math.Abs(b.z+b.h-z) <= compactEps &&
 			overlap1D(x, x+w, b.x, b.x+b.w) > compactEps &&

@@ -643,6 +643,10 @@ type ZoneSpec struct {
 	W float64 `json:"w"`
 	D float64 `json:"d"`
 	H float64 `json:"h"`
+	// Supports lets items rest on the zone's top face. A pipe or a door swing
+	// carries nothing; a ledge or a plinth is structure and can take a load. The
+	// zone still blocks placement inside itself either way.
+	Supports bool `json:"supports,omitempty"`
 }
 
 // BearingSpec turns on the 3-D load-bearing constraint: no item may carry more
@@ -879,7 +883,7 @@ func (req PackRequest) zones() []d3.Zone {
 	}
 	out := make([]d3.Zone, 0, len(req.Zones))
 	for _, z := range req.Zones {
-		zz := d3.Zone{X: z.X, Y: z.Y, Z: z.Z, W: z.W, D: z.D, H: z.H}
+		zz := d3.Zone{X: z.X, Y: z.Y, Z: z.Z, W: z.W, D: z.D, H: z.H, Supports: z.Supports}
 		if !zz.Empty() {
 			out = append(out, zz)
 		}

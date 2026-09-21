@@ -139,7 +139,7 @@ func (e *EmptyMaximalSpace) gated(x, y, z, w, d float64) bool {
 	if e.contact.Bottom <= 0 && !e.contact.NoFloating {
 		return false
 	}
-	sf := footprintSupport(e.placed, x, y, z, w, d)
+	sf := footprintSupportZones(e.placed, e.zones, x, y, z, w, d)
 	if sf < e.contact.Bottom {
 		return true
 	}
@@ -331,6 +331,13 @@ func sameBox(a, b box) bool {
 // EMS and heightmap strategies. Placed boxes never overlap, so summing per-box
 // intersection areas at the same top height is exact.
 func footprintSupport(placed []box, x, y, z, w, d float64) float64 {
+	return footprintSupportZones(placed, nil, x, y, z, w, d)
+}
+
+// footprintSupportZones is footprintSupport counting the supporting exclusion
+// zones as surfaces too — a ledge holds a box up exactly as a placed box does,
+// while a pipe holds nothing.
+func footprintSupportZones(placed []box, zones zoneSet, x, y, z, w, d float64) float64 {
 	if z <= compactEps {
 		return 1
 	}
@@ -338,7 +345,7 @@ func footprintSupport(placed []box, x, y, z, w, d float64) float64 {
 	if fp == 0 {
 		return 1
 	}
-	sup := 0.0
+	sup := zones.supportArea(x, y, z, w, d)
 	for _, b := range placed {
 		if math.Abs(b.z+b.h-z) > compactEps {
 			continue

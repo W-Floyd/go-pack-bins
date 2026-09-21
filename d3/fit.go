@@ -73,7 +73,7 @@ func (f *FitPacker) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, rh
 			// floor empty ("climbing"). Require every box to rest on the bin
 			// floor or on the top faces of placed boxes, independent of the
 			// opt-in support gate above.
-			if footprintSupport(f.placed, x, y, z, w, d) <= compactEps {
+			if footprintSupportZones(f.placed, f.zones, x, y, z, w, d) <= compactEps {
 				continue
 			}
 			c := box{x, y, z, w, d, h}

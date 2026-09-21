@@ -214,6 +214,22 @@ func (hm *Heightmap) restingHeight(x, y, w, d float64) float64 {
 			}
 		}
 	}
+	// Every zone is an obstacle to drop onto, but only a supporting one is a
+	// surface to come to rest on. A non-supporting zone in the way is handled by
+	// the placement veto instead — landing on top of a pipe is not a placement
+	// the heightmap may offer.
+	for i := range hm.zones {
+		s := &hm.zones[i]
+		if s.Empty() || !s.Supports {
+			continue
+		}
+		if overlap1D(x, x+w, s.X, s.X+s.W) > compactEps &&
+			overlap1D(y, y+d, s.Y, s.Y+s.D) > compactEps {
+			if top := s.Z + s.H; top > z {
+				z = top
+			}
+		}
+	}
 	return z
 }
 
@@ -222,7 +238,7 @@ func (hm *Heightmap) gated(x, y, z, w, d float64) bool {
 	if hm.contact.Bottom <= 0 && !hm.contact.NoFloating {
 		return false
 	}
-	sf := footprintSupport(hm.placed, x, y, z, w, d)
+	sf := footprintSupportZones(hm.placed, hm.zones, x, y, z, w, d)
 	if sf < hm.contact.Bottom {
 		return true
 	}

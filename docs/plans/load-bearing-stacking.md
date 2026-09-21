@@ -652,3 +652,21 @@ mechanisms carry real weight, and ordering carries more of it than the scoring d
 
 **Outstanding:** the `packapi` surface, the demo UI, and a preset. The core and the
 `joint` integration are done.
+
+### 12.1 Load-bearing zones
+
+A keep-out is not always an obstacle. A pipe carries nothing, but a ledge, a plinth or a
+flat wheel arch is structure you can stack on even though you cannot pack inside it.
+`Zone.Supports` opts into that, and only the caller knows which they have.
+
+A supporting zone counts as a surface everywhere support is judged —
+`footprintSupportZones` (EMS, Fit, heightmap gates), `ExtremePoint.supportFrac`,
+`BottomLeftFill.supported`, and `Heightmap.restingHeight` so an item comes to rest on it
+rather than falling through. It still blocks placement inside itself, still occupies no
+usable volume, and is **structure rather than cargo** for the load-bearing rule: weight
+resting on it leaves the stack the way weight resting on the floor does, so it has no
+crush limit of its own. That falls out for free — a supporting zone is not a `BearBox`,
+so `supportersOf` finds no supporter above it and the load simply exits.
+
+The demo draws obstacles amber and load-bearing zones slate, because they behave
+differently and should not look the same.
