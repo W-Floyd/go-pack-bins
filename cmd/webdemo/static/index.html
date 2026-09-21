@@ -178,6 +178,54 @@
     transition: color 0.1s;
     flex-shrink: 0;
   }
+  .item-row .edit-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 2px;
+    line-height: 1;
+    transition: color 0.1s;
+    flex-shrink: 0;
+  }
+  .item-row .edit-btn:hover { color: var(--accent); }
+  /* an editing row grows to hold its inputs and wraps on a narrow sidebar */
+  .item-row.editing { flex-wrap: wrap; border-color: var(--accent); }
+  .item-row .edit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 52px;
+    min-width: 0;
+  }
+  .item-row .edit-field > span {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    font-family: var(--sans);
+  }
+  .item-row .edit-field > input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--panel, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: inherit;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 5px;
+  }
+  .item-row .edit-field > input:focus { outline: none; border-color: var(--accent); }
+  .item-row .edit-scalars { flex: 1 1 100%; }
+  .item-row .edit-actions { display: flex; gap: 4px; align-items: flex-end; flex-shrink: 0; }
+  .item-row .edit-err {
+    flex: 1 1 100%;
+    font-size: 10px;
+    color: var(--bad);
+    font-family: var(--sans);
+  }
   .rot-btn.rot-inherit { color: var(--muted); }
   .rot-btn.rot-on      { color: var(--accent); }
   .rot-btn.rot-off     { color: var(--bad); text-decoration: line-through; }
@@ -723,6 +771,48 @@
         </label>
       </div>
 
+      <!-- load-bearing: per-item crush limits, read from item scalars (3-D) -->
+      <div id="bearing-section" style="display:none">
+        <div class="section-label">Load-bearing (crush limits)</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+          No item carries more than its limit, counting everything stacked above it.
+          Both figures come from item scalars — set them in the Scalars field, e.g.
+          <code>weight=8, bearlimit=20</code>. A limit of 0 means fragile: nothing may
+          rest on it.
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="bearing-on" onchange="onBearingChange()"> Enforce load-bearing limits
+        </label>
+        <div id="bearing-fields" style="display:none">
+          <div class="row" style="margin-top:8px">
+            <div class="field">
+              <label>Weight scalar</label>
+              <input type="text" id="bearing-weight" value="weight" oninput="scheduleAutoPack()"
+                     style="font-family:var(--mono);font-size:12px">
+            </div>
+            <div class="field">
+              <label>Limit scalar</label>
+              <input type="text" id="bearing-limit" value="bearlimit" oninput="scheduleAutoPack()"
+                     style="font-family:var(--mono);font-size:12px">
+            </div>
+          </div>
+          <label class="checkbox-row" style="margin-top:8px">
+            <input type="checkbox" id="bearing-default-unlimited" checked onchange="scheduleAutoPack()">
+            Items with no limit scalar bear any load
+          </label>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">
+            Unchecked, an item with no limit scalar is treated as fragile — so a
+            mis-typed scalar name stops stacking rather than silently allowing a crush.
+          </div>
+          <label class="checkbox-row" id="bearing-order-row" style="margin-top:8px">
+            <input type="checkbox" id="bearing-order" onchange="onBearingChange()">
+            Order by bearing strength (load-bearers first, fragile on top)
+          </label>
+          <div id="bearing-order-note" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+          <div id="bearing-unsupported" style="display:none;font-size:11px;color:var(--warn,#d08770);margin-top:8px"></div>
+        </div>
+      </div>
+
       <!-- Lexicographic objectives: ordered priority list -->
       <div id="lex-section" style="display:none">
         <div class="section-label">Lexicographic objectives</div>
@@ -1038,6 +1128,7 @@ function onModeChange() {
   onPrefModeChange('outer');
   onPrefModeChange('inner');
   updateBalanceVisibility();
+  updateBearingVisibility();
 }
 
 // Algorithms that can host balance objectives (registry `balanceable` flag).
@@ -1271,6 +1362,7 @@ function buildItemForm(mode) {
 function onNestedToggle() {
   nestedEnabled = document.getElementById('nested-toggle').checked;
   document.getElementById('nested-inner-section').style.display = nestedEnabled ? '' : 'none';
+  updateBearingVisibility();
   document.getElementById('outer-bin-label').textContent = nestedEnabled ? 'Outer container (pallet)' : 'Bin capacity';
   if (nestedEnabled) {
     const mode = document.getElementById('mode').value;
@@ -1331,6 +1423,78 @@ function readContact() {
     c.no_floating = document.getElementById('contact-nofloat').checked;
   }
   return c;
+}
+
+// readBearing returns the load-bearing spec for the request, or null when the
+// constraint is off. It deliberately does NOT check whether the chosen algorithm
+// supports bearing: sending it anyway makes the server refuse with a message
+// naming the algorithms that do, which is better than dropping the constraint
+// silently. updateBearingVisibility warns about the same thing up front.
+function readBearing() {
+  if (document.getElementById('mode').value !== '3d') return null;
+  if (!document.getElementById('bearing-on')?.checked) return null;
+  const name = (id, dflt) => (document.getElementById(id)?.value || '').trim() || dflt;
+  return {
+    weight_scalar: name('bearing-weight', 'weight'),
+    limit_scalar: name('bearing-limit', 'bearlimit'),
+    default_unlimited: !!document.getElementById('bearing-default-unlimited')?.checked,
+    order_by_strength: !!document.getElementById('bearing-order')?.checked,
+  };
+}
+
+// setBearing restores the bearing inputs from a saved config.
+function setBearing(spec) {
+  spec = spec || {};
+  const on = document.getElementById('bearing-on');
+  if (!on) return;
+  on.checked = !!spec.enabled;
+  document.getElementById('bearing-weight').value = spec.weight_scalar || 'weight';
+  document.getElementById('bearing-limit').value = spec.limit_scalar || 'bearlimit';
+  document.getElementById('bearing-default-unlimited').checked =
+    spec.default_unlimited !== undefined ? !!spec.default_unlimited : true;
+  document.getElementById('bearing-order').checked = !!spec.order_by_strength;
+  updateBearingVisibility();
+}
+
+function onBearingChange() {
+  updateBearingVisibility();
+  scheduleAutoPack();
+}
+
+// The bearing panel shows for 3-D single-container solves. Nested mode has no
+// per-level bearing field in the API, so it is hidden there rather than offering
+// a control the request cannot carry.
+function updateBearingVisibility() {
+  const sec = document.getElementById('bearing-section');
+  if (!sec) return;
+  const threeD = document.getElementById('mode').value === '3d';
+  sec.style.display = (threeD && !nestedEnabled) ? '' : 'none';
+
+  const on = !!document.getElementById('bearing-on')?.checked;
+  document.getElementById('bearing-fields').style.display = on ? '' : 'none';
+
+  // Warn as soon as the algorithm cannot enforce it, rather than at solve time.
+  const algo = document.getElementById('algorithm').value;
+  const warn = document.getElementById('bearing-unsupported');
+  const ok = !!algoCaps(algo).bearing;
+  // Say what the ordering actually does under the chosen algorithm, so the knob
+  // never has to be guessed at.
+  const orderRow = document.getElementById('bearing-order-row');
+  const note = document.getElementById('bearing-order-note');
+  if (orderRow && note) {
+    const isAuto = algo === 'auto';
+    const sorts = ['ffd', 'bfd', 'nfd'].includes(algo);
+    orderRow.style.display = isAuto ? 'none' : '';
+    note.style.opacity = (isAuto || sorts) ? '1' : '0.55';
+    note.textContent = isAuto
+      ? 'Auto races both item orderings (largest-first and strongest-first) and keeps whichever packs into fewer bins, so there is nothing to choose here.'
+      : sorts
+        ? 'Places load-bearers first and fragile items last, so the better "heavy underneath" arrangement is reachable. The limit gate refuses a crushing placement but never reorders on its own.'
+        : `No effect on "${algo}" — it packs in arrival order. Use Auto, or one of FFD / BFD / NFD, to reorder by strength.`;
+  }
+  warn.style.display = (on && !ok) ? '' : 'none';
+  warn.textContent = ok ? '' :
+    `"${algo}" does not enforce load-bearing — pick one of the algorithms marked with it, or the solve will be refused.`;
 }
 
 // setContact sets the contact inputs from a preset spec (values in percent).
@@ -1495,6 +1659,7 @@ function onAlgorithmChange() {
   const ialgo = document.getElementById('inner-algorithm')?.value;
   document.getElementById('inner-bin-cost-field').style.display = (algoCaps(ialgo).panel === 'bincost') ? '' : 'none';
   document.getElementById('inner-lex-section').style.display = (algoCaps(ialgo).panel === 'lex') ? '' : 'none';
+  updateBearingVisibility();
   scheduleAutoPack();
 }
 
@@ -1586,6 +1751,10 @@ function renderConstraintList() {
 
 function removeItem(id) {
   items = items.filter(it => it.id !== id);
+  // Close any open editor: after a removal the row indices shift, and leaving it
+  // open would silently discard whatever was typed there on the re-render.
+  editingItemId = null;
+  editError = '';
   renderItemList();
   scheduleAutoPack();
 }
@@ -1632,6 +1801,7 @@ async function loadPreset(idx) {
   preferences = preset.preferences ? preset.preferences.map(p => ({...p})) : [];
   innerPreferences = preset.innerPreferences ? preset.innerPreferences.map(p => ({...p})) : [];
   setContact(preset.contact);
+  setBearing(preset.bearing);
   itemCounter = 0;
 
   // Nested mode toggle
@@ -1736,6 +1906,20 @@ function readContactPercent() {
   };
 }
 
+// readBearingConfig snapshots the bearing panel for export. Unlike readBearing
+// it always returns the fields, plus an `enabled` flag, so toggling the
+// constraint off and exporting does not discard the scalar names.
+function readBearingConfig() {
+  const txt = (id, dflt) => (document.getElementById(id)?.value || '').trim() || dflt;
+  return {
+    enabled: document.getElementById('bearing-on')?.checked || false,
+    weight_scalar: txt('bearing-weight', 'weight'),
+    limit_scalar: txt('bearing-limit', 'bearlimit'),
+    default_unlimited: document.getElementById('bearing-default-unlimited')?.checked || false,
+    order_by_strength: document.getElementById('bearing-order')?.checked || false,
+  };
+}
+
 function currentConfig() {
   const mode = document.getElementById('mode').value;
   const num = (id, d) => { const v = parseFloat(document.getElementById(id)?.value); return isFinite(v) ? v : d; };
@@ -1747,6 +1931,7 @@ function currentConfig() {
     nested: nestedEnabled,
     bin: { width: num('bin-w', 10), height: num('bin-h', num('bin-w', 10)), depth: num('bin-d', num('bin-w', 10)) },
     contact: readContactPercent(),
+    bearing: readBearingConfig(),
     refine_voids: document.getElementById('refine-voids')?.checked || false,
     constraints: constraints.map(c => ({ ...c })),
     preferences: preferences.map(p => ({ ...p })),
@@ -1954,6 +2139,7 @@ function applyState(s) {
   setVal('algorithm', s.algorithm);
   if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
   setContact(s.contact); // percentages, matching readContactPercent()
+  setBearing(s.bearing);
   if (document.getElementById('refine-voids')) document.getElementById('refine-voids').checked = !!s.refine_voids;
 
   // GBPP bin cost + lexicographic objectives, with their panels shown to match.
@@ -2012,6 +2198,30 @@ function importConfig(input) {
   reader.readAsText(file);
 }
 
+// editingItemId is the id of the row currently open for editing, or null. Only
+// one row edits at a time: the list can hold thousands of items, and a single
+// open editor keeps both the DOM and the commit/cancel rules simple.
+let editingItemId = null;
+// editError holds the validation message for the open editor, shown in-row;
+// editFocus names the input to focus on the next render (the offending one after
+// a failed commit, else the first dimension).
+let editError = '';
+let editFocus = 'w';
+
+// esc() escapes text interpolated into row HTML. Item ids and scalar names are
+// user-supplied and land in both attributes and markup, so they cannot be
+// trusted raw.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// scalarsToText renders an item's scalars back into the same "k=v, k=v" syntax
+// the add form accepts, so the editor round-trips through parseScalars.
+function scalarsToText(scalars) {
+  return Object.entries(scalars || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+}
+
 function renderItemList() {
   const mode = document.getElementById('mode').value;
   const el = document.getElementById('item-list');
@@ -2019,12 +2229,37 @@ function renderItemList() {
   el.innerHTML = '';
   items.forEach((it, idx) => {
     const row = document.createElement('div');
+    const swatch = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>`;
+
+    if (it.id === editingItemId) {
+      row.className = 'item-row editing';
+      const field = (key, label, value, type) =>
+        `<label class="edit-field"><span>${label}</span>` +
+        `<input type="${type}" id="edit-${key}" value="${esc(value)}"` +
+        `${type === 'number' ? ' step="any" min="0"' : ''}></label>`;
+      const dimFields = [field('w', 'W', it.width, 'number')];
+      if (mode === '3d') dimFields.push(field('d', 'D', it.depth, 'number'));
+      if (mode !== '1d') dimFields.push(field('h', 'H', it.height, 'number'));
+      row.innerHTML = `
+        ${swatch}
+        ${field('id', 'ID', it.id, 'text')}
+        ${dimFields.join('')}
+        <div class="edit-actions">
+          <button class="edit-btn" title="Save (Enter)" onclick="commitEditItem()">✓</button>
+          <button class="remove-btn" title="Cancel (Esc)" onclick="cancelEditItem()">✕</button>
+        </div>
+        <label class="edit-field edit-scalars"><span>Scalars (name=value, comma-separated)</span>
+          <input type="text" id="edit-scalars" value="${esc(scalarsToText(it.scalars))}"></label>
+        ${editError ? `<div class="edit-err">${esc(editError)}</div>` : ''}`;
+      el.appendChild(row);
+      return;
+    }
+
     row.className = 'item-row';
     let dims;
     if (mode === '1d') dims = it.width;
     else if (mode === '2d') dims = `${it.width}×${it.height}`;
     else dims = `${it.width}×${it.depth}×${it.height}`;
-    const swatch = `<div class="legend-swatch" style="background:${itemColor(idx)}"></div>`;
     const scalarStr = Object.entries(it.scalars || {}).map(([k,v]) => `${k}=${v}`).join(' ');
     let rotBtn = '';
     if (mode !== '1d') {
@@ -2032,16 +2267,103 @@ function renderItemList() {
       const rotTitle = it.allow_rotate === null ? 'rotation: inherit global default (click to override)' :
                        it.allow_rotate ? 'rotation: allowed (click to change)' :
                                          'rotation: denied (click to change)';
-      rotBtn = `<button class="rot-btn ${rotClass}" title="${rotTitle}" onclick="toggleItemRotate('${it.id}')">⟳</button>`;
+      rotBtn = `<button class="rot-btn ${rotClass}" title="${rotTitle}" onclick="toggleItemRotate('${esc(it.id)}')">⟳</button>`;
     }
     row.innerHTML = `
       ${swatch}
-      <span class="item-id">${it.id}</span>
-      <span class="item-dims">${dims}${scalarStr ? ' · ' + scalarStr : ''}</span>
+      <span class="item-id">${esc(it.id)}</span>
+      <span class="item-dims">${dims}${scalarStr ? ' · ' + esc(scalarStr) : ''}</span>
+      <button class="edit-btn" title="Edit this item" onclick="startEditItem('${esc(it.id)}')">✎</button>
       ${rotBtn}
-      <button class="remove-btn" onclick="removeItem('${it.id}')">✕</button>`;
+      <button class="remove-btn" onclick="removeItem('${esc(it.id)}')">✕</button>`;
     el.appendChild(row);
   });
+
+  // Focus the open editor's first field and wire its keyboard shortcuts. Done
+  // after append because the inputs do not exist until the row is in the DOM.
+  if (editingItemId !== null) {
+    const row = el.querySelector('.item-row.editing');
+    row?.querySelectorAll('input').forEach(inp => {
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commitEditItem(); }
+        else if (e.key === 'Escape') { e.preventDefault(); cancelEditItem(); }
+      });
+    });
+    const target = document.getElementById('edit-' + editFocus) || document.getElementById('edit-w');
+    if (target) { target.focus(); target.select(); }
+  }
+}
+
+// startEditItem opens one row for editing. Opening a second closes the first
+// without saving it — committing silently would apply edits the user never
+// confirmed.
+function startEditItem(id) {
+  editingItemId = id;
+  editError = '';
+  editFocus = 'w';
+  renderItemList();
+}
+
+function cancelEditItem() {
+  editingItemId = null;
+  editError = '';
+  editFocus = 'w';
+  renderItemList();
+}
+
+// failEdit re-renders the open editor with a message, putting the cursor on the
+// field at fault.
+function failEdit(field, msg) {
+  editError = msg;
+  editFocus = field;
+  renderItemList();
+}
+
+// commitEditItem validates the open editor and writes it back. Dimensions must
+// be positive (a zero-volume item packs meaninglessly) and the id must stay
+// unique, since results, the unplaced list and the bearing guard all key on it.
+function commitEditItem() {
+  const it = items.find(i => i.id === editingItemId);
+  if (!it) { cancelEditItem(); return; }
+  const mode = document.getElementById('mode').value;
+
+  const num = key => {
+    const el = document.getElementById('edit-' + key);
+    return el ? parseFloat(el.value) : undefined;
+  };
+  const w = num('w');
+  const h = mode === '1d' ? w : num('h');
+  const d = mode === '3d' ? num('d') : w;
+
+  const bad = [['width', w], ['height', h], ['depth', d]]
+    .find(([, v]) => !isFinite(v) || v <= 0);
+  if (bad) {
+    const field = { width: 'w', height: 'h', depth: 'd' }[bad[0]];
+    failEdit(mode === '1d' ? 'w' : field, `${bad[0]} must be a positive number`);
+    return;
+  }
+
+  const newId = (document.getElementById('edit-id')?.value || '').trim();
+  if (!newId) {
+    failEdit('id', 'id cannot be empty');
+    return;
+  }
+  if (newId !== it.id && items.some(o => o.id === newId)) {
+    failEdit('id', `id "${newId}" is already used`);
+    return;
+  }
+
+  it.id = newId;
+  it.width = w;
+  it.height = h;
+  it.depth = d;
+  it.scalars = parseScalars(document.getElementById('edit-scalars')?.value || '');
+
+  editingItemId = null;
+  editError = '';
+  editFocus = 'w';
+  renderItemList();
+  scheduleAutoPack();
 }
 
 // ── pack call ─────────────────────────────────────────────────────────────────
@@ -2190,6 +2512,8 @@ async function runSinglePack(auto = false) {
     preferences: preferences.map(p => ({ scalar: p.scalar, mode: p.mode, weight: p.weight })),
     contact: readContact(),
   };
+  const bearing = readBearing();
+  if (bearing) body.bearing = bearing;
   if (mode === '3d' && document.getElementById('refine-voids')?.checked) body.refine_voids = true;
   if (algo === 'gbpp') body.bin_cost = parseFloat(document.getElementById('bin-cost')?.value) || 0;
   if (algo === 'lex') body.lex_objectives = lexObjectives.slice();

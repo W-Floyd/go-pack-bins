@@ -67,6 +67,11 @@ func Pack(req PackRequest) PackResponse { return PackCtx(context.Background(), r
 // field. It is the core of /api/pack; the HTTP handler passes the request
 // context so a client disconnect or deadline aborts the solve.
 func PackCtx(ctx context.Context, req PackRequest) PackResponse {
+	// Catalog mode is decided before dispatch, so the bearing check has to run
+	// here too — the inner solves clear Containers and would otherwise pass.
+	if msg := req.bearingError(); msg != "" {
+		return PackResponse{Error: msg}
+	}
 	if len(req.Containers) > 0 {
 		return solveCatalog(ctx, req)
 	}
@@ -82,6 +87,9 @@ func PackCtx(ctx context.Context, req PackRequest) PackResponse {
 // fallback) funnels through, so per-algorithm dispatch can evolve in one place
 // (see the algorithm registry) without each caller re-deciding the mode.
 func dispatch(ctx context.Context, req PackRequest) (PackResponse, error) {
+	if msg := req.bearingError(); msg != "" {
+		return PackResponse{Error: msg}, nil
+	}
 	switch req.Mode {
 	case "1d":
 		return pack1D(ctx, req)
@@ -449,6 +457,10 @@ type PackRequest struct {
 	Constraints []ConstraintSpec `json:"constraints,omitempty"`
 	Preferences []PreferenceSpec `json:"preferences,omitempty"`
 	Contact     ContactSpec      `json:"contact,omitempty"` // per-face support/anti-slosh
+	// Bearing enables the 3-D load-bearing (crush) constraint. Only the
+	// algorithms in bearingAlgos3D honour it; any other rejects the request
+	// rather than ignoring the option. See BearingSpec.
+	Bearing BearingSpec `json:"bearing,omitempty"`
 	// RefineVoids enables the void-refiner post-pass (3-D only): after the solve,
 	// top-layer items are pulled down into voids to tighten each bin. Relocating,
 	// so it is delivered as a final reposition frame when streaming.
@@ -603,6 +615,136 @@ type ContactSpec struct {
 // lateralAxes reports which lateral axes have an anti-slosh target (and whether any do).
 func (c ContactSpec) lateralAxes() (doX, doY, any bool) {
 	return c.SideX > 0, c.SideY > 0, c.SideX > 0 || c.SideY > 0
+}
+
+// BearingSpec turns on the 3-D load-bearing constraint: no item may carry more
+// weight on its top face, transitively, than its limit allows. Both figures come
+// from named item scalars, matching how MinimizeCG names its mass scalar.
+//
+// A zero BearingSpec (empty WeightScalar) disables it. This is a static crush
+// model, not a dynamic-stability one.
+type BearingSpec struct {
+	// WeightScalar names the item scalar holding each item's weight. Empty
+	// disables bearing.
+	WeightScalar string `json:"weight_scalar,omitempty"`
+	// LimitScalar names the item scalar holding each item's bearing limit. An
+	// item whose limit is zero is fragile: nothing may rest on it.
+	LimitScalar string `json:"limit_scalar,omitempty"`
+	// DefaultLimit applies to items carrying no LimitScalar value. It defaults to
+	// zero — i.e. fragile — so that a mis-named limit scalar yields a packing that
+	// refuses to stack rather than one that silently permits every crush. Set
+	// DefaultUnlimited to make unlisted items bear anything instead.
+	DefaultLimit float64 `json:"default_limit,omitempty"`
+	// DefaultUnlimited makes items with no limit scalar bear any load, for the
+	// common case where only a few items are fragile. It overrides DefaultLimit.
+	DefaultUnlimited bool `json:"default_unlimited,omitempty"`
+	// OrderByStrength sorts items strongest-first so load-bearers reach the floor
+	// and fragile items finish on top, instead of the usual largest-first order.
+	// It applies to the sorting algorithms (ffd/bfd/nfd) only: the online ones
+	// pack in arrival order by definition, and reordering them would not be
+	// online packing any more.
+	//
+	// Off by default. The gate alone only refuses a crushing placement, so a large
+	// fragile item can take the floor and force everything heavy into a new bin;
+	// this makes the "heavy underneath, fragile on top" arrangement reachable. It
+	// is roughly neutral on instances where bearing and volume order do not
+	// conflict — see offline.DecreasingBearing for the measurements.
+	OrderByStrength bool `json:"order_by_strength,omitempty"`
+}
+
+// Enabled reports whether the spec turns the bearing constraint on.
+func (b BearingSpec) Enabled() bool { return b.WeightScalar != "" }
+
+// toD3 converts the request-level spec to the d3 one, resolving the default
+// limit. JSON cannot carry d3.NoLimit as a number, hence the separate flag.
+func (b BearingSpec) toD3() d3.BearingSpec {
+	lim := b.DefaultLimit
+	if b.DefaultUnlimited {
+		lim = d3.NoLimit
+	}
+	return d3.BearingSpec{
+		WeightScalar: b.WeightScalar,
+		LimitScalar:  b.LimitScalar,
+		DefaultLimit: lim,
+	}
+}
+
+// bearingAlgos3D lists the 3-D algorithms that actually enforce the bearing
+// gate: those whose placement runs through a strategy with a candidate loop
+// (extreme-point, EMS, BLF, heightmap) that the gate hooks into.
+//
+// Everything else is excluded on purpose rather than by oversight:
+//   - "fit" and "layer" are strategy-backed but their strategies (FitPacker,
+//     LayerStack) have no bearing gate;
+//   - "blocks", "columns", "assemble", "laff", "brute" and "joint" build
+//     placements directly and never consult a strategy at all;
+//   - "auto" is included: it races only the gate-enforcing candidates, and both
+//     item orderings, so it needs no guidance from the user (see auto3DPlans);
+//   - "beam", "rr", "arr", "grasp" decode orderings through a strategy but also
+//     relocate during search, which has not been validated against the gate;
+//   - "gbpp", "lex", "strip", "knapsack", "catalog" have their own solve paths.
+//
+// A request asking for bearing on any of these is refused, not silently packed
+// without the constraint. TestBearingAlgosEnforce keeps this list honest.
+var bearingAlgos3D = map[string]bool{
+	"ff": true, "nf": true, "bf": true, "wf": true,
+	"ffd": true, "bfd": true, "nfd": true,
+	"blf": true, "ems": true, "heightmap": true,
+	// auto races only the candidates that enforce the gate, and races both item
+	// orderings, so it reaches the best legal packing on its own — see
+	// auto3DPlans.
+	"auto": true,
+}
+
+// BearingSupported reports whether an algorithm enforces the bearing constraint
+// in the given mode. Bearing is 3-D only.
+func BearingSupported(mode, algo string) bool {
+	return mode == "3d" && bearingAlgos3D[algo]
+}
+
+// bearingError returns the request-rejection message when bearing is asked for
+// but unavailable, or "" when the request is fine.
+func (req PackRequest) bearingError() string {
+	if !req.Bearing.Enabled() {
+		return ""
+	}
+	if req.Mode != "3d" {
+		return "bearing: the load-bearing constraint is 3-D only"
+	}
+	if len(req.Containers) > 0 {
+		return "bearing: not supported in container-catalog mode"
+	}
+	if !bearingAlgos3D[req.Algorithm] {
+		return "bearing: algorithm " + req.Algorithm + " does not enforce load-bearing; use one of ff, nf, bf, wf, ffd, bfd, nfd, blf, ems, heightmap"
+	}
+	return ""
+}
+
+// bearingSort returns the item ordering for a bearing solve, or nil to keep the
+// algorithm's own. Only the sorting algorithms consult it.
+func (req PackRequest) bearingSort() offline.SortPolicy {
+	if !req.Bearing.Enabled() || !req.Bearing.OrderByStrength {
+		return nil
+	}
+	d := req.Bearing.toD3()
+	return offline.DecreasingBearing(d.LimitScalar, d.DefaultLimit)
+}
+
+// bearingGuard builds the post-pass guard from the request's items. Returns nil
+// when bearing is off, which every guarded post-pass treats as permissive.
+func (req PackRequest) bearingGuard() *d3.BearingGuard {
+	if !req.Bearing.Enabled() {
+		return nil
+	}
+	scalars := make(map[string]map[string]float64, len(req.Items))
+	for _, it := range req.Items {
+		sc := make(map[string]float64, len(it.Scalars))
+		for k, v := range it.Scalars {
+			sc[k] = v
+		}
+		scalars[it.ID] = sc
+	}
+	return d3.NewBearingGuard(req.Bearing.toD3(), scalars)
 }
 
 type PlacementResult struct {
@@ -821,6 +963,13 @@ func snapshotFromCtx(ctx context.Context) func(pack.Result) {
 }
 
 func StreamPack(ctx context.Context, req PackRequest, send func(StreamFrame)) {
+	// Reject an unenforceable bearing request before any frame is emitted, so a
+	// streaming caller gets the same refusal a unary one does rather than a
+	// packing silently missing the constraint.
+	if msg := req.bearingError(); msg != "" {
+		send(StreamFrame{Type: "error", Error: msg})
+		return
+	}
 	// Serialize all frame emission: the slow solvers report progress from worker
 	// goroutines (and streamAuto's candidates stream concurrently), so wrap send in
 	// a mutex once here and use it everywhere downstream.
@@ -1167,9 +1316,9 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 		// heightmap / layer / blocks). Placement-time gates apply here; any
 		// relocating post-pass (settle, lateral compaction) runs after the live
 		// stream and is delivered as a final reposition frame.
-		stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
+		stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
 			Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating,
-		})
+		}, req.Bearing.toD3())
 		factory = constrainedFactory(d3.NewFactory(req.Bin.Width, req.Bin.Depth, req.Bin.Height, stratFn), req.Constraints)
 		for _, spec := range req.Items {
 			it := d3.NewItem(spec.ID, spec.Width, spec.Depth, spec.Height, spec.AllowRotate)
@@ -1197,12 +1346,13 @@ func streamSolve(ctx context.Context, req PackRequest, emit func(PlacementResult
 	moved := false
 	switch req.Mode {
 	case "3d":
+		guard := req.bearingGuard()
 		if req.Algorithm == "layer" || req.Algorithm == "blocks" || req.Algorithm == "columns" {
-			settleResult3D(result) // drop items left floating above a short layer/slice cell
+			settleResult3DGuarded(result, guard) // drop items left floating above a short layer/slice cell
 			moved = true
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
-			compactResult3D(result, req.Bin.Width, req.Bin.Depth, req.Bin.Height, dx, dy, req.Contact.Bottom)
+			compactResult3DGuarded(result, req.Bin.Width, req.Bin.Depth, req.Bin.Height, dx, dy, req.Contact.Bottom, guard)
 			moved = true
 		}
 		if req.RefineVoids {
@@ -1284,10 +1434,19 @@ func buildStreamPacker(ctx context.Context, req PackRequest, factory pack.BinFac
 	case "nfdh", "ffdh", "bfdh": // shelf factory + decreasing-height sort
 		return wrap(offline.New(shelfLabel[req.Algorithm], offline.DecreasingHeight, online.FirstFit(factory)))
 	case "ffd":
+		if p := req.bearingSort(); p != nil {
+			return wrap(offline.New("FFD", p, online.FirstFit(factory)))
+		}
 		return wrap(offline.FirstFitDecreasing(factory))
 	case "bfd":
+		if p := req.bearingSort(); p != nil {
+			return wrap(offline.New("BFD", p, online.BestFit(factory)))
+		}
 		return wrap(offline.BestFitDecreasing(factory))
 	case "nfd":
+		if p := req.bearingSort(); p != nil {
+			return wrap(offline.New("NFD", p, online.NextFit(factory)))
+		}
 		return wrap(offline.NextFitDecreasing(factory))
 	case "layer": // 3-D layered packing: sort tallest-flat-first, fill layers in turn
 		return wrap(offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(factory)))
@@ -1367,26 +1526,23 @@ func autoCandidates(ctx context.Context, req PackRequest) []candidate {
 		}
 	case "3d":
 		spec := d3.ContactSpec{Bottom: req.Contact.Bottom, NoFloating: req.Contact.NoFloating}
+		bearSpec := req.Bearing.toD3()
 		bw, bd, bh := req.Bin.Width, req.Bin.Depth, req.Bin.Height
 		strat := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DFor(algo, spec)), req.Constraints)
+			return constrainedFactory(d3.NewFactory(bw, bd, bh, strat3DForBearing(algo, spec, bearSpec)), req.Constraints)
 		}
-		cands := []candidate{
-			// Corner / maximal-space methods over the constrained factory (honour
-			// weight/category constraints).
-			wrap("FFD", offline.FirstFitDecreasing(strat("")), items3D(req)),
-			wrap("BFD", offline.BestFitDecreasing(strat("")), items3D(req)),
-			wrap("NFD", offline.NextFitDecreasing(strat("")), items3D(req)),
-			wrap("BLF", offline.FirstFitDecreasing(strat("blf")), items3D(req)),
-			wrap("EMS", offline.FirstFitDecreasing(strat("ems")), items3D(req)),
-			wrap("Fit", offline.FirstFitDecreasing(strat("fit")), items3D(req)),
-			wrap("Heightmap", offline.FirstFitDecreasing(strat("heightmap")), items3D(req)),
-			wrap("Layer", offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(strat("layer"))), items3D(req)),
+		// Corner / maximal-space methods over the constrained factory (honour
+		// weight/category constraints). auto3DPlans is shared with the registry
+		// solver so both races contain exactly the same candidates.
+		var cands []candidate
+		for _, pl := range auto3DPlans(req) {
+			cands = append(cands, wrap(pl.label, pl.build(strat(pl.strat)), items3D(req)))
 		}
 		// Block / fusion / LAFF packers manage their own bins and ignore the
-		// factory, so they cannot honour constraints — only race them when none
-		// are set, else they could win with a constraint-violating packing.
-		if len(req.Constraints) == 0 {
+		// factory, so they honour neither constraints nor the bearing gate — only
+		// race them when neither is set, else they could win with an infeasible
+		// packing.
+		if autoSelfManaged3D(req) {
 			bp := d3.NewBlockPacker(bw, bd, bh)
 			as := d3.NewAssembler(bw, bd, bh)
 			cands = append(cands,
@@ -1755,6 +1911,20 @@ func buildResponse2D(result pack.Result, includeGuillotineFree bool) PackRespons
 // NoFloating); only extreme-point also uses the lateral SideX/SideY targets — the
 // others leave anti-slosh to the separate compaction pass.
 func strat3DFor(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
+	return strat3DForBearing(algo, spec, d3.BearingSpec{})
+}
+
+// strat3DForBearing is strat3DFor with the load-bearing gate layered on. A
+// disabled spec leaves the strategy exactly as strat3DFor returns it.
+//
+// Every 3-D factory a bearing-capable algorithm can reach must be built through
+// this, not strat3DFor: streamSolve builds its own factory, and gating only
+// pack3D left every streamable algorithm silently unconstrained.
+func strat3DForBearing(algo string, spec d3.ContactSpec, bs d3.BearingSpec) func(w, d, h float64) d3.PlacementStrategy3D {
+	return d3.BearingStrategy(strat3DForPlain(algo, spec), bs)
+}
+
+func strat3DForPlain(algo string, spec d3.ContactSpec) func(w, d, h float64) d3.PlacementStrategy3D {
 	switch algo {
 	case "blf":
 		return d3.NewBottomLeftFillStrategy
@@ -1798,10 +1968,10 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 	// The placement strategy follows the algorithm (extreme-point / blf / ems /
 	// heightmap / layer); all read the contact spec (Bottom → hard support gate,
 	// SideX/SideY → contact-maximizing placement, used only by extreme-point).
-	stratFn := strat3DFor(req.Algorithm, d3.ContactSpec{
+	stratFn := strat3DForBearing(req.Algorithm, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY,
 		NoFloating: req.Contact.NoFloating,
-	})
+	}, req.Bearing.toD3())
 	factory := constrainedFactory(d3.NewFactory(bw, bd, bh, stratFn), req.Constraints)
 
 	items := make([]pack.Item, len(req.Items))
@@ -1821,7 +1991,7 @@ func pack3D(ctx context.Context, req PackRequest) (PackResponse, error) {
 			return PackResponse{Error: perr.Error()}, nil
 		}
 		if dx, dy, any := req.Contact.lateralAxes(); any {
-			compactResult3D(result, bw, bd, bh, dx, dy, req.Contact.Bottom)
+			compactResult3DGuarded(result, bw, bd, bh, dx, dy, req.Contact.Bottom, req.bearingGuard())
 		}
 		resp := buildResponse3D(result)
 		resp.BestPacker = best
@@ -2090,6 +2260,13 @@ func binImbalance(r pack.Result, items []pack.Item) float64 {
 // compactResult3D slides each bin's items toward the lateral walls to remove
 // slosh (in place on the d3 placements).
 func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support float64) {
+	compactResult3DGuarded(r, bw, bd, bh, doX, doY, support, nil)
+}
+
+// compactResult3DGuarded is compactResult3D with a load-bearing guard: a slide
+// that would crush an item is reverted. Compaction is support-preserving but not
+// bearing-preserving, so a gated pack must compact through the guard.
+func compactResult3DGuarded(r pack.Result, bw, bd, bh float64, doX, doY bool, support float64, guard *d3.BearingGuard) {
 	byBin := map[string][]*d3.Placement3D{}
 	for _, p := range r.Placements {
 		if pl, ok := p.(*d3.Placement3D); ok {
@@ -2097,7 +2274,7 @@ func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support f
 		}
 	}
 	for _, ps := range byBin {
-		d3.Compact(ps, bw, bd, bh, doX, doY, support)
+		d3.CompactGuarded(ps, bw, bd, bh, doX, doY, support, guard)
 	}
 }
 
@@ -2105,7 +2282,12 @@ func compactResult3D(r pack.Result, bw, bd, bh float64, doX, doY bool, support f
 // the layered packers, whose layer-ceiling placement can leave an item hanging over
 // a shorter item below. It relocates committed items, so algorithms that use it
 // can't stream (see isStreamable).
-func settleResult3D(r pack.Result) {
+func settleResult3D(r pack.Result) { settleResult3DGuarded(r, nil) }
+
+// settleResult3DGuarded is settleResult3D with a load-bearing guard. No
+// currently bearing-capable algorithm settles, but guarding it keeps a future
+// one from bypassing the constraint silently.
+func settleResult3DGuarded(r pack.Result, guard *d3.BearingGuard) {
 	byBin := map[string][]*d3.Placement3D{}
 	for _, p := range r.Placements {
 		if pl, ok := p.(*d3.Placement3D); ok {
@@ -2113,7 +2295,7 @@ func settleResult3D(r pack.Result) {
 		}
 	}
 	for _, ps := range byBin {
-		d3.Settle(ps)
+		d3.SettleGuarded(ps, guard)
 	}
 }
 
@@ -2137,7 +2319,7 @@ func refineResult3D(ctx context.Context, r pack.Result, req PackRequest) {
 	}
 	d3.RefineVoids(ctx, ps, orients, req.Bin.Width, req.Bin.Depth, req.Bin.Height, d3.ContactSpec{
 		Bottom: req.Contact.Bottom, SideX: req.Contact.SideX, SideY: req.Contact.SideY, NoFloating: req.Contact.NoFloating,
-	}, d3.RefineOptions{})
+	}, d3.RefineOptions{Bearing: req.bearingGuard()})
 }
 
 // compactResult2D is the 2-D equivalent of compactResult3D.

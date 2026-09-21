@@ -24,6 +24,7 @@ type Heightmap struct {
 	// flattest orientation, rather than the lowest base z. Used for a final flat
 	// layer where nothing rests above, so the peak — not the base — is what matters.
 	minTop bool
+	bear   *bearState // nil unless the load-bearing gate is enabled
 }
 
 // NewHeightmap creates a heightmap strategy for a bin of the given dimensions.
@@ -41,8 +42,13 @@ func NewHeightmapStrategy(w, d, h float64) PlacementStrategy3D {
 // further items on its true per-footprint surface — used to place a block pack's
 // final-layer leftovers at their lowest resting height rather than high.
 func (hm *Heightmap) Occupy(x, y, z, w, d, h float64) {
+	hm.bear.occupy(x, y, z, w, d, h)
 	hm.placed = append(hm.placed, box{x, y, z, w, d, h})
 	hm.usedVol += w * d * h
+}
+
+func (hm *Heightmap) setPendingItem(scalars map[string]float64) {
+	hm.bear.setPendingItem(scalars)
 }
 
 // NewHeightmapStrategyContact returns a Factory3D-compatible constructor that
@@ -126,7 +132,7 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 				if z+h > hm.binH+compactEps {
 					continue
 				}
-				if hm.gated(x, y, z, w, d) {
+				if hm.gated(x, y, z, w, d) || !hm.bear.allows(x, y, z, w, d, h) {
 					continue
 				}
 				c := box{x, y, z, w, d, h}
@@ -144,6 +150,7 @@ func (hm *Heightmap) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd, r
 	if !bestSet {
 		return 0, 0, 0, 0, 0, 0, false
 	}
+	hm.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	hm.placed = append(hm.placed, best)
 	hm.usedVol += best.w * best.d * best.h
 	return best.x, best.y, best.z, best.w, best.d, best.h, true

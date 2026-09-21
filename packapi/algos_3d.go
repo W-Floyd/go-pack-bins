@@ -70,7 +70,7 @@ func finishRefine3D(sc *solveCtx, r pack.Result) pack.Result {
 // used by the sequential/strategy packers.
 func finishCompact3D(sc *solveCtx, r pack.Result) pack.Result {
 	if dx, dy, any := sc.req.Contact.lateralAxes(); any {
-		compactResult3D(r, sc.bw, sc.bd, sc.bh, dx, dy, sc.req.Contact.Bottom)
+		compactResult3DGuarded(r, sc.bw, sc.bd, sc.bh, dx, dy, sc.req.Contact.Bottom, sc.req.bearingGuard())
 	}
 	return r
 }
@@ -172,13 +172,25 @@ func init() {
 	reg("wf", compact3D(func(sc *solveCtx) (pack.Result, error) {
 		return runOnline(sc.ctx, online.WorstFit(sc.factory), sc.items)
 	}))
+	// The decreasing packers honour a bearing ordering when the request asks for
+	// one: with the default volume order a large fragile item takes the floor and
+	// forces the heavy items into a new bin, which the gate alone cannot fix.
 	reg("ffd", compact3D(func(sc *solveCtx) (pack.Result, error) {
+		if p := sc.req.bearingSort(); p != nil {
+			return packAllCtx(sc.ctx, offline.New("FFD", p, online.FirstFit(sc.factory)), sc.items)
+		}
 		return packAllCtx(sc.ctx, offline.FirstFitDecreasing(sc.factory), sc.items)
 	}))
 	reg("bfd", compact3D(func(sc *solveCtx) (pack.Result, error) {
+		if p := sc.req.bearingSort(); p != nil {
+			return packAllCtx(sc.ctx, offline.New("BFD", p, online.BestFit(sc.factory)), sc.items)
+		}
 		return packAllCtx(sc.ctx, offline.BestFitDecreasing(sc.factory), sc.items)
 	}))
 	reg("nfd", compact3D(func(sc *solveCtx) (pack.Result, error) {
+		if p := sc.req.bearingSort(); p != nil {
+			return packAllCtx(sc.ctx, offline.New("NFD", p, online.NextFit(sc.factory)), sc.items)
+		}
 		return packAllCtx(sc.ctx, offline.NextFitDecreasing(sc.factory), sc.items)
 	}))
 	reg("layer", compact3D(func(sc *solveCtx) (pack.Result, error) {
@@ -238,20 +250,15 @@ func init() {
 	// auto: mirror autoCandidates so Pack and StreamPack pick the same winner.
 	reg("auto", compact3D2(func(sc *solveCtx) (pack.Result, string, error) {
 		gateSpec := d3.ContactSpec{Bottom: sc.req.Contact.Bottom, NoFloating: sc.req.Contact.NoFloating}
+		bearSpec := sc.req.Bearing.toD3()
 		stratF := func(algo string) pack.BinFactory {
-			return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, strat3DFor(algo, gateSpec)), sc.req.Constraints)
+			return constrainedFactory(d3.NewFactory(sc.bw, sc.bd, sc.bh, strat3DForBearing(algo, gateSpec, bearSpec)), sc.req.Constraints)
 		}
-		cands := []pack.OfflinePacker{
-			offline.FirstFitDecreasing(sc.factory),
-			offline.BestFitDecreasing(sc.factory),
-			offline.NextFitDecreasing(sc.factory),
-			offline.FirstFitDecreasing(stratF("blf")),
-			offline.FirstFitDecreasing(stratF("ems")),
-			offline.FirstFitDecreasing(stratF("fit")),
-			offline.FirstFitDecreasing(stratF("heightmap")),
-			offline.New("Layer", offline.DecreasingLayerHeight, online.FirstFit(stratF("layer"))),
+		var cands []pack.OfflinePacker
+		for _, pl := range auto3DPlans(sc.req) {
+			cands = append(cands, pl.build(stratF(pl.strat)))
 		}
-		if len(sc.req.Constraints) == 0 {
+		if autoSelfManaged3D(sc.req) {
 			cands = append(cands, d3.NewBlockPacker(sc.bw, sc.bd, sc.bh), d3.NewAssembler(sc.bw, sc.bd, sc.bh), d3.NewLAFFPacker(sc.bw, sc.bd, sc.bh))
 		}
 		p := meta.BestOf(cands...)
@@ -276,4 +283,73 @@ func compact3D2(run func(sc *solveCtx) (pack.Result, string, error)) solveFn {
 		}
 		return finishCompact3D(sc, r), solveMeta{bestPacker: best}, nil
 	}
+}
+
+// auto3DPlan is one candidate in auto's 3-D race: a placement strategy, an item
+// ordering, and the online packer that drives them.
+type auto3DPlan struct {
+	label  string
+	strat  string             // key for strat3DForBearing ("" = extreme-point)
+	policy offline.SortPolicy // nil means offline.DecreasingVolume
+	online func(pack.BinFactory) *online.Packer
+}
+
+// auto3DPlans is auto's 3-D candidate list. It exists in one place because the
+// registry solver and autoCandidates (the streaming mirror) must race the same
+// set — otherwise Pack and StreamPack pick different winners.
+//
+// With bearing enabled the set changes in two ways. Candidates whose strategies
+// cannot enforce the gate are dropped, for the same reason the self-managing
+// packers are dropped when constraints are set: they would win the race with a
+// packing that violates the constraint. And strength-ordered variants of the
+// sorting packers are added, because the gate refuses crushing placements but
+// never reorders — so with volume order alone a large fragile item takes the
+// floor and forces a second bin. Racing both orderings means "auto" finds the
+// better arrangement without the user having to know the ordering exists.
+func auto3DPlans(req PackRequest) []auto3DPlan {
+	bear := req.Bearing.Enabled()
+	plans := []auto3DPlan{
+		{label: "FFD", online: online.FirstFit},
+		{label: "BFD", online: online.BestFit},
+		{label: "NFD", online: online.NextFit},
+		{label: "BLF", strat: "blf", online: online.FirstFit},
+		{label: "EMS", strat: "ems", online: online.FirstFit},
+	}
+	if !bear {
+		// FitPacker and LayerStack have no bearing gate (see bearingAlgos3D).
+		plans = append(plans,
+			auto3DPlan{label: "Fit", strat: "fit", online: online.FirstFit},
+			auto3DPlan{label: "Layer", strat: "layer", policy: offline.DecreasingLayerHeight, online: online.FirstFit},
+		)
+		return plans
+	}
+	plans = append(plans, auto3DPlan{label: "Heightmap", strat: "heightmap", online: online.FirstFit})
+
+	d := req.Bearing.toD3()
+	byStrength := offline.DecreasingBearing(d.LimitScalar, d.DefaultLimit)
+	return append(plans,
+		auto3DPlan{label: "FFD·strength", policy: byStrength, online: online.FirstFit},
+		auto3DPlan{label: "BFD·strength", policy: byStrength, online: online.BestFit},
+		auto3DPlan{label: "NFD·strength", policy: byStrength, online: online.NextFit},
+		auto3DPlan{label: "BLF·strength", strat: "blf", policy: byStrength, online: online.FirstFit},
+		auto3DPlan{label: "EMS·strength", strat: "ems", policy: byStrength, online: online.FirstFit},
+		auto3DPlan{label: "Heightmap·strength", strat: "heightmap", policy: byStrength, online: online.FirstFit},
+	)
+}
+
+// build turns a plan into an offline packer over the given factory.
+func (p auto3DPlan) build(factory pack.BinFactory) *offline.Wrapper {
+	policy := p.policy
+	if policy == nil {
+		policy = offline.DecreasingVolume
+	}
+	return offline.New(p.label, policy, p.online(factory))
+}
+
+// autoSelfManaged3D reports whether auto may race the packers that build their
+// own bins (blocks / assemble / LAFF). They ignore the factory, so they honour
+// neither scalar constraints nor the bearing gate and would otherwise win the
+// race with an infeasible packing.
+func autoSelfManaged3D(req PackRequest) bool {
+	return len(req.Constraints) == 0 && !req.Bearing.Enabled()
 }

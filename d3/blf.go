@@ -17,6 +17,11 @@ type BottomLeftFill struct {
 
 	grid   *boxGrid     // spatial index over placed for O(local) conflict/support
 	cnrBuf [][3]float64 // reused candidate-corner scratch
+	bear   *bearState   // nil unless the load-bearing gate is enabled
+}
+
+func (s *BottomLeftFill) setPendingItem(scalars map[string]float64) {
+	s.bear.setPendingItem(scalars)
 }
 
 // NewBottomLeftFill creates a BLF strategy for a bin of the given dimensions.
@@ -56,7 +61,8 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 			if x+w > s.binW+compactEps || y+d > s.binD+compactEps || z+h > s.binH+compactEps {
 				continue
 			}
-			if s.conflicts(x, y, z, w, d, h) || !s.supported(x, y, z, w, d) {
+			if s.conflicts(x, y, z, w, d, h) || !s.supported(x, y, z, w, d) ||
+				!s.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
@@ -68,6 +74,7 @@ func (s *BottomLeftFill) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, r
 	if !bestSet {
 		return 0, 0, 0, 0, 0, 0, false
 	}
+	s.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	s.grid.insert(int32(len(s.placed)), best)
 	s.placed = append(s.placed, best)
 	s.usedVol += best.w * best.d * best.h

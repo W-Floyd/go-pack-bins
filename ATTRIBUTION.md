@@ -88,10 +88,14 @@ Clean-room implementations of methods/objectives surveyed there (ideas, not code
 | GRASP (greedy randomized adaptive search) | Correcher et al. (2017); Calzavara et al. (2021) | [`offline/metaheuristic.go`](offline/metaheuristic.go) |
 | Beam search (bounded tree search over placement order) | Araya et al. (2020); Parreño et al. (2020) | [`offline/beam.go`](offline/beam.go) |
 | Lexicographic multi-objective selection | Bin packing with lexicographic objectives (2022) | [`meta/lexicographic.go`](meta/lexicographic.go) |
+| Bearing-aware item ordering: place load-bearers on the floor and fragile items last, so a crush-free arrangement is reachable (opt-in; `auto` races it against volume order) | Ratcliff & Bischoff (1998); Bischoff (2006) layer-from-floor schemes | [`offline/bearing.go`](offline/bearing.go) |
+| Load-bearing / crush constraint: per-item limit on the weight its top face may carry, accumulated transitively up the support stack and apportioned across supporters by contact area (`bearLimit = 0` gives fragility) | Bischoff (2006), *EJOR* 168(3); Junqueira, Morabito & Yamashita (2012), *C&OR* 39(1); Ratcliff & Bischoff (1998) layer-from-floor scheme | [`d3/bearing.go`](d3/bearing.go) |
 
-Not yet implemented (larger, geometric — candidates for future work): load-bearing
-/ support-fraction and fragile-on-top constraints (Gzara et al. 2020; Paquay et
-al. 2018), and multi-drop / LIFO unload ordering (Gimenez-Palacios et al. 2023).
+Not yet implemented (larger, geometric — candidates for future work): multi-drop /
+LIFO unload ordering (Gimenez-Palacios et al. 2023). Load-bearing is implemented as
+a *static crush* model (see above); stacking *classes* and per-up-face bearing limits
+(Gzara et al. 2020; Paquay et al. 2018) are not — the latter needs an orientation
+index the box placement path does not carry.
 The existing *incompatible-items* constraint already covers the conflict / type-
 compatibility line (Goldberg & Karhi 2019; Chen et al. 2025).
 

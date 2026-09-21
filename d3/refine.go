@@ -61,6 +61,11 @@ type RefineOptions struct {
 	WidenVoids  int // sealed voids attempted per widening pass (default 8)
 	WidenAdj    int // adjoining items tried per void (default 4)
 	MaxSubtree  int // skip widening an item whose support sub-stack exceeds this (default 8)
+	// Bearing, when set, rejects any re-drop that would crush an item. The
+	// refiner rebuilds free space from geometry alone and re-inserts through an
+	// ungated ExtremePoint, so without this a refined bin can violate limits the
+	// constructive gate enforced.
+	Bearing *BearingGuard
 }
 
 func (o RefineOptions) withDefaults() RefineOptions {
@@ -98,7 +103,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 	// when a bottom-support fraction is required, since a straight drop can land a
 	// box on a partial support and violate that gate (the EP re-drop honours it).
 	if spec.Bottom <= compactEps {
-		if gravitySettle(bin) {
+		if gravitySettle(bin, opts.Bearing) {
 			moved = true
 		}
 	}
@@ -123,7 +128,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 			if err := ctx.Err(); err != nil {
 				return moved
 			}
-			if tryLower(bin, i, orients, w, d, h, rs) {
+			if tryLower(bin, i, orients, w, d, h, rs, opts.Bearing) {
 				improved = true
 			}
 		}
@@ -145,7 +150,7 @@ func refineBin(ctx context.Context, bin []*Placement3D, orients map[string][][3]
 // Lowering a removable item is always overlap-free and grounded (EMS with
 // NoFloating); the J check guards against a re-orientation that would raise the
 // peak. Returns whether it moved the item.
-func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec) bool {
+func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *BearingGuard) bool {
 	// Extreme-point placement (grid-accelerated) finds the lowest feasible spot in
 	// ~O(k·local), vs the maximal-space prune's O(k²) — this is what lets the
 	// refiner scale to large bins. It commits the other boxes, then drops item i.
@@ -172,8 +177,17 @@ func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, 
 	if !jLess(newJ, oldJ) {
 		return false
 	}
+	wasX, wasY, wasZ := old.X, old.Y, old.Z
+	wasW, wasD, wasH := old.W, old.D, old.H
 	bin[i].X, bin[i].Y, bin[i].Z = x, y, z
 	bin[i].W, bin[i].D, bin[i].H = pw, pd, ph
+	// The re-drop is geometry-only; lowering an item puts its weight on whatever
+	// it now rests on, which the extreme-point search never considered.
+	if !guard.OK(bin) {
+		bin[i].X, bin[i].Y, bin[i].Z = wasX, wasY, wasZ
+		bin[i].W, bin[i].D, bin[i].H = wasW, wasD, wasH
+		return false
+	}
 	return true
 }
 
@@ -181,12 +195,20 @@ func tryLower(bin []*Placement3D, i int, orients map[string][][3]float64, w, d, 
 // highest top beneath its footprint (the existing Settle), reporting whether any
 // item actually moved. It is the cheap vertical pre-pass: O(k²), no lateral
 // search, and it lowers whole sub-stacks the leaf-only refiner can't touch.
-func gravitySettle(bin []*Placement3D) bool {
+func gravitySettle(bin []*Placement3D, guard *BearingGuard) bool {
 	old := make([]float64, len(bin))
 	for i, p := range bin {
 		old[i] = p.Z
 	}
 	Settle(bin)
+	// Settle moves every item at once, so there is no per-move accept step to
+	// hook: the whole drop is taken or none of it is.
+	if !guard.OK(bin) {
+		for i, p := range bin {
+			p.Z = old[i]
+		}
+		return false
+	}
 	for i, p := range bin {
 		if math.Abs(p.Z-old[i]) > compactEps {
 			return true
@@ -231,7 +253,7 @@ func restsOn(b, a *Placement3D) bool {
 // their lowest feasible positions. It applies the result only if the bin's
 // (peak, ΣZ) objective strictly improves; otherwise the bin is left untouched.
 // Returns whether it applied a change.
-func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec) bool {
+func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float64, w, d, h float64, rs ContactSpec, guard *BearingGuard) bool {
 	if len(lift) == 0 {
 		return false
 	}
@@ -292,9 +314,23 @@ func liftAndRedrop(bin []*Placement3D, lift []int, orients map[string][][3]float
 		return false
 	}
 
+	type snap struct{ x, y, z, w, d, h float64 }
+	prev := make(map[int]snap, len(newPos))
 	for i, np := range newPos {
-		bin[i].X, bin[i].Y, bin[i].Z = np.x, np.y, np.z
-		bin[i].W, bin[i].D, bin[i].H = np.w, np.d, np.h
+		p := bin[i]
+		prev[i] = snap{p.X, p.Y, p.Z, p.W, p.D, p.H}
+		p.X, p.Y, p.Z = np.x, np.y, np.z
+		p.W, p.D, p.H = np.w, np.d, np.h
+	}
+	// The re-drop runs through an ungated ExtremePoint, so the bearing rule is
+	// checked here, on the configuration the move actually produces.
+	if !guard.OK(bin) {
+		for i, s := range prev {
+			p := bin[i]
+			p.X, p.Y, p.Z = s.x, s.y, s.z
+			p.W, p.D, p.H = s.w, s.d, s.h
+		}
+		return false
 	}
 	return true
 }
@@ -331,7 +367,7 @@ func widen(ctx context.Context, bin []*Placement3D, orients map[string][][3]floa
 			if len(st) > opts.MaxSubtree {
 				continue // lifting this would ruin too much
 			}
-			if liftAndRedrop(bin, union(top, st), orients, w, d, h, rs) {
+			if liftAndRedrop(bin, union(top, st), orients, w, d, h, rs, opts.Bearing) {
 				return true
 			}
 		}

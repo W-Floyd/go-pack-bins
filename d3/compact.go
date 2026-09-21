@@ -54,6 +54,14 @@ func Settle(ps []*Placement3D) {
 // that was fully supported at placement stays fully supported. Placements are
 // mutated in place; pass the items of a single bin.
 func Compact(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupport float64) {
+	CompactGuarded(ps, binW, binD, binH, doX, doY, minSupport, nil)
+}
+
+// CompactGuarded is Compact with a load-bearing guard: a slide that would put a
+// box's weight onto a supporter that cannot carry it is reverted. A nil guard
+// makes this exactly Compact — sliding is support-preserving but not
+// bearing-preserving, since moving a riderless box changes what it rests on.
+func CompactGuarded(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupport float64, guard *BearingGuard) {
 	thr := minSupport
 	if thr < compactEps {
 		thr = compactEps // never leave a box fully airborne, even with no explicit gate
@@ -110,8 +118,13 @@ func Compact(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupp
 					}
 				}
 				if best < p.X-compactEps && supportOK(p, best, p.Y) {
+					was := p.X
 					p.X = best
-					moved = true
+					if guard.OK(ps) {
+						moved = true
+					} else {
+						p.X = was
+					}
 				}
 			}
 		}
@@ -132,8 +145,13 @@ func Compact(ps []*Placement3D, binW, binD, binH float64, doX, doY bool, minSupp
 					}
 				}
 				if best < p.Y-compactEps && supportOK(p, p.X, best) {
+					was := p.Y
 					p.Y = best
-					moved = true
+					if guard.OK(ps) {
+						moved = true
+					} else {
+						p.Y = was
+					}
 				}
 			}
 		}

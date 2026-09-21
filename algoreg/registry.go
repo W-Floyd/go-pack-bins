@@ -40,6 +40,7 @@ type Capabilities struct {
 	Streaming   bool      `json:"streaming,omitempty"`   // commits placements incrementally
 	Preview     bool      `json:"preview,omitempty"`     // anytime search: emits live best-so-far snapshots
 	Panel       string    `json:"panel,omitempty"`       // extra UI panel: "bincost" (gbpp) | "lex" | ""
+	Bearing     bool      `json:"bearing,omitempty"`     // enforces the 3-D load-bearing (crush) constraint
 }
 
 // ModeAlgo is one ordered entry in a mode's algorithm dropdown.

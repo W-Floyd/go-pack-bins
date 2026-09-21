@@ -22,6 +22,7 @@ type EmptyMaximalSpace struct {
 	placed           []box
 	usedVol          float64
 	contact          ContactSpec
+	bear             *bearState // nil unless the load-bearing gate is enabled
 
 	// Scratch reused across commits to avoid per-step allocation. spare is a
 	// second backing array for the space set: commit reads e.spaces and writes
@@ -112,7 +113,7 @@ func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw
 				continue
 			}
 			x, y, z := s.x, s.y, s.z // back-bottom-left corner of the space
-			if e.gated(x, y, z, w, d) {
+			if e.gated(x, y, z, w, d) || !e.bear.allows(x, y, z, w, d, h) {
 				continue
 			}
 			c := box{x, y, z, w, d, h}
@@ -126,6 +127,7 @@ func (e *EmptyMaximalSpace) TryInsert(orientations [][3]float64) (rx, ry, rz, rw
 	if !bestSet {
 		return 0, 0, 0, 0, 0, 0, false
 	}
+	e.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	e.commit(best)
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }
@@ -166,7 +168,12 @@ func betterEMS(c, best box, spaceVol, bestSpaceVol float64) bool {
 // space of a bin from existing placements, so a caller can then probe the
 // remaining maximal spaces (voids) with TryInsert.
 func (e *EmptyMaximalSpace) Occupy(x, y, z, w, d, h float64) {
+	e.bear.occupy(x, y, z, w, d, h)
 	e.commit(box{x, y, z, w, d, h})
+}
+
+func (e *EmptyMaximalSpace) setPendingItem(scalars map[string]float64) {
+	e.bear.setPendingItem(scalars)
 }
 
 // commit records the placed box and rebuilds the empty-space set: every space

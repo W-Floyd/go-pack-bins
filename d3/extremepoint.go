@@ -38,6 +38,11 @@ type ExtremePoint struct {
 
 	grid  *boxGrid     // spatial index over placed for O(local) conflict tests
 	epBuf [][3]float64 // reused candidate-point scratch (avoids per-insert realloc)
+	bear  *bearState   // nil unless the load-bearing gate is enabled
+}
+
+func (ep *ExtremePoint) setPendingItem(scalars map[string]float64) {
+	ep.bear.setPendingItem(scalars)
 }
 
 type box struct{ x, y, z, w, d, h float64 }
@@ -114,6 +119,9 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
+			if !ep.bear.allows(x, y, z, w, d, h) {
+				continue
+			}
 			if ep.contact.Bottom > 0 || ep.contact.NoFloating {
 				sf := ep.supportFrac(x, y, z, w, d)
 				if sf < ep.contact.Bottom {
@@ -135,6 +143,7 @@ func (ep *ExtremePoint) TryInsert(orientations [][3]float64) (rx, ry, rz, rw, rd
 		return 0, 0, 0, 0, 0, 0, false
 	}
 
+	ep.bear.commit(best.x, best.y, best.z, best.w, best.d, best.h)
 	ep.addPlaced(box{best.x, best.y, best.z, best.w, best.d, best.h})
 	return best.x, best.y, best.z, best.w, best.d, best.h, true
 }
@@ -176,6 +185,9 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 			if ep.conflicts(x, y, z, w, d, h) {
 				continue
 			}
+			if !ep.bear.allows(x, y, z, w, d, h) {
+				continue
+			}
 			sf := ep.supportFrac(x, y, z, w, d)
 			if sf < ep.contact.Bottom {
 				continue
@@ -194,6 +206,7 @@ func (ep *ExtremePoint) Candidates(orientations [][3]float64) []Candidate {
 // CommitCandidate places a candidate previously returned by Candidates, updating
 // the strategy's occupied set and volume.
 func (ep *ExtremePoint) CommitCandidate(c Candidate) {
+	ep.bear.commit(c.X, c.Y, c.Z, c.W, c.D, c.H)
 	ep.addPlaced(box{c.X, c.Y, c.Z, c.W, c.D, c.H})
 }
 

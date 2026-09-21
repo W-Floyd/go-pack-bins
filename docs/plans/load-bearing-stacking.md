@@ -1,6 +1,9 @@
 # Plan: 3-D Load-Bearing & Stacking Constraints
 
-**Status:** Proposed — not started. Captured for possible later implementation.
+**Status:** In progress. Re-verified against the tree 2026-09-21 (see §7); §2, §4.A.1,
+§4.A.3 and §4.B were wrong and are corrected below. Steps 1–4 (the bearing core, the
+plumbing and the constructive gate on the four candidate-loop strategies) are implemented
+in [d3/bearing.go](../../d3/bearing.go); steps 5–8 are outstanding.
 **Source:** Bischoff (2006), "Three-dimensional packing of items with limited load
 bearing strength", *European Journal of Operational Research* 168(3); Junqueira,
 Morabito & Yamashita (2012), "Three-dimensional container loading models with cargo
@@ -66,14 +69,18 @@ The library models **support from below** but has **no notion of load from above
 
 ### What IS already covered (reuse, do not reimplement)
 
-- **The support relationship is already computed.** `footprintSupport(placed, x,y,z,w,d)`
-  ([d3/ems.go:289](../../d3/ems.go)) returns exactly which placed boxes a candidate rests
-  on and the contact-area fraction — the precise input a load-bearing check needs
-  (apportion the resting item's weight across its supporters by contact area).
-- **The support graph.** The void-refiner / `Compact` work builds (or specs) a support
-  graph (edge `A→B` iff `A.top ≈ B.bottom` with footprint overlap,
-  [void-refiner.md §3](./void-refiner.md)). Transitive load = sum over the sub-tree
-  above a node. Reuse it; don't rebuild.
+- ~~**The support relationship is already computed.**~~ **Wrong** (verified 2026-09-21).
+  `footprintSupport` ([d3/ems.go:318](../../d3/ems.go)) returns a *single aggregate
+  fraction* `sup/fp` — it sums the supporters and throws away which they were. The
+  bearing rule needs them individually, to apportion load. Built as `supportersOf`
+  in [d3/bearing.go](../../d3/bearing.go).
+- ~~**The support graph.**~~ **Overstated.** No support graph exists. What exists is
+  `restsOn(b, a)`, a pairwise predicate ([d3/refine.go:222](../../d3/refine.go)), scanned
+  `O(n²)` by `removable` to find leaves. It is also typed on `*Placement3D`, while the
+  strategies work over the unexported `box` — so it cannot be shared with a gate that
+  runs inside a strategy. Hence `BearBox` as the common currency.
+- **Floor-upward order does hold**, and `BorneLoads` exploits it: a single top-down pass
+  settles transitive load, no iteration to fixpoint.
 - **`boxgrid` broadphase** ([d3/boxgrid.go](../../d3/boxgrid.go)) keeps the "who is
   directly above me" query local instead of `O(k)`.
 - **Floor-upward placement order** is already what extreme-point / BLF / heightmap do
@@ -102,21 +109,42 @@ deliverables; (A) is the core, (B) is polish.
 
 Extend the contact/support path the way `Bottom` already gates support:
 
-1. **Carry weight + limit into the strategy.** The placement `box` (or a parallel slice)
-   gains `weight` and `bearLimit`. These come from item scalars — define reserved keys
-   (`pack.WeightKey`, `pack.BearLimitKey`) or pass them alongside orientations. This is
-   the one real architectural change: weight must flow from `pack.Item` scalars into the
-   `PlacementStrategy3D` insert path, which today takes only `[][3]float64`.
+1. **Carry weight + limit into the strategy.** ~~Change the `TryInsert` signature.~~
+   **Revised** — don't. There are **six** `TryInsert` implementations (BLF, EMS, Fit,
+   ExtremePoint, Heightmap, LayerStack; the plan named four), plus callers in `bin.go`,
+   `refine.go` and `columns.go`. Instead: `Bin3D.TryPlace` already holds the item and
+   calls `pack.ScalarsOf(item)` ([d3/bin.go:31](../../d3/bin.go)), so it can hand the
+   pending weight/limit to the strategy through a small *optional* interface
+   (`interface{ setPending(weight, limit float64) }`) before `TryInsert`.
+   `PlacementStrategy3D` is unchanged, strategies opt in one at a time, and the
+   default-off path is untouched by construction.
+
+   Also **not** reserved keys: `MinimizeCG(massScalar string)` establishes the
+   convention that the caller *names* the mass scalar. The reserved `"\x00m:"` keys are
+   for bin metrics reported outward, not item inputs. The gate config should take
+   scalar names (`WeightScalar`, `LimitScalar`) to match.
 2. **Bearing check at placement.** When a strategy tests placing item `B` at `(x,y,z)`,
    compute its supporters via `footprintSupport` (already there). For each supporter `S`,
    the load `B` adds to `S` is `weight(B) · (contact fraction)`. **Propagate transitively
    down**: `B`'s weight (plus whatever already rests on `B`) flows to `S`, then from `S`
    to *its* supporters, etc. Reject the placement if any item's accumulated borne weight
    would exceed its `bearLimit`. The floor bears infinitely.
-3. **Where it gates.** Mirror the `Bottom`/`NoFloating` gate sites — `ems.go` insert
-   (the `footprintSupport < Bottom` check, [ems.go:106-113](../../d3/ems.go)), the BLF
-   `supported` check ([blf.go:119](../../d3/blf.go)), extreme-point, heightmap. A shared
-   helper `bearingOK(placed, supportGraph, candidate) bool` keeps the rule in one place.
+3. **Where it gates.** The gate sites are uniform and confirmed —
+   `EmptyMaximalSpace.gated` ([ems.go:134](../../d3/ems.go)), `Heightmap.gated`
+   ([heightmap.go:198](../../d3/heightmap.go)), `BottomLeftFill.supported`
+   ([blf.go:119](../../d3/blf.go)), `ExtremePoint.supportFrac`
+   ([extremepoint.go:223](../../d3/extremepoint.go)); all take `(x,y,z,w,d)`, which is
+   exactly `CanBear`'s shape.
+
+   **But gating there does not cover the 3-D surface.** `blocks`, `columns`, `assemble`,
+   `laff` and `joint` construct `Placement3D` directly and never touch a strategy — per
+   the registry ([packapi/algos_3d.go:191+](../../packapi/algos_3d.go)) they are
+   `selfManaged3D`. The constructive gate reaches the ~12 strategy-backed algos
+   (ff/blf/ems/fit/heightmap/nf/bf/wf/ffd/bfd/nfd/layer); the other six would silently
+   emit crushing stacks. So the deliverable is **two-sided**: a constructive gate
+   (`CanBear`) for the strategy path, and the whole-configuration validator
+   (`BearingOK`) that every path is checked against — with self-managed algos rejecting
+   the option until they gate properly, rather than quietly ignoring it.
 4. **Cumulative bookkeeping.** Track per-placed-item *currently borne weight* incremented
    as items land on top. A new placement walks down the support chain adding its weight;
    the gate compares against each `bearLimit` en route. `O(stack depth)` per placement.
@@ -126,14 +154,26 @@ Extend the contact/support path the way `Bottom` already gates support:
 - **No-stack flag / class.** `bearLimit = 0` already means "nothing may rest on this"
   (any positive load fails the gate) — fragility falls out of (A) for free. A *class*
   ("only ≤ my class may rest on me") is an extra per-supporter predicate in the gate.
-- **Bearing face orientation.** `L_i` is a property of the *up-face*. When a strategy
-  enumerates orientations, the bearing limit must track which face ends up on top
-  (and "this-side-up" simply drops disallowed orientations from the candidate set). Fold
-  into the per-orientation candidate generation.
+- **Bearing face orientation.** `L_i` is a property of the *up-face* — and this is
+  **not buildable on today's API**. `computeOrientations`
+  ([d3/item.go:47](../../d3/item.go)) de-duplicates orientations *by dimensions* into
+  `[][3]float64`, discarding the permutation that produced each. Given a `[3]float64`
+  you cannot recover which original face points up (a cube collapses to one entry).
+  Per-up-face limits therefore need `Item3D` to carry an orientation *index* — as
+  `SolidPlacement3D.RotationIndex` already does for the solid path, and `Placement3D`
+  does not. Defer: ship a single per-item limit first, treat the up-face refinement as
+  a separate change gated on that plumbing.
 
 ### 4.C Interaction with post-passes
 
-`Compact` and the planned void-refiner **relocate** items. Any relocation must re-run the
+**Confirmed mandatory, not optional.** Every registered 3-D algo gets a relocating
+post-pass: `compact3D` runs `Compact` on the strategy-backed ones and `selfManaged3D`
+runs the void-refiner (and `settle` for blocks/columns). The void-refiner is built
+([d3/refine.go](../../d3/refine.go)), not "planned". So no configuration reaches the
+caller without passing through relocation — a gate that only runs constructively is
+worthless on its own.
+
+`Compact` and the void-refiner **relocate** items. Any relocation must re-run the
 bearing gate — moving an item can both relieve a crush and create one. The bearing check
 must therefore be a reusable predicate the post-passes call, not logic baked only into
 the constructive insert. (The void-refiner already re-derives the support graph per
@@ -190,3 +230,181 @@ round — extend that to re-validate bearing.)
   genuinely can't express them. If 3-D use is only abstract volume packing, this stays on
   the shelf. Highest practical value of the 3-D-direction candidates, but more
   invasive than the scalar-only plans (BPPS, VBP).
+
+## 7. Verification log
+
+**2026-09-21** — re-checked the plan against the tree before starting. Motivated by
+[issue #1](https://github.com/W-Floyd/go-pack-bins/issues/1), which asks for exactly this
+(plus exclusion zones and access priority, both still unaddressed). Four claims were
+wrong; each is corrected in place above:
+
+| Claim | Verdict |
+|---|---|
+| `footprintSupport` identifies supporters | **No** — returns one aggregate fraction (§2) |
+| A support graph exists to reuse | **No** — only a pairwise `restsOn`, wrong type (§2) |
+| 4 strategies to gate, via a `TryInsert` signature change | **6**, and the signature need not change (§4.A.1) |
+| Gating the strategies covers 3-D | **No** — 6 self-managed algos bypass them (§4.A.3) |
+| Per-up-face bearing limits | **Not expressible** — orientations lose face identity (§4.B) |
+| Post-pass re-validation is a caveat | **Load-bearing**: every algo relocates (§4.C) |
+
+Held up: the gate-site shape is uniform across strategies, floor-upward placement order
+makes the load pass single-shot, and `bearLimit = 0` does give fragility for free.
+
+**Done:** step 2 — [d3/bearing.go](../../d3/bearing.go): `BearBox`, `supportersOf`,
+`BorneLoads`, `BearingOK`, `CanBear`. Pure, no dependency on the rest of `d3` beyond
+`overlap1D`/`compactEps`. Table-tested including branching support, uneven contact
+apportionment, floating boxes, edge-touching footprints, order-independence, and
+`CanBear` ≡ `BearingOK` agreement.
+
+**Decisions taken:** total borne weight, not pressure (§6 left it open — pressure needs
+the contact area a supporter offers, which `supportersOf` now returns, so it stays a
+drop-in refinement). `Limit` zero value means fragile, so `NoLimit` must be spelled out
+explicitly — chosen because silently defaulting absent limits to infinity would make a
+mis-wired scalar fail open, which is the dangerous direction for a safety constraint.
+
+**Next:** step 1 (the `setPending` plumbing) then step 3 (gate into the four strategies).
+
+**2026-09-21, continued** — steps 1, 3 and the fragility half of 4 are done.
+
+- **Step 1 (plumbing).** `PlacementStrategy3D` is untouched, as §4.A.1 now specifies.
+  `Bin3D.TryPlace` type-asserts the optional `pendingBearer` and hands over
+  `pack.ScalarsOf(item)` before `TryInsert`; each strategy holds a `*bearState` that is
+  nil when bearing is off, and every method on it tolerates a nil receiver. `WithBearing`
+  / `BearingStrategy` / `Bearable` are the public surface.
+- **Step 3 (gating).** Gated into ExtremePoint (both `TryInsert` and the `Candidates`
+  path `joint` uses), EMS, BLF and Heightmap, beside the existing support gates.
+- **Step 4 (fragility).** Falls out of the core as predicted: `Limit = 0` admits no load.
+  Stacking *classes* and the up-face refinement remain unbuilt (§4.B).
+
+**Fail-closed choices**, both locked in by tests. A strategy with bearing enabled but no
+pending item set refuses every placement rather than treating items as weightless — this
+catches a caller driving a strategy directly and skipping `Bin3D.TryPlace`.
+`BearingSpec.DefaultLimit` is likewise *not* defaulted to `NoLimit`, so a mis-named limit
+scalar yields a packing that will not stack rather than one that permits every crush.
+
+**New finding — the gate cannot divert under EMS.** EMS places only at the
+back-bottom-left corner of a free space. Once the floor is full the single remaining
+space spans the full width with its corner over whatever sits at x=0; if that item cannot
+bear the load, no alternative position exists *in EMS's candidate set*, so the gate can
+only refuse. ExtremePoint, BLF and Heightmap all divert, because their candidate sets
+include the far edges of placed boxes. Recorded in `canDivert` in
+[d3/bearing_strategy_test.go](../../d3/bearing_strategy_test.go) so the difference is
+locked in rather than discovered again. Refinement worth considering: when a space's
+corner is bearing-blocked, have EMS also try the space's other three bottom corners.
+
+This also cost a test: the first version of the diversion test was **vacuous** — ungated,
+all four strategies already place the heavy item on the floor beside the weak one, since
+they minimise z. The gate's observable effect is refusal or diversion only once the floor
+is full, and the test now sets that up explicitly.
+
+**Step 5 (post-pass re-validation) is now done too.** `BearingGuard` holds the spec plus
+item scalars by ID and re-checks a whole bin; a nil guard permits everything, so the
+disabled path is a single nil check. Wired in at every accept step:
+
+- `CompactGuarded` reverts a slide that fails the check (`Compact` delegates with nil, so
+  its signature and behaviour are unchanged).
+- `RefineOptions.Bearing` carries the guard through the refiner.
+
+**The refiner had three movers, not one.** The plan said "the void-refiner already
+re-derives the support graph per round — extend that to re-validate bearing", which reads
+as a single hook. In fact `RefineVoids` relocates in three independent places:
+`gravitySettle` (drops every item at once — no per-move accept step, so the whole drop is
+taken or reverted), `tryLower` (one item into the lowest free space) and `liftAndRedrop`
+(a sub-stack). Guarding only `liftAndRedrop` left the gate defeatable through the other
+two, which is how the first version of the refiner test failed. All three are guarded now.
+The general lesson matches §4.A.3: in this codebase, relocation is never in one place, so
+"add the check at the accept step" has to be preceded by finding *every* accept step.
+
+**Step 6 (packapi) and step 8 (attribution) are done.** `PackRequest.Bearing` carries
+`weight_scalar` / `limit_scalar` / `default_limit`, plus `default_unlimited` because JSON
+cannot express `d3.NoLimit` as a number. `bearingAlgos3D` is the enforced set and
+`AlgoCapabilities` *derives* the advertised `bearing` flag from it, so the two cannot
+drift; `TestBearingCapabilityMatchesEnforcement` pins that, and `TestBearingAlgosEnforce`
+walks every advertised 3-D algorithm and requires it either to enforce the constraint or
+to refuse the request.
+
+**Validation runs at two seams, not one.** `dispatch` is described in the code as "the
+one seam every solve path funnels through", but catalog mode is decided in `PackCtx`
+*before* dispatch and its inner solves clear `Containers` — so a catalog request would
+have passed the check. `StreamPack` likewise bypasses `dispatch`. Both now validate.
+This is the third instance of the same pattern in this work: the codebase has more entry
+and mutation points than its own comments suggest, so "add the check at the seam" always
+has to be preceded by enumerating the seams.
+
+**Post-pass coverage completed.** Guards are wired into every relocation the 3-D path can
+reach: `finishCompact3D` (registry), the balanced bf/wf path, the streaming path's
+settle+compact, and `refineResult3D`. `settleResult3D` is guarded too even though no
+currently bearing-capable algorithm settles — otherwise adding one later would bypass the
+constraint silently.
+
+**Nested mode does not support bearing** and cannot express it: `NestedLevelSpec` has no
+`Bearing` field, so there is no bypass to guard against. Adding it means deciding what a
+bearing limit means for a carton that becomes an item at the next level, which is a real
+modelling question, not just plumbing.
+
+**Step 7 (demo UI) is done.** No per-item inputs were needed after all: items already
+carry arbitrary named scalars through the existing Scalars field, so `weight=8,
+bearlimit=20` works as-is — the plan assumed new per-item controls (step 7's "per-item
+bearing limit / fragile checkbox") that the existing UI already covers. What was missing
+was the panel that turns the constraint on and names the two scalars.
+
+- A "Load-bearing (crush limits)" panel, shown for 3-D single-container solves.
+- It stays visible when the selected algorithm cannot enforce bearing, showing an inline
+  warning instead of hiding. Hiding it would have silently dropped the constraint on an
+  algorithm switch; this way the request still carries `bearing` and the server's refusal
+  names the algorithms that work.
+- Hidden in nested mode, where `NestedLevelSpec` cannot carry the field at all.
+- Round-trips through config export/import, so saving a setup does not quietly lose it.
+- Demo preset "Fragile on top (load-bearing limits)": four fragile cartons FFD places on
+  the floor first, then four heavy crates. Ungated it packs into one bin by stacking the
+  heavy crates on the fragile ones; gated it opens a second bin.
+  `TestBearingPresetDemonstratesTheConstraint` asserts that difference, so the preset
+  cannot rot into one that solves identically either way and teaches nothing.
+
+Both front-ends pick this up automatically: `goAlgos()` in the WASM bundle serves the
+same capability payload as `/api/algos`, and `cmd/wasm` decodes into `PackRequest`, so
+`bearing` passes through the worker with no change.
+
+**Awaiting user verification in the running demo**, per CLAUDE.md — Go tests cannot catch
+a blank render or a JS error.
+
+## 8. Bearing-aware ordering, and auto
+
+**The gate constrains; it never reorders.** Discovered from the demo: with the default
+volume-decreasing order a large *fragile* item takes the floor, fills it, and forces every
+heavy item into a new bin — even though "heavy underneath, fragile on top" fits in one.
+Measured across the ten enforcing algorithms on that case: all needed 2 bins with the
+items offered fragile-first; feeding them heavy-first let the online ones (ff/nf/bf/wf/
+blf/ems/heightmap) reach 1, while ffd/bfd/nfd still needed 2 because they re-sort by
+volume regardless of input order.
+
+`offline.DecreasingBearing(limitScalar, defaultLimit)` orders by bearing limit descending,
+volume descending within a limit — the Ratcliff–Bischoff layer-from-floor idea. It is
+**opt-in, not the default**, because measurement says it is a fix for a specific pathology
+rather than a general win: over 200 random 3-D instances with mixed limits it totalled 351
+bins against volume-order's 350 (better on 11, worse on 12).
+
+A second variant was written and measured: keep volume order but defer only zero-limit
+items. It looked like the conservative choice and was **clearly worse** (366 bins; better
+on 6, worse on 22) — it leaves items with intermediate limits to be buried and refused
+while still breaking the large-first order. Deleted rather than shipped. Respecting the
+whole strength ordering is what makes the policy coherent.
+
+**`auto` now owns this decision.** The goal is that a user enters items and constraints and
+gets the best legal packing without choosing an algorithm or knowing an ordering exists, so
+`auto` is bearing-capable and, when bearing is on:
+
+- races only candidates whose strategies enforce the gate — dropping `fit` and `layer`, and
+  the self-managing blocks/assemble/LAFF packers, for exactly the reason the existing code
+  already drops the latter when scalar constraints are set: *they would win the race with
+  an infeasible packing*;
+- races **both** orderings (volume and strength) and keeps whichever uses fewer bins.
+
+On the pathological case `auto` returns one bin with the winner reported as `FFD·strength`,
+so the reason is visible. The manual "order by bearing strength" checkbox remains for the
+single-algorithm modes and is hidden under `auto`, which explains in the panel that it
+races both.
+
+`auto3DPlans` is the single definition of that candidate set, shared by the registry solver
+and `autoCandidates` (the streaming mirror). Those two had already drifted once over the
+gate itself — see §7 — so the set is defined once rather than written twice.

@@ -37,6 +37,12 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	if !anyOrientationFits(i3.Orientations(), b.W, b.D, b.H) {
 		return nil, pack.ErrItemTooLarge
 	}
+	scalars := pack.ScalarsOf(item)
+	// A bearing-enabled strategy needs the item's weight and limit, which
+	// TryInsert's geometry-only signature cannot carry.
+	if pb, ok := b.strategy.(pendingBearer); ok {
+		pb.setPendingItem(scalars)
+	}
 	x, y, z, w, d, h, placed := b.strategy.TryInsert(i3.Orientations())
 	if !placed {
 		return nil, pack.ErrNoRoom
@@ -49,7 +55,7 @@ func (b *Bin3D) TryPlace(item pack.Item) (pack.Placement, error) {
 	b.items = append(b.items, item)
 	// Accumulate the mass-weighted vertical moment per scalar for CG scoring.
 	zCenter := z + h/2
-	for k, v := range pack.ScalarsOf(item) {
+	for k, v := range scalars {
 		b.cgZNum[k] += v * zCenter
 	}
 	return p, nil

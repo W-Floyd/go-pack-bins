@@ -52,6 +52,17 @@ type PresetContainer struct {
 	Cost float64 `json:"cost,omitempty"`
 }
 
+// PresetBearing mirrors the frontend's load-bearing panel. It carries the
+// scalar names rather than the limits themselves — those live on the items.
+type PresetBearing struct {
+	Enabled          bool    `json:"enabled"`
+	WeightScalar     string  `json:"weight_scalar,omitempty"`
+	LimitScalar      string  `json:"limit_scalar,omitempty"`
+	DefaultLimit     float64 `json:"default_limit,omitempty"`
+	DefaultUnlimited bool    `json:"default_unlimited,omitempty"`
+	OrderByStrength  bool    `json:"order_by_strength,omitempty"`
+}
+
 type PresetContact struct {
 	Bottom     float64 `json:"bottom,omitempty"` // % bottom support
 	SideX      float64 `json:"side_x,omitempty"` // % side anti-slosh (X)
@@ -71,6 +82,7 @@ type Preset struct {
 	Preferences        []PreferenceSpec  `json:"preferences,omitempty"`
 	InnerPreferences   []PreferenceSpec  `json:"innerPreferences,omitempty"`
 	Contact            *PresetContact    `json:"contact,omitempty"`
+	Bearing            *PresetBearing    `json:"bearing,omitempty"`
 	Nested             bool              `json:"nested,omitempty"`
 	InnerBin           *PresetBin        `json:"innerBin,omitempty"`
 	InnerAlgo          string            `json:"innerAlgo,omitempty"`

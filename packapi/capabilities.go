@@ -11,6 +11,18 @@ import "github.com/W-Floyd/go-pack-bins/algoreg"
 // algoreg.List() once each algorithm self-registers its descriptor; the wire shape
 // served here stays the same, so the front-ends don't change again.
 func AlgoCapabilities() algoreg.Payload {
+	p := algoCapabilities()
+	// The bearing flag is derived from bearingAlgos3D rather than written into
+	// each entry, so the advertised set and the enforced set cannot drift apart.
+	for algo := range bearingAlgos3D {
+		c := p.Algos[algo]
+		c.Bearing = true
+		p.Algos[algo] = c
+	}
+	return p
+}
+
+func algoCapabilities() algoreg.Payload {
 	return algoreg.Payload{
 		Modes: map[string][]algoreg.ModeAlgo{
 			"1d": {

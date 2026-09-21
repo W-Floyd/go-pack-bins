@@ -26,3 +26,11 @@ type PlacementStrategy3D interface {
 	// Remaining returns un-occupied volume.
 	Remaining() float64
 }
+
+// NewPlacement3D builds a placement directly. It exists so a configuration can
+// be reconstructed from transported results — e.g. to re-validate a packing
+// against the load-bearing rule after it has crossed an API boundary, where the
+// original Placement3D values are long gone.
+func NewPlacement3D(binID, itemID string, x, y, z, w, d, h float64) *Placement3D {
+	return &Placement3D{binID: binID, itemID: itemID, X: x, Y: y, Z: z, W: w, D: d, H: h}
+}

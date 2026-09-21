@@ -125,7 +125,7 @@ func TestGravitySettleLowersFloatingSubstack(t *testing.T) {
 		{binID: "b", itemID: "A", X: 0, Y: 0, Z: 4, W: 4, D: 4, H: 2}, // floating (gap 0..4 below)
 		{binID: "b", itemID: "B", X: 0, Y: 0, Z: 6, W: 4, D: 4, H: 2}, // resting on A
 	}
-	if !gravitySettle(bin) {
+	if !gravitySettle(bin, nil) {
 		t.Fatal("expected gravitySettle to move the sub-stack")
 	}
 	if math.Abs(bin[0].Z) > 1e-6 {
@@ -135,7 +135,7 @@ func TestGravitySettleLowersFloatingSubstack(t *testing.T) {
 		t.Errorf("B at z=%v, want 2 (still resting on A)", bin[1].Z)
 	}
 	// An already-settled bin is a no-op.
-	if gravitySettle(bin) {
+	if gravitySettle(bin, nil) {
 		t.Error("gravitySettle moved an already-settled bin")
 	}
 }
