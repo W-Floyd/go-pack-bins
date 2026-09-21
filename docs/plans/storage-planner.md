@@ -27,6 +27,7 @@ change the answer (§3). Several rooms differ again (§4).
 | Which storage furniture to install | — | **new** |
 | Where it goes in the room | hand-placed zones | **new** |
 | Which room or area it goes in | — | **new** |
+| Whether it can be got out again | straight pull only | **routed to an exit** |
 
 Answers taken from the user:
 
@@ -120,7 +121,89 @@ you want weekly in the hall cupboard and the Christmas decorations in the loft i
 win than anything the within-room placement can achieve. It should therefore be decided
 first and revisited last, not bolted on.
 
-## 5. Stage A — unit geometry and room layout
+## 5. Getting it out of the room
+
+**Today there is no route planning.** `d3.Retrievable` extrudes an item's face straight
+outward and asks whether that box-shaped channel is clear — one of five axis directions,
+in a straight line. `OpenFaces` extends the run to a wall, but the wall is open along its
+*entire* length. So the library can answer "can this be pulled off the shelf" and cannot
+answer "can it then get to the door".
+
+For a trailer loaded through its end those are the same question. For a room they are not:
+you pull a box off a shelf, turn, and carry it down an aisle to a door that is two metres
+wide in a wall that is six. Aisles exist for exactly that, and nothing currently checks
+they connect to anything.
+
+### 5.1 Two separate questions
+
+1. **Extraction** — can the item leave its slot? Already built (§14 of the bearing plan).
+2. **Egress** — from the space it is extracted into, can it reach an exit? New.
+
+Keeping them apart matters: an item can be perfectly extractable and still be behind a
+wall of other shelving, and the fix for each is different — the first is about its
+neighbours, the second about the layout.
+
+### 5.2 Exits are regions, not faces
+
+An `Exit` is a rectangle on a wall: which wall, its span along that wall, and its height
+range. A doorway is 0.9 wide and 2.0 high in a 6-metre wall; a roller door is most of one
+end; a loft hatch is in the ceiling. `OpenFaces` — a whole face, all of it — is the
+degenerate case and should become sugar for one exit covering the face rather than a
+parallel mechanism.
+
+### 5.3 How egress is decided
+
+The free space is everything not occupied by an item or an impermeable zone. **Permeable
+zones are free**, which is the whole reason `Zone.Permeable` exists: an aisle is not an
+obstacle, it is the route.
+
+Given that, egress is reachability for a body of the item's size:
+
+- Discretise the room at a resolution the caller picks — the smallest item dimension is a
+  reasonable default.
+- A cell is *traversable for this item* if the item's bounding box, placed there, hits
+  nothing. This is an erosion of free space by the item's size, and it is why a narrow
+  aisle blocks a wide box while passing a small one: the check is per item, not per room.
+- Flood-fill from the exits through traversable cells. The item can leave if the space it
+  extracts into is in the filled set.
+
+Carrying is translation only — no rotating the box in a doorway. That is the conservative
+direction (it will refuse some routes a person could manage) and it avoids turning this
+into a configuration-space planner over `SO(3)`, which is not a fight worth having for a
+basement.
+
+### 5.4 Not everything has to come out
+
+Some things are installed once. Shelving is bolted to a wall; a cabinet is carried in
+empty, assembled, and never leaves; a chest freezer goes in the corner and stays. Being
+stuck is fine for those and fatal for a box of files.
+
+So **removability is a per-item property**, not a global rule:
+
+- Items default to *must be removable* when egress checking is on at all. That is the
+  fail-closed direction: forgetting to mark a box is far worse than forgetting to mark a
+  wardrobe, because the first produces a plan that quietly cannot be used.
+- Fixtures — the storage units of §3 — are exempt by construction. They are not packed
+  items, they are the furniture, and asking whether a bolted-down shelf can reach the door
+  is meaningless.
+- An item may opt out (`Removable: false`), which is the escape hatch for the heavy thing
+  that is going in once.
+
+This also gives the planner something useful to say: not just "this fits" but "these six
+boxes fit and can be got out again; this one will be stuck behind the shelving".
+
+### 5.5 What it costs, and what it buys
+
+The flood fill is per distinct item size rather than per item, so a room of uniform boxes
+costs one fill. It runs **after** a candidate layout is built, not inside the placement
+gate: routing every candidate placement would be far too slow, and unlike bearing there is
+no cheap local test — a placement can block a route on the other side of the room.
+
+That makes egress a *validator* over a finished plan, with the same consequence the nested
+bearing check had: a plan that fails is reported, not repaired. The repair is the layout
+search (§7) trying a wider aisle or fewer runs, which is a decision it is already making.
+
+## 6. Stage A — unit geometry and room layout
 
 `Compartments()` per unit kind, and `LayoutRuns(room, unit, clearance)` to fill a room
 with runs of one unit type and the clearance strips between them: front to back, starting
@@ -134,7 +217,7 @@ the planner can call it, generalised past shelving.
 
 Pure geometry, so it is fully testable without a solve. Build it first.
 
-## 6. Stage B — containerise and fill
+## 7. Stage B — containerise and fill
 
 - Items → containers with "loose" a legal answer, reusing the GBPP optional-item
   objective: a container earns its place only if its contents justify it.
@@ -144,7 +227,7 @@ Pure geometry, so it is fully testable without a solve. Build it first.
 - Emit the result as `Zone`s and placements so the existing 3-D view draws it with no
   rendering work.
 
-## 7. Stage C — allocation and priority search
+## 8. Stage C — allocation and priority search
 
 Two nested searches. **Across locations**: which room each item goes to, which is where
 the access objective earns most of its value — the weekly things in the hall cupboard, the
@@ -162,10 +245,15 @@ Lexicographic rather than weighted, because a weighted score hides which objecti
 actually deciding — and the caller asked to choose the priority, which is precisely the
 thing a single blended number throws away.
 
-## 8. What this is not
+## 9. What this is not
 
-- **Not a warehouse simulator.** No routing, no pick paths, no time. Access cost is the
-  static proxy already built in the bearing plan's §13.
+- **Not a warehouse simulator.** No pick sequencing, no travel time, no people. Egress
+  (§5) answers *whether* a box can get out, not how long it takes or in what order things
+  are fetched; the cost of reaching something is the static proxy in the bearing plan's
+  §13.
+- **Not a motion planner.** Egress is axis-aligned translation of the item's bounding box
+  through free space. No rotating a wardrobe through a doorway, no tilting, no carrying it
+  at an angle — all of which a person does and none of which is worth the machinery here.
 - **Not a rack-engineering tool.** Compartment capacity is the load-bearing rule already
   there; deflection, anchoring and seismic bracing are out.
 - **Not a free-form 2-D layout.** Furniture lines up in runs against walls; it does not
@@ -174,7 +262,7 @@ thing a single blended number throws away.
 - **Not a furniture designer.** Unit types are an input. It chooses among what you have or
   can buy; it does not invent a shelf spacing.
 
-## 9. Suggested order
+## 10. Suggested order
 
 1. Stage A alone, with tests, for **open shelving only**. Pure geometry, and it replaces
    hand arithmetic that has already caused one wrong demo.
@@ -183,11 +271,15 @@ thing a single blended number throws away.
    rather than riding along.
 3. Stage B with a *fixed* layout in a *single* location, so containerising and filling can
    be judged without the searches moving underneath them.
-4. Locations, then the within-room search, then the cross-location allocation.
+4. **Exits and egress (§5)**, still against a fixed layout. Worth doing before the layout
+   search, because "can everything get out" is the constraint the search will be trying to
+   satisfy, and building the search first means tuning it against a check that does not
+   exist yet.
+5. Locations, then the within-room search, then the cross-location allocation.
 
 Each step is useful on its own, which is the test of whether the decomposition is right.
 
-## 10. Risks
+## 11. Risks
 
 - **Stage boundaries hide good answers.** Stage C is the mitigation, and it should be
   measured against a brute-force solve on small instances rather than assumed.
@@ -202,3 +294,13 @@ Each step is useful on its own, which is the test of whether the decomposition i
   contents each need a clear face toward the aisle. Modelling both as "a box with bins in
   it" and forgetting that distinction would produce plans that look fine and cannot be
   used.
+- **Egress has no cheap local test.** Bearing and extraction can be gated at placement
+  because a box only affects its neighbours; blocking a route affects the far side of the
+  room. So egress can only validate a finished plan, and the repair has to come from the
+  layout search widening an aisle — which means a plan can be rejected with no obvious
+  local cause. The message needs to name the blocked items and the aisle that failed them,
+  or it will be untraceable.
+- **Grid resolution is a correctness knob, not a performance one.** Too coarse and a route
+  through a just-wide-enough gap is missed, or worse, a route through a just-too-narrow
+  one is allowed. Erosion by the item's bounding box is conservative in the first
+  direction; it must not be made optimistic in the second by rounding cells generously.
