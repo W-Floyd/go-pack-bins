@@ -461,11 +461,12 @@ neither check excuses the other.
 predicted. The pressure scalar is opt-in: naming no `PressureScalar` leaves the check off
 entirely, and naming one no item carries is refused like the other scalar names.
 
-## 11. Planned: load paths through containers (not yet built)
+## 11. Load paths through containers
 
 The nested-mode question — what a bearing limit means for a carton that becomes an item at
-the pallet level — resolved into something larger than a per-carton limit, and is
-**designed but not implemented**. The decisions taken:
+the pallet level — resolved into something larger than a per-carton limit. **The core is
+implemented** in [d3/bearing_nested.go](../../d3/bearing_nested.go); wiring it to nested
+mode in `packapi` is outstanding. The decisions taken:
 
 - **Flush inheritance uses the contents' limit alone**, not `min(container, contents)`.
   When load passes through the contents, the box structure contributes nothing.
@@ -486,3 +487,38 @@ level of physical fidelity is in scope.
 **Explicitly deferred:** shear strength. It was raised as a possible further
 consideration, not a requirement, and it is a different failure mode from crush —
 worth its own design rather than being folded into this one.
+
+### 11.1 What was built
+
+`BearBox` gains `Contents []BearBox` (in the *same* frame as the box, so overlap tests need
+no conversion) and `Rigid bool`. `LoadPathOK` replaces the flat check, and `BearingOK`
+delegates to it — one rule, not two that can drift. With no box carrying contents the two
+are identical, which the entire pre-existing flat suite exercises unchanged.
+
+A patch arriving on a container's top face splits: the part over contents that *reach that
+face* passes into them and is checked against their limits, recursively; the remainder
+rests on the container's own structure and is checked against its limits, at the pressure
+of the uncovered area alone. `Rigid` skips the split entirely.
+
+**Downward propagation is unaffected** — whatever enters a container leaves its underside,
+however it split on the way through. The decomposition changes *which limits are checked*,
+not how much load reaches the floor. That realisation is what kept this tractable.
+
+Two corrections during implementation, both caught by tests:
+
+- **Container interiors must settle once, not per arriving patch.** The first version built
+  a fresh sub-analysis for every patch, so contents' limits were checked in isolation
+  rather than cumulatively. Patches are now accumulated per container and the interior is
+  settled after the frame has been walked. Interiors settle even with no external load,
+  since contents bear each other.
+- **A container's weight is its tare plus its contents, recursively** (`laden`). Without it
+  the contents' weight never reached the level below. Derived rather than asked of the
+  caller: a forgotten sum would silently under-load everything beneath.
+
+### 11.2 Outstanding
+
+- Wire it to nested mode: build the `BearBox` tree from a two-level solve, translating the
+  inner packing into the outer frame, and surface `rigid` plus the container's own limit
+  per level / container type.
+- The constructive gate still works on the flat model. A strategy placing cartons does not
+  yet consult load paths, so the nested check is a validator rather than a gate.

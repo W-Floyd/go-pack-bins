@@ -30,6 +30,18 @@ type BearBox struct {
 	// by 3kg on a narrow foot, so the two checks are separate and both apply.
 	// NoLimit means unrestricted.
 	PressureLimit float64
+
+	// Contents is the packing inside this box, expressed in the *same* frame as
+	// the box itself rather than a local one, so overlap tests need no
+	// conversion. Empty for an ordinary item.
+	//
+	// A box with contents transmits load through them where they reach its top
+	// face: see LoadPathOK. The nesting is arbitrarily deep.
+	Contents []BearBox
+	// Rigid makes the box carry load on its own structure regardless of what is
+	// inside it. Without it, load over contents that reach the top face passes
+	// into those contents and is checked against *their* limits, not this box's.
+	Rigid bool
 }
 
 // Load is the bearing analysis of one box: how much weight rests on it in total,
@@ -138,18 +150,10 @@ func topDown(bs []BearBox) []int {
 // the whole-configuration predicate: constructive gates check a candidate
 // against it, and every relocation post-pass must re-check, since moving a box
 // can both relieve a crush and create one.
-func BearingOK(bs []BearBox) bool {
-	borne := BorneLoads(bs)
-	for i := range bs {
-		if borne[i].Weight > bs[i].Limit+bearEps {
-			return false
-		}
-		if borne[i].Pressure > bs[i].PressureLimit+bearEps {
-			return false
-		}
-	}
-	return true
-}
+// It delegates to LoadPathOK so nested and flat configurations are judged by one
+// rule. With no box carrying Contents the two are equivalent, which the whole
+// flat test suite exercises.
+func BearingOK(bs []BearBox) bool { return LoadPathOK(bs) }
 
 // bearEps tolerates float drift in the apportionment sums, so a stack that is
 // exactly at its limit is not rejected by rounding. It is an absolute weight
