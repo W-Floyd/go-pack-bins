@@ -337,11 +337,14 @@ func auto3DPlans(req PackRequest) []auto3DPlan {
 		{label: "EMS", strat: "ems", online: online.FirstFit},
 	}
 	if !bear {
-		// FitPacker and LayerStack have no bearing gate (see bearingAlgos3D).
-		plans = append(plans,
-			auto3DPlan{label: "Fit", strat: "fit", online: online.FirstFit},
-			auto3DPlan{label: "Layer", strat: "layer", policy: offline.DecreasingLayerHeight, online: online.FirstFit},
-		)
+		// FitPacker has no bearing gate but does enforce zones, so it only drops
+		// out for bearing. LayerStack enforces neither: it delegates each layer to
+		// a 2-D bin, which sees neither the load paths nor the keep-out regions.
+		plans = append(plans, auto3DPlan{label: "Fit", strat: "fit", online: online.FirstFit})
+		if len(req.Zones) == 0 {
+			plans = append(plans,
+				auto3DPlan{label: "Layer", strat: "layer", policy: offline.DecreasingLayerHeight, online: online.FirstFit})
+		}
 		return plans
 	}
 	plans = append(plans, auto3DPlan{label: "Heightmap", strat: "heightmap", online: online.FirstFit})
@@ -369,8 +372,8 @@ func (p auto3DPlan) build(factory pack.BinFactory) *offline.Wrapper {
 
 // autoSelfManaged3D reports whether auto may race the packers that build their
 // own bins (blocks / assemble / LAFF). They ignore the factory, so they honour
-// neither scalar constraints nor the bearing gate and would otherwise win the
-// race with an infeasible packing.
+// none of the scalar constraints, the bearing gate or the exclusion zones, and
+// would otherwise win the race with an infeasible packing.
 func autoSelfManaged3D(req PackRequest) bool {
-	return len(req.Constraints) == 0 && !req.Bearing.Enabled()
+	return len(req.Constraints) == 0 && !req.Bearing.Enabled() && len(req.Zones) == 0
 }

@@ -313,3 +313,51 @@ func TestZoneOverOriginStillPacks(t *testing.T) {
 		})
 	}
 }
+
+// auto must not win its race with a packer that ignores the zones. The plan set
+// dropped Fit and Layer only when *bearing* was enabled, and the self-managing
+// packers likewise — so with zones on and bearing off, auto raced LayerStack
+// (which delegates each layer to a 2-D bin and sees no zones), it won on bin
+// count, and the result was returned as success with twelve intrusions.
+func TestZonesAutoExcludesUnenforcingCandidates(t *testing.T) {
+	req := zoneReq("auto", true)
+	if autoSelfManaged3D(req) {
+		t.Error("auto would race blocks/assemble/LAFF with zones on; none of them enforce zones")
+	}
+	for _, pl := range auto3DPlans(req) {
+		if pl.strat == "layer" {
+			t.Errorf("auto races %q, whose LayerStack cannot enforce zones", pl.label)
+		}
+	}
+
+	// And the packing auto actually returns must honour them.
+	resp := PackCtx(context.Background(), req)
+	if resp.Error != "" {
+		t.Fatalf("refused: %s", resp.Error)
+	}
+	ps := make([]*d3.Placement3D, 0, len(resp.Placements))
+	for _, p := range resp.Placements {
+		ps = append(ps, d3.NewPlacement3D("", p.ItemID, p.X, p.Y, p.Z, p.W, p.D, p.H))
+	}
+	if !d3.ZonesOK(ps, req.zones()) {
+		t.Errorf("auto returned a zone-violating packing (winner %q)", resp.BestPacker)
+	}
+	if len(resp.Placements) != len(req.Items) {
+		t.Errorf("placed %d of %d", len(resp.Placements), len(req.Items))
+	}
+}
+
+// Fit stays in the race: its maximal-space strategy does enforce zones, even
+// though it has no bearing gate. Dropping it would cost packing quality for no
+// safety gain.
+func TestZonesAutoKeepsFit(t *testing.T) {
+	var found bool
+	for _, pl := range auto3DPlans(zoneReq("auto", true)) {
+		if pl.strat == "fit" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Fit dropped from the zoned auto race though it enforces zones")
+	}
+}
