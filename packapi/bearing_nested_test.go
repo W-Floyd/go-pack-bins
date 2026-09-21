@@ -293,3 +293,53 @@ func TestNestedGateAndValidatorAgree(t *testing.T) {
 		t.Errorf("gate and validator disagree: %s", msg)
 	}
 }
+
+// Nested solves reach pack3D through packByMode rather than dispatch, so the
+// bearing checks that guard a single-container solve have to run for each level
+// too. Without this a level using an algorithm that cannot enforce the gate
+// packed without it and said nothing.
+func TestNestedRejectsUnenforcingAlgorithm(t *testing.T) {
+	items := []ItemSpec{
+		{ID: "fragile", Width: 4, Depth: 4, Height: 1,
+			Scalars: map[string]float64{"weight": 1, "bearlimit": 0}},
+		{ID: "heavy", Width: 4, Depth: 4, Height: 1,
+			Scalars: map[string]float64{"weight": 50}},
+	}
+	for _, tc := range []struct {
+		level int
+		name  string
+	}{
+		{0, "inner (carton)"},
+		{1, "outer (pallet)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := nestedBearReq(items, nil)
+			req.Levels[tc.level].Algorithm = "laff"
+			resp, err := PackNestedCtx(context.Background(), req)
+			if err != nil {
+				t.Fatalf("pack: %v", err)
+			}
+			if !strings.Contains(resp.Error, "does not enforce load-bearing") {
+				t.Errorf("error = %q, want a refusal", resp.Error)
+			}
+			if !strings.Contains(resp.Error, tc.name) {
+				t.Errorf("error = %q, want it to name the level %q", resp.Error, tc.name)
+			}
+		})
+	}
+}
+
+// A mis-typed scalar name must be refused at the level that packs the items.
+func TestNestedRejectsUnusedScalarName(t *testing.T) {
+	req := nestedBearReq([]ItemSpec{
+		{ID: "g", Width: 4, Depth: 4, Height: 1, Scalars: map[string]float64{"weight": 1}},
+	}, nil)
+	req.Levels[0].Bearing.WeightScalar = "mass"
+	resp, err := PackNestedCtx(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if !strings.Contains(resp.Error, `no item has a "mass" scalar`) {
+		t.Errorf("error = %q", resp.Error)
+	}
+}

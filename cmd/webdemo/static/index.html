@@ -682,6 +682,39 @@
               <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="addInnerLexObjective()">+ Add</button>
             </div>
           </div>
+
+          <!-- the carton as a load-bearing object once it sits on a pallet -->
+          <div id="nested-bearing-section" style="display:none; margin-top:8px">
+            <div class="section-label">Carton load-bearing</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+              Goods inside cartons use the limits from the main panel. These rate the
+              <em>carton itself</em> once it becomes an item on the pallet. Where its
+              contents reach the lid, load passes through them and is checked against
+              their limits — the carton's own rating only covers what rests on its
+              structure.
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>Lid limit</label>
+                <input type="number" id="carton-limit" min="0" step="any" placeholder="(none)"
+                       oninput="scheduleAutoPack()" style="font-size:12px">
+              </div>
+              <div class="field">
+                <label>Lid pressure</label>
+                <input type="number" id="carton-pressure" min="0" step="any" placeholder="(none)"
+                       oninput="scheduleAutoPack()" style="font-size:12px">
+              </div>
+              <div class="field">
+                <label>Tare</label>
+                <input type="number" id="carton-tare" min="0" step="any" placeholder="0"
+                       oninput="scheduleAutoPack()" style="font-size:12px">
+              </div>
+            </div>
+            <label class="checkbox-row" style="margin-top:8px">
+              <input type="checkbox" id="carton-rigid" onchange="scheduleAutoPack()">
+              Rigid carton (its structure carries the load, whatever is inside)
+            </label>
+          </div>
         </div>
       </div>
 
@@ -1453,6 +1486,35 @@ function readBearing() {
   };
 }
 
+// readCartonBearing returns the carton's own load-bearing rating for nested
+// mode, or null when nothing is declared. Zero fields are omitted so the server
+// reads them as "unrestricted" rather than "rated at zero" — a carton with no
+// stated rating must not silently become fragile.
+function readCartonBearing() {
+  const num = id => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    return isFinite(v) && v > 0 ? v : 0;
+  };
+  const out = {
+    limit: num('carton-limit'),
+    pressure: num('carton-pressure'),
+    tare: num('carton-tare'),
+    rigid: !!document.getElementById('carton-rigid')?.checked,
+  };
+  if (!out.limit && !out.pressure && !out.tare && !out.rigid) return null;
+  return out;
+}
+
+function setCartonBearing(spec) {
+  spec = spec || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+  set('carton-limit', spec.limit);
+  set('carton-pressure', spec.pressure);
+  set('carton-tare', spec.tare);
+  const r = document.getElementById('carton-rigid');
+  if (r) r.checked = !!spec.rigid;
+}
+
 // setBearing restores the bearing inputs from a saved config.
 function setBearing(spec) {
   spec = spec || {};
@@ -1473,17 +1535,20 @@ function onBearingChange() {
   scheduleAutoPack();
 }
 
-// The bearing panel shows for 3-D single-container solves. Nested mode has no
-// per-level bearing field in the API, so it is hidden there rather than offering
-// a control the request cannot carry.
+// The bearing panel shows for any 3-D solve. In nested mode the same spec is
+// applied to both levels — goods inside cartons and cartons on pallets — and the
+// carton's own rating gets its own panel below.
 function updateBearingVisibility() {
   const sec = document.getElementById('bearing-section');
   if (!sec) return;
   const threeD = document.getElementById('mode').value === '3d';
-  sec.style.display = (threeD && !nestedEnabled) ? '' : 'none';
+  sec.style.display = threeD ? '' : 'none';
 
   const on = !!document.getElementById('bearing-on')?.checked;
   document.getElementById('bearing-fields').style.display = on ? '' : 'none';
+  // The carton's own rating only means something in nested mode with bearing on.
+  const carton = document.getElementById('nested-bearing-section');
+  if (carton) carton.style.display = (threeD && nestedEnabled && on) ? '' : 'none';
 
   // Warn as soon as the algorithm cannot enforce it, rather than at solve time.
   const algo = document.getElementById('algorithm').value;
@@ -1945,6 +2010,7 @@ function currentConfig() {
     bin: { width: num('bin-w', 10), height: num('bin-h', num('bin-w', 10)), depth: num('bin-d', num('bin-w', 10)) },
     contact: readContactPercent(),
     bearing: readBearingConfig(),
+    carton_bearing: readCartonBearing(),
     refine_voids: document.getElementById('refine-voids')?.checked || false,
     constraints: constraints.map(c => ({ ...c })),
     preferences: preferences.map(p => ({ ...p })),
@@ -2153,6 +2219,7 @@ function applyState(s) {
   if (document.getElementById('allow-rotate')) document.getElementById('allow-rotate').checked = !!s.allow_rotate;
   setContact(s.contact); // percentages, matching readContactPercent()
   setBearing(s.bearing);
+  setCartonBearing(s.carton_bearing);
   if (document.getElementById('refine-voids')) document.getElementById('refine-voids').checked = !!s.refine_voids;
 
   // GBPP bin cost + lexicographic objectives, with their panels shown to match.
@@ -2885,6 +2952,18 @@ async function runNestedPack(auto = false) {
   if (innerAlgo === 'lex') inner.lex_objectives = innerLexObjectives.slice();
   const innerOpts = collectAlgoOptions('inner');
   if (innerOpts) inner.algorithm_options = innerOpts;
+
+  // Bearing applies at both levels: the same item scalars name weights and
+  // limits for the goods, and the cartons inherit the spec when they become
+  // items on the pallet. The carton's own structural rating rides on the outer
+  // level, which is where a carton is an item.
+  const nestedBearing = readBearing();
+  if (nestedBearing) {
+    inner.bearing = nestedBearing;
+    outer.bearing = nestedBearing;
+    const cb = readCartonBearing();
+    if (cb) outer.container_bearing = cb;
+  }
 
   const body = {
     mode,

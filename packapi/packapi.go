@@ -2605,6 +2605,13 @@ func doNestedPack(ctx context.Context, req NestedPackRequest) (NestedPackRespons
 	if len(req.Levels) < 2 {
 		return NestedPackResponse{}, fmt.Errorf("nested packing requires at least 2 levels")
 	}
+	// Nested solves reach pack3D through packByMode, not dispatch, so the bearing
+	// checks that guard a single-container solve have to run here as well —
+	// otherwise a level using an algorithm that cannot enforce the gate would
+	// silently pack without it.
+	if msg := nestedBearingSpecError(req); msg != "" {
+		return NestedPackResponse{Error: msg}, nil
+	}
 
 	// Level 0: pack items into inner bins (cartons).
 	// Inherit the outer level's bottom-support requirement so the physical
@@ -2827,6 +2834,40 @@ func cartonIndexOf(id string) int {
 		return -1
 	}
 	return n
+}
+
+// nestedBearingSpecError applies the single-container bearing checks to each
+// nested level, naming the level so the message is actionable.
+func nestedBearingSpecError(req NestedPackRequest) string {
+	names := []string{"inner (carton)", "outer (pallet)"}
+	for i, lvl := range req.Levels {
+		if !lvl.Bearing.Enabled() {
+			continue
+		}
+		// Level 1 packs cartons, not the caller's items, so the scalar-presence
+		// checks only make sense for the level that packs the items themselves.
+		probe := PackRequest{
+			Mode: req.Mode, Algorithm: lvl.Algorithm, Bearing: lvl.Bearing,
+			Containers: lvl.Containers,
+		}
+		if i == 0 {
+			probe.Items = req.Items
+		} else {
+			probe.Items = []ItemSpec{{Scalars: map[string]float64{
+				lvl.Bearing.WeightScalar:   0,
+				lvl.Bearing.LimitScalar:    0,
+				lvl.Bearing.PressureScalar: 0,
+			}}}
+		}
+		if msg := probe.bearingError(); msg != "" {
+			name := "level " + strconv.Itoa(i)
+			if i < len(names) {
+				name = names[i]
+			}
+			return msg + " (" + name + ")"
+		}
+	}
+	return ""
 }
 
 // nestedBearingError validates a finished nested packing against the load-path

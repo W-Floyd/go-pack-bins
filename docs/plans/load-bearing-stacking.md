@@ -553,7 +553,32 @@ Once the gate reads contents itself, `BearBox.Limit` on a carton means its *own 
 at 500 when its real rating was 1 — far too permissive. It now carries the container's own
 rating and `cartonEffectiveLimit` is deleted rather than left to mislead.
 
-### 11.4 Outstanding
+### 11.4 Demo UI, and a seventh escape
 
-- Demo UI for the nested bearing controls.
-- Shear strength remains deferred.
+The bearing panel now shows in nested mode too, applying the same spec to both levels — the
+goods inside cartons and the cartons on pallets — with a "Carton load-bearing" panel below
+it for the carton's own rating: lid limit, lid pressure, tare and rigid. Zero fields are
+omitted from the request so the server reads them as unrestricted; a carton with no stated
+rating must not silently become fragile.
+
+**Nested solves bypassed the bearing validation entirely.** `doNestedPack` reaches `pack3D`
+through `packByMode`, not `dispatch` or `PackCtx`, so a level using an algorithm that
+cannot enforce the gate packed without it and said nothing — verified by stacking a 50 kg
+item on a fragile one under `laff`. `nestedBearingSpecError` now applies the
+single-container checks per level and names the level in the message. The scalar-presence
+checks apply only to level 0, which packs the caller's items; level 1 packs cartons.
+
+That is the **seventh** distinct solve path this constraint has had to be threaded through
+(`pack3D`, `streamSolve`, the registry's `auto`, `sweepRefine3D`'s decoder, the balanced
+path, `containerFactory`, and now nested). The recurring lesson is unchanged: this codebase
+has consistently more entry, factory and mutation points than its own comments claim, and
+each one had to be found by testing the behaviour rather than by reading.
+
+Verified end to end: three cartons whose contents are rated 500 stack three-high on one
+pallet despite each lid being rated 1, because the load runs through the flush posts; drop
+the contents to 5 and the same order needs three pallets.
+
+### 11.5 Outstanding
+
+- Shear strength remains deferred: a different failure mode from crush, and worth its own
+  design rather than being folded into this one.
