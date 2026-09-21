@@ -3,6 +3,7 @@ package packapi
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -191,7 +192,7 @@ func TestZonesDisabledIsUnchanged(t *testing.T) {
 // occupy the pipe and the doorway. A preset that packs identically either way
 // shows nothing.
 func TestZonePresetDemonstrates(t *testing.T) {
-	const label = "Basement: pipe overhead, doorway clear (keep-out zones)"
+	const label = "Basement: keep the aisle clear, pack under the pipe"
 	var p *Preset
 	for _, c := range Presets()["3d"] {
 		if c.Label == label {
@@ -243,39 +244,39 @@ func TestZonePresetDemonstrates(t *testing.T) {
 			len(on.Placements), len(p.Items))
 	}
 
-	// Every zone must actually be in the way. The first version of this preset
-	// put ten small items in a large bin: they filled one floor layer, the pipe
-	// overhead was never approached, and only the doorway did anything — a
-	// decorative zone that the bin-level checks above happily accepted.
+	// Every zone must actually be in the way, measured by how much cargo the
+	// unzoned packing puts inside it. An earlier version checked only that the
+	// zones were clear afterwards, which a zone floating above the packing
+	// satisfies trivially — the first preset had a pipe the items never reached.
+	overlapVol := func(ps []PlacementResult, z ZoneSpec) float64 {
+		var v float64
+		for _, q := range ps {
+			ow := math.Min(q.X+q.W, z.X+z.W) - math.Max(q.X, z.X)
+			od := math.Min(q.Y+q.D, z.Y+z.D) - math.Max(q.Y, z.Y)
+			oh := math.Min(q.Z+q.H, z.Z+z.H) - math.Max(q.Z, z.Z)
+			if ow > 0 && od > 0 && oh > 0 {
+				v += ow * od * oh
+			}
+		}
+		return v
+	}
+	var displaced, packed float64
+	for _, q := range off.Placements {
+		packed += q.W * q.D * q.H
+	}
 	for i, z := range p.Zones {
-		reached := false
-		for _, q := range off.Placements {
-			if q.Z+q.H > z.Z && q.Z < z.Z+z.H {
-				reached = true
-				break
-			}
+		v := overlapVol(off.Placements, z)
+		if v <= 0 {
+			t.Errorf("zone %d holds no cargo in the unzoned packing, so it obstructs nothing", i)
 		}
-		if !reached {
-			t.Errorf("zone %d spans z %v..%v but the unzoned packing never reaches that height, "+
-				"so it constrains nothing", i, z.Z, z.Z+z.H)
-		}
+		displaced += v
 	}
-
-	// And the obstruction must show: routing around the zones has to change the
-	// shape of the packing, not merely shuffle items within the same envelope.
-	top := func(r PackResponse) float64 {
-		var t float64
-		for _, q := range r.Placements {
-			if q.Z+q.H > t {
-				t = q.Z + q.H
-			}
-		}
-		return t
+	// And the displacement must be big enough to see, not a sliver.
+	if packed > 0 && displaced/packed < 0.1 {
+		t.Errorf("the zones displace only %.1f%% of the packed volume — too little to be visible",
+			100*displaced/packed)
 	}
-	if top(on) <= top(off) {
-		t.Errorf("packing reaches z=%v with the zones and z=%v without — the obstruction is not visible",
-			top(on), top(off))
-	}
+	t.Logf("zones displace %.0f of %.0f packed volume (%.0f%%)", displaced, packed, 100*displaced/packed)
 }
 
 // A zone covering the origin must not brick the bin. An empty bin's only

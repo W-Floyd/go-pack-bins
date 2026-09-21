@@ -1536,9 +1536,15 @@ function drawZones(scene, offX, toThree) {
     mesh.position.set(offX + tx, ty, tz);
     mesh.renderOrder = -1;
     scene.add(mesh);
+    // depthTest off so the cage shows through whatever is packed in front of it.
+    // A zone is part of the container, like the bin wireframe — if it can be
+    // hidden by the items packed around it, it cannot be checked by eye.
     const line = new THREE.LineSegments(new THREE.EdgesGeometry(geo),
-      new THREE.LineBasicMaterial({ color: 0xffb02e, transparent: true, opacity: 0.85 }));
+      new THREE.LineBasicMaterial({
+        color: 0xffb02e, transparent: true, opacity: 0.9, depthTest: false,
+      }));
     line.position.copy(mesh.position);
+    line.renderOrder = 999;
     scene.add(line);
   }
 }
