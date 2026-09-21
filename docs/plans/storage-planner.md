@@ -167,12 +167,47 @@ Given that, egress is reachability for a body of the item's size:
 - Flood-fill from the exits through traversable cells. The item can leave if the space it
   extracts into is in the filled set.
 
-Carrying is translation only — no rotating the box in a doorway. That is the conservative
-direction (it will refuse some routes a person could manage) and it avoids turning this
-into a configuration-space planner over `SO(3)`, which is not a fight worth having for a
-basement.
+### 5.4 Rotation is part of the route
 
-### 5.4 Not everything has to come out
+Turning a box on its side to get it through a door is a normal thing to do, and the
+library already knows which items may be turned: `allow_rotate` per item, expanded by
+`computeOrientations` into the distinct axis-aligned orientations — at most six for a box,
+fewer when two dimensions match.
+
+So the search space is **(cell × orientation)**, not cell alone, with two kinds of move:
+
+- **Translate** — neighbouring cell, same orientation, the usual erosion test.
+- **Rotate in place** — same cell, different permitted orientation.
+
+A rotation sweeps volume that neither the start nor the end pose occupies, so testing
+both poses would be optimistic — the classic way to produce a route that cannot actually
+be walked. The conservative test is that the *swept* region is clear: for a turn about the
+vertical axis, a square of side equal to the footprint diagonal. Cheap, axis-aligned, and
+wrong only in the safe direction.
+
+An item that may not rotate has exactly one orientation, and the search collapses to pure
+translation. That is the special case, not the rule — which is the opposite of how an
+earlier draft of this plan had it.
+
+### 5.5 A container is as restricted as its contents
+
+A carton of freely-tumbling items may be turned on its side. The same carton with one
+this-side-up item in it may not. So a container's permitted orientations are the
+**intersection** of its own and every one of its contents': one restricted item restricts
+the whole box, and the rule composes upward through nesting, a pallet being as restricted
+as its strictest carton.
+
+This matters beyond egress — it is how the carton should be *packed* at the level above,
+not just how it is carried out.
+
+**Nested packing gets this wrong today**, though in the safe direction: `doNestedPack`
+builds each carton item without setting `AllowRotate`, so it defaults to false and no
+carton is ever turned. That protects the this-side-up case by never exercising the
+freedom, at the cost of every carton whose contents would happily tumble. Replacing it
+with the intersection is a small, self-contained change to existing code and does not
+depend on the rest of this plan.
+
+### 5.6 Not everything has to come out
 
 Some things are installed once. Shelving is bolted to a wall; a cabinet is carried in
 empty, assembled, and never leaves; a chest freezer goes in the corner and stays. Being
@@ -192,12 +227,16 @@ So **removability is a per-item property**, not a global rule:
 This also gives the planner something useful to say: not just "this fits" but "these six
 boxes fit and can be got out again; this one will be stuck behind the shelving".
 
-### 5.5 What it costs, and what it buys
+### 5.7 What it costs, and what it buys
 
-The flood fill is per distinct item size rather than per item, so a room of uniform boxes
-costs one fill. It runs **after** a candidate layout is built, not inside the placement
-gate: routing every candidate placement would be far too slow, and unlike bearing there is
-no cheap local test — a placement can block a route on the other side of the room.
+The flood fill is per distinct *(size, permitted-orientation set)* rather than per item,
+so a room of uniform boxes costs one fill however many there are. Rotation multiplies each
+fill by the number of orientations — at most six, usually one or two once equal dimensions
+collapse — which is a constant factor, not a change in kind.
+
+It runs **after** a candidate layout is built, not inside the placement gate: routing
+every candidate placement would be far too slow, and unlike bearing there is no cheap
+local test — a placement can block a route on the other side of the room.
 
 That makes egress a *validator* over a finished plan, with the same consequence the nested
 bearing check had: a plan that fails is reported, not repaired. The repair is the layout
@@ -251,9 +290,11 @@ thing a single blended number throws away.
   (§5) answers *whether* a box can get out, not how long it takes or in what order things
   are fetched; the cost of reaching something is the static proxy in the bearing plan's
   §13.
-- **Not a motion planner.** Egress is axis-aligned translation of the item's bounding box
-  through free space. No rotating a wardrobe through a doorway, no tilting, no carrying it
-  at an angle — all of which a person does and none of which is worth the machinery here.
+- **Not a general motion planner.** Egress searches position and the item's *permitted
+  axis-aligned orientations* (§5.4). Turning a box on its side to get it through a door is
+  in; tilting it diagonally, carrying it at an angle, or shuffling it past an obstacle in
+  a continuous arc is out. Those are things a person does and a `SO(3)` planner would need
+  — the discrete orientation set is where the line sits.
 - **Not a rack-engineering tool.** Compartment capacity is the load-bearing rule already
   there; deflection, anchoring and seismic bracing are out.
 - **Not a free-form 2-D layout.** Furniture lines up in runs against walls; it does not
@@ -264,18 +305,21 @@ thing a single blended number throws away.
 
 ## 10. Suggested order
 
-1. Stage A alone, with tests, for **open shelving only**. Pure geometry, and it replaces
+1. **The container-inherits-orientation rule (§5.5).** Independent of everything else
+   here, a small change to nested packing that already exists, and pessimistic today in a
+   way that costs packing quality. Nothing needs to be designed first.
+2. **Stage A**, with tests, for **open shelving only**. Pure geometry, and it replaces
    hand arithmetic that has already caused one wrong demo.
-2. Drawers and cupboards as further unit kinds, once the shelving case is solid. The
-   retrievability difference (§3) is the part to get right, and it deserves its own tests
+3. Drawers and cupboards as further unit kinds, once the shelving case is solid. The
+   access-rule difference (§3) is the part to get right, and it deserves its own tests
    rather than riding along.
-3. Stage B with a *fixed* layout in a *single* location, so containerising and filling can
-   be judged without the searches moving underneath them.
-4. **Exits and egress (§5)**, still against a fixed layout. Worth doing before the layout
-   search, because "can everything get out" is the constraint the search will be trying to
-   satisfy, and building the search first means tuning it against a check that does not
-   exist yet.
-5. Locations, then the within-room search, then the cross-location allocation.
+4. **Stage B** with a *fixed* layout in a *single* location, so containerising and filling
+   can be judged without the searches moving underneath them.
+5. **Exits and egress (§5)**, still against a fixed layout: translation first, rotation
+   second. Before the layout search, because "can everything get out" is the constraint
+   that search will be trying to satisfy, and building it first means tuning against a
+   check that does not exist yet.
+6. Locations, then the within-room search, then the cross-location allocation.
 
 Each step is useful on its own, which is the test of whether the decomposition is right.
 
@@ -304,3 +348,11 @@ Each step is useful on its own, which is the test of whether the decomposition i
   through a just-wide-enough gap is missed, or worse, a route through a just-too-narrow
   one is allowed. Erosion by the item's bounding box is conservative in the first
   direction; it must not be made optimistic in the second by rounding cells generously.
+- **Rotation is the easy place to be optimistic.** Testing only the start and end poses of
+  a turn ignores the volume swept between them, and a route built on that is one that
+  cannot be walked. The swept-region test (§5.4) is the guard, and it needs a case where
+  both poses fit and the turn does not — otherwise the bug ships looking correct.
+- **The container-inherits rule has to hold at every level.** Intersecting contents'
+  orientations is obvious one level deep and easy to drop when a carton goes inside a
+  crate. A pallet is as restricted as its strictest carton, which is as restricted as its
+  strictest item, and nothing in the existing nested code carries that today.
